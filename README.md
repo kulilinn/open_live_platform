@@ -1,2 +1,110 @@
 # open_live_platform
-whole pack for live
+
+这是 `D:\my\LiveMedia` 的 Go 核心运行链路移植。项目用一个进程提供公开 API、直播房间、管理接口、边缘事件入口、WebSocket relay 和内部 JSON RPC。
+
+需要 Go 1.24 或更高版本。
+
+## 当前架构
+
+- `cmd/platform` 只负责信号处理和启动。
+- `internal/app` 负责配置、状态组装、路由注册和优雅停机。
+- `internal/auth` 和 `internal/live` 定义账号与房间接口，并提供本地开发用的内存实现。
+- `internal/store/postgres` 用 pgx 连接 PostgreSQL，保存账号、会话、房间状态和聊天记录。
+- `internal/httpapi`、`internal/admin`、`internal/edge` 只负责 HTTP 适配。
+- `internal/transport/httpx` 提供共享 JSON、错误、认证和路径工具。
+- `internal/relay` 提供 WebSocket 适配。
+- `internal/rpc` 提供内部 JSON RPC。
+
+## 运行
+
+```powershell
+$env:PLATFORM_ADDR=':8080'
+$env:ADMIN_TOKEN='admin'
+$env:EDGE_TOKEN='edge'
+$env:RELAY_SECRET='dev-secret'
+go run .\cmd\platform
+```
+
+## 核心接口
+
+- `GET /healthchecker` 和 `GET /status`
+- `POST /api/auth/signup` 与 `POST /api/auth/signin`
+- `POST /api/live/room/start` 开播，`POST /api/live/room/setting` 修改本场标题或密码
+- `POST /api/live/room/list` 查询观众端房间列表
+- `POST /api/live/room/join/{room}` 与 `POST /api/live/room/leave/{room}`
+- `GET /api/live/room/info/{room}`、`/audiences/{room}`、`/admins/{room}`
+- `POST /api/live/room/chat` 发送文本，`POST /api/live/room/messages` 读取本场聊天历史
+- `GET /api/device/qrcode` 领取 WebSocket 连接地址
+- `GET /api/connector/{token}/{sig}` WebSocket 握手
+- `GET /api/admin/rooms`、`GET /api/admin/users`
+- `POST /api/edge/events`
+- `POST /internal/rpc/platform.stats`
+
+## 观众查找房间
+
+使用登录令牌请求 `POST /api/live/room/list`。例如，`{"online":true,"page":1,"pageSize":20}` 取正在直播的前 20 个房间。改为 `"online":false` 可查已关播房间。分页请求省略 `online` 时，开播房间排在前面，同一状态按房间 ID 升序排列。
+
+返回对象中的 `status` 为 `"200"`，`data` 为本页房间数组，`pages` 为符合筛选条件的总页数。页码从 1 开始，分页时默认取第 1 页、每页 20 个。超出最后一页时 `data` 为 `[]`。`pageSize` 为 0 时仅计数，`data` 为 `[]`，`pages` 为匹配房间数。
+
+旧客户端发送空请求体或 `{}` 时，仍按 ID 升序收到全部房间的数组。
+
+## 客户端进入聊天室
+
+主播调用 `POST /api/live/room/start`。例如，请求体 `{"title":"晚场","password":"开场见"}` 会创建密码房，省略密码或传空字符串会创建公开房。开播响应、房间详情和列表的 `isLock` 表示本场是否需要密码。
+
+直播中，主播可用自己的登录令牌调用 `POST /api/live/room/setting`。`{"subject":"下半场"}` 更新标题（也支持 `title`），`{"password":"新口令"}` 从下一次进房起使用新密码，`{"password":""}` 立即改为公开房。可以一次提交两个字段，省略或传 `null` 的字段保留原值。成功响应的 `status` 为 `"200"`，`data` 为更新后的房间。已进房的观众继续聊天。此接口仅用于已开播的房间。
+
+观众用自己的登录令牌调用 `POST /api/live/room/join/{room}`。公开房可直接发空请求体。密码房传 `{"password":"开场见"}`，大小写和前后空格均参与匹配。房主可以免密进房。密码错误返回 403，验证成功会清零该观众的错误次数。连续输错五次后，该观众再进房返回 429。换成另一个密码时保留错误次数，主播取消密码或关播时清零全房计数。进房成功返回 204。
+
+进房后，客户端用自己的 `Authorization: Bearer <token>` 请求 `GET /api/device/qrcode`，响应包含 `status` 和完整的 WebSocket 地址 `url`。浏览器示例中的 `token` 为当前用户的登录令牌，`roomId` 为开播接口返回的房间 ID。
+
+```javascript
+const response = await fetch("/api/device/qrcode", {
+  headers: { Authorization: `Bearer ${token}` }
+});
+const { url } = await response.json();
+const address = new URL(url);
+address.searchParams.set("room_id", roomId);
+const socket = new WebSocket(address);
+socket.onmessage = event => console.log(JSON.parse(event.data));
+socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" }));
+```
+
+连接票据在当前服务进程内有效，限 60 秒内发起一次连接，重连时重新领取。已建立的连接可继续收发。通过反向代理提供服务时，把 `RELAY_PUBLIC_URL` 设为客户端可达的基址，例如 `wss://live.example.com`。直接连接服务时默认使用请求的主机及 TLS 状态生成地址。
+
+## 聊天记录
+
+使用登录令牌向 `POST /api/live/room/messages` 发送 `{"id":"42","page":0,"size":20}`。`id` 是字符串房间号，页码从 0 开始，默认每页 100 条，最新的在前。`size: 0` 返回全部可见记录。响应沿用 Rust 的 `{"status":"200","data":[...]}`。每项的 `content` 为 `live_chat`，`queue` 为字符串房间号，`payload` 为数组。Go 每条文本单独成批，原前端可继续从 `payload[i].message.message` 读正文，从 `payload[i].message.userInfo.name` 读昵称。
+
+房主和本场已进房成员可读。未进房、已离开、被踢或房间已关闭时，已登录用户得到 `data: []`。每场最多回看最近 100 条文本，连续 24 小时无人发言后重新计入历史，重新开播从空历史开始。PostgreSQL 模式支持服务重启后继续回看。
+
+`POST /api/live/room/chat` 接受两种文本格式。
+
+- Go 格式 `{"room_id":42,"text":"你好"}` 成功返回 HTTP 204。WebSocket 发送的聊天也可从历史接口读取。
+- Rust 格式 `{"room":"42","channel":"chat","priority":0,"message":{"msgType":"C","msgGroup":"chat","userInfo":{"uid":"7","name":"小林"},"message":"你好"}}` 返回 `status`、布尔值 `data` 和数值 `msgId`。历史保留原消息体及其扩展字段，外层 `sender` 取自登录身份，`id`、`room`、`sender` 和 Unix 秒 `timestamp` 均为字符串。
+
+## PostgreSQL
+
+准备一个专用数据库，例如 `open_live_platform`。连接用户需要在目标 schema 上有建表权限。以下命令用于本地 PowerShell，连接字符串中的账号和密码换成自己的值。
+
+```powershell
+$env:DATABASE_URL='postgres://app:password@127.0.0.1:5432/open_live_platform?sslmode=disable'
+go run ./cmd/platform
+```
+
+服务启动时按顺序执行内置的[数据库迁移脚本](internal/store/postgres/migrations)。设置了 `DATABASE_URL` 时，连接或迁移失败会终止启动。省略该变量时使用内存模式，重启即清空。已有 Rust/MySQL 数据的导入需要单独迁移。
+
+PG 模式下，账号、登录会话、房间、成员、管理员、禁言、踢出和聊天记录可跨重启保留。房间密码以加盐哈希保存，本场密码及观众输错次数随服务重启保留，关播时清除。旧版本的房间升级后按公开房处理。重新开播时按房间业务规则重置本场成员和管理状态。WebSocket 连接及订阅仅在当前服务进程内有效，重启后客户端需重新连接。
+
+升级到聊天历史版本时，数据库保留已有消息。旧版本未记录聊天的场次边界，升级时在线房间仅展示最后一次房间更新后可确认属于本场的消息。之后的开播、关播会记录精确边界。
+
+## 检查
+
+```powershell
+go test ./...
+go vet ./...
+```
+
+配置 `OPEN_LIVE_TEST_DATABASE_URL` 后，`go test -count=1 ./internal/app` 会执行真实数据库回归测试。请使用专用测试数据库。
+
+模块边界和源项目分析见 [MIGRATION_ANALYSIS.md](./MIGRATION_ANALYSIS.md)。
