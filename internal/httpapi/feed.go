@@ -10,12 +10,16 @@ import (
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/feed"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/subscription"
 	"open_live_platform/internal/transport/httpx"
 )
 
-func RegisterFeed(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, subscriptions subscription.Store, inbox feed.Store, messages dm.Store, moderator dm.Moderator) {
+func RegisterFeed(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, subscriptions subscription.Store, inbox feed.Store, messages dm.Store, moderator dm.Moderator, reviewer ...posts.Reviewer) {
 	s := subscriptionAPI{server: server{accounts: accounts, rooms: rooms}, store: subscriptions, inbox: inbox}
+	if len(reviewer) > 0 {
+		s.staticReviewer = reviewer[0]
+	}
 	const base = "/api/feed/message/"
 	route := func(method, path string, f userHandler) { mux.HandleFunc(method+" "+base+path, s.authenticated(f)) }
 	reply := func(w http.ResponseWriter, data any, err error) {
@@ -170,18 +174,27 @@ func RegisterFeed(mux *http.ServeMux, accounts auth.AccountStore, rooms live.Roo
 			return
 		}
 		if *body.Data != "" && *body.Data != config.Welcome {
-			if moderator == nil {
-				dmModerationUnavailable(w)
-				return
-			}
-			pass, err := moderator.ApproveDirectMessage(ctx, dm.SendInput{SenderID: uid, ReceiverID: uid, Content: *body.Data})
-			if err != nil {
-				dmModerationUnavailable(w)
-				return
-			}
-			if !pass {
-				dmErrorResponse(w, 200, "4062", "welcome audit reject")
-				return
+			if s.staticReviewer != nil {
+				var ok bool
+				ctx, ok = submitStaticReviews(w, ctx, s.staticReviewer, uid, staticContent{typeID: posts.ReviewWelcome, object: uid,
+					kind: "subscription_welcome", after: *body.Data, refusal: "4062"})
+				if !ok {
+					return
+				}
+			} else {
+				if moderator == nil {
+					dmModerationUnavailable(w)
+					return
+				}
+				pass, err := moderator.ApproveDirectMessage(ctx, dm.SendInput{SenderID: uid, ReceiverID: uid, Content: *body.Data})
+				if err != nil {
+					dmModerationUnavailable(w)
+					return
+				}
+				if !pass {
+					dmErrorResponse(w, 200, "4062", "welcome audit reject")
+					return
+				}
 			}
 			err = inbox.SetFeedWelcome(ctx, uid, *body.Data)
 			if err != nil {

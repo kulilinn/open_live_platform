@@ -2,13 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -26,29 +29,54 @@ func (s server) setLanguage(w http.ResponseWriter, r *http.Request, userID int64
 }
 
 func (s server) setUserInfo(w http.ResponseWriter, r *http.Request, userID int64) {
-	var input struct {
-		TranslationLanguage *string `json:"transLang"`
-		TranslationEnabled  *bool   `json:"trans"`
-	}
+	var input auth.UserProfilePatch
 	if !httpx.Decode(w, r, &input) {
 		return
 	}
-	if input.TranslationLanguage != nil || input.TranslationEnabled != nil {
-		user, found, err := s.accounts.Find(r.Context(), userID)
+	if input.IdentityChanged() || input.Trans != nil || input.Language != nil {
+		ctx := r.Context()
+		user, found, err := s.accounts.Find(ctx, userID)
 		if err != nil || !found {
-			httpx.Error(w, http.StatusInternalServerError, "could not read translation settings")
+			httpx.Error(w, http.StatusInternalServerError, "could not read user settings")
 			return
 		}
-		if err := s.accounts.SetTranslationSettings(r.Context(), userID, input.TranslationEnabled, input.TranslationLanguage); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "could not update translation language")
+		if input.SearchName != nil {
+			if len(*input.SearchName) < 3 || len(*input.SearchName) > 15 {
+				anchorStatus(w, http.StatusBadRequest, "4072", "invalid search name length")
+				return
+			}
+			if !anchorSearchName.MatchString(*input.SearchName) {
+				anchorStatus(w, http.StatusOK, "4033", "invalid search name")
+				return
+			}
+		}
+		for _, value := range []*string{input.DisplayName, input.Photo, input.Banner} {
+			if value != nil && strings.ContainsRune(*value, 0) {
+				httpx.Error(w, http.StatusBadRequest, "invalid profile content")
+				return
+			}
+		}
+		profile := auth.PublicProfile(user)
+		ctx, ok := submitStaticReviews(w, ctx, s.staticReviewer, userID,
+			staticContent{typeID: posts.ReviewAvatar, object: userID, kind: "user_avatar", before: profile.Photo, after: optionalStaticValue(input.Photo), refusal: "4055", image: true},
+			staticContent{typeID: posts.ReviewDisplayName, object: userID, kind: "user_display_name", before: user.Account, after: optionalStaticValue(input.DisplayName), refusal: "4058"},
+			staticContent{typeID: posts.ReviewSearchName, object: userID, kind: "user_search_name", before: profile.SearchName, after: optionalStaticValue(input.SearchName), refusal: "4059"})
+		if !ok {
+			return
+		}
+		if err := s.accounts.UpdateUserProfile(ctx, userID, input); errors.Is(err, auth.ErrSearchNameExists) {
+			anchorStatus(w, http.StatusOK, "4032", err.Error())
+			return
+		} else if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not update user settings")
 			return
 		}
 		enabled, language := user.TranslationEnabled, user.TranslationLanguage
-		if input.TranslationEnabled != nil {
-			enabled = *input.TranslationEnabled
+		if input.Trans != nil {
+			enabled = *input.Trans
 		}
-		if input.TranslationLanguage != nil {
-			language = *input.TranslationLanguage
+		if input.Language != nil {
+			language = *input.Language
 		}
 		if live.TranslationPreferenceChanged(user.TranslationEnabled, enabled, user.TranslationLanguage, language) {
 			if err := s.rooms.ChangeViewerTranslation(r.Context(), userID, live.ActiveTranslationLanguage(enabled, language)); err != nil {

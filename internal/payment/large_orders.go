@@ -1,16 +1,13 @@
 package payment
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/mail"
-	"net/url"
 	"strings"
-	"time"
+
+	"open_live_platform/internal/notifyemail"
 )
 
 type LargeOrderConfig struct {
@@ -26,9 +23,8 @@ type LargeOrderService struct {
 }
 
 type orderNotification struct {
-	notification, template string
-	from                   orderEmailAddress
-	client                 *http.Client
+	template string
+	client   *notifyemail.Client
 }
 
 type LargeOrderConfirmation struct{ orderNotification }
@@ -80,17 +76,11 @@ func NewLargeOrderConfirmation(config LargeOrderConfig) (*LargeOrderConfirmation
 }
 
 func newOrderNotification(config LargeOrderConfig, template string) (orderNotification, error) {
-	parsed, err := url.Parse(config.NotificationURL)
-	address, mailErr := mail.ParseAddress(config.FromAddress)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil ||
-		mailErr != nil || template == "" {
+	client, err := notifyemail.New(notifyemail.Config{URL: config.NotificationURL, From: notifyemail.Address{Address: config.FromAddress, Name: config.FromName}})
+	if err != nil || template == "" {
 		return orderNotification{}, errors.New("invalid large-order notification configuration")
 	}
-	return orderNotification{notification: config.NotificationURL, template: template,
-		from: orderEmailAddress{Address: address.Address, Name: config.FromName}, client: &http.Client{
-			Timeout:       5 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}}, nil
+	return orderNotification{template: template, client: client}, nil
 }
 
 func (s *LargeOrderService) Create(ctx context.Context, userID int64) (string, error) {
@@ -105,11 +95,6 @@ func (s *LargeOrderService) Create(ctx context.Context, userID int64) (string, e
 	return order.No, nil
 }
 
-type orderEmailAddress struct {
-	Address string `json:"address"`
-	Name    string `json:"name"`
-}
-
 func (s *LargeOrderService) Notify(ctx context.Context, email, displayName, searchName string) error {
 	return s.send(ctx, email, displayName, map[string]string{"nick_name": displayName, "search_name": searchName, "email": email})
 }
@@ -119,38 +104,7 @@ func (s *LargeOrderConfirmation) Notify(ctx context.Context, email, displayName,
 }
 
 func (s orderNotification) send(ctx context.Context, email, displayName string, fields map[string]string) error {
-	address, err := mail.ParseAddress(email)
-	if err != nil || address.Address != email {
-		return errors.New("invalid large-order receipt email")
-	}
-	inner, err := json.Marshal(map[string]any{
-		"template_key": s.template, "track_clicks": true, "track_opens": true, "from": s.from,
-		"to":         []map[string]orderEmailAddress{{"email_address": {Address: email, Name: displayName}}},
-		"merge_info": fields,
-	})
-	if err != nil {
-		return err
-	}
-	body, err := json.Marshal(map[string]any{"type": 3, "content": string(inner)})
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.notification, io.NopCloser(bytes.NewReader(body)))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.ContentLength = int64(len(body))
-	response, err := s.client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return errors.New("large order notification was not accepted")
-	}
-	_, err = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-	return err
+	return s.client.Send(ctx, s.template, notifyemail.Address{Address: email, Name: displayName}, fields, "")
 }
 
 type largeOrderKey struct {

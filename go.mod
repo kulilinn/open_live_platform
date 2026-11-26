@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/AgoraIO-Community/go-tokenbuilder v1.5.0
+	github.com/asalih/go-mscfb v0.1.2
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/service/translate v1.43.2
 	github.com/aws/smithy-go v1.28.5
@@ -14,10 +15,12 @@ require (
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/prometheus/client_golang v1.22.0
+	github.com/sergrom/xls-reader v1.0.1
 	github.com/twmb/franz-go v1.19.5
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20250603004440-37eecbb8927f
 	github.com/twmb/franz-go/pkg/kmsg v1.11.2
 	github.com/xuri/excelize/v2 v2.9.1
+	go.etcd.io/etcd/api/v3 v3.5.24
 	go.etcd.io/etcd/client/v3 v3.5.24
 	go.mozilla.org/pkcs7 v0.9.0
 	golang.org/x/crypto v0.47.0
@@ -36,6 +39,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -50,7 +54,6 @@ require (
 	github.com/tiendc/go-deepcopy v1.6.0 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
 	github.com/xuri/nfp v0.0.1 // indirect
-	go.etcd.io/etcd/api/v3 v3.5.24 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.24 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect

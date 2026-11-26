@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/feed"
+	"open_live_platform/internal/posts"
 )
 
 func (s *Store) FeedConfig(ctx context.Context, id int64) (feed.Config, error) {
@@ -30,9 +31,13 @@ func (s *Store) FeedEntries(ctx context.Context, id int64) ([]feed.Entry, error)
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[feed.Entry])
 }
 func (s *Store) SetFeedWelcome(ctx context.Context, id int64, welcome string) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO message_config(user_id,dating,dated,welcome) VALUES($1,false,true,$2)
-		ON CONFLICT(user_id) DO UPDATE SET welcome=excluded.welcome`, id, welcome)
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO message_config(user_id,dating,dated,welcome) VALUES($1,false,true,$2)
+			ON CONFLICT(user_id) DO UPDATE SET welcome=excluded.welcome`, id, welcome); err != nil {
+			return err
+		}
+		return bindStaticReviews(ctx, tx, id, id, posts.ReviewWelcome)
+	})
 }
 func (s *Store) FeedUnread(ctx context.Context, id int64) (int64, error) {
 	var n int64

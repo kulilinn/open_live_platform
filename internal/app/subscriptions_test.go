@@ -148,6 +148,11 @@ func TestPostgresPaidSubscriptionVerifiesProviderBeforeGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer platform.Close()
+	peer, err := app.New(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
 	anchor := subscriptionTestUser(t, platform, "paid-anchor", true)
 	fan := subscriptionTestUser(t, platform, "paid-fan", false)
 	unknown := subscriptionTestUser(t, platform, "unknown-payment", false)
@@ -155,9 +160,11 @@ func TestPostgresPaidSubscriptionVerifiesProviderBeforeGrant(t *testing.T) {
 	result := authFlowRequest(t, platform.Server.Handler, "/api/sub/anchor/create_pay", anchor.Token,
 		map[string]any{"price": 990, "name": "Monthly"}, http.StatusOK)
 	plan := result["result"].(map[string]any)["plan_id"].(string)
-	pay := func(viewer auth.Session, status int) map[string]any {
+	const bundle = "  Legacy プラン\x00  "
+	pay := func(target *app.App, viewer auth.Session, key, input string, status int) map[string]any {
 		t.Helper()
-		return authFlowRequest(t, platform.Server.Handler, "/api/sub/pay_sub", viewer.Token, map[string]any{"anchor_id": anchorID, "plan_id": plan}, status)
+		return anchorPostRequest(t, target, "POST", "/api/sub/pay_sub", viewer.Token, key,
+			map[string]any{"anchor_id": anchorID, "plan_id": plan, "buddle": input}, status)
 	}
 	wantNoDM := func(viewer auth.Session) {
 		t.Helper()
@@ -165,17 +172,30 @@ func TestPostgresPaidSubscriptionVerifiesProviderBeforeGrant(t *testing.T) {
 			t.Fatalf("unverified payment opened a DM: %v", err)
 		}
 	}
-	if result := pay(fan, http.StatusOK); result["status"] != "4046" {
+	if result := pay(platform, fan, "declined", bundle, http.StatusOK); result["status"] != "4046" {
 		t.Fatalf("provider decline = %+v", result)
+	}
+	if result := pay(peer, fan, "declined", bundle, http.StatusOK); result["status"] != "4046" || debitCalls.Load() != 1 {
+		t.Fatalf("decline replay billed again: %+v", result)
 	}
 	wantNoDM(fan)
 	providerMode.Store(1)
-	if result := pay(fan, http.StatusOK); result["status"] != "200" {
+	if result := pay(platform, fan, "paid", bundle, http.StatusOK); result["status"] != "200" || len(result) != 1 {
 		t.Fatalf("paid subscription response = %+v", result)
 	}
-	pay(fan, http.StatusOK)
+	pay(peer, fan, "paid", bundle, http.StatusOK)
+	pay(peer, fan, "paid", "changed bundle", http.StatusConflict)
+	pay(peer, fan, "", bundle, http.StatusOK)
 	if got := debitCalls.Load(); got != 2 {
 		t.Fatalf("provider calls = %d, want decline and one success", got)
+	}
+	var storedBundle []byte
+	var displayBundle string
+	var points int64
+	if err := db.QueryRow(t.Context(), `SELECT o.request_bundle,m.bundle,o.points FROM subscription_orders o
+		JOIN subscription_members m ON m.fan_id=o.fan_id AND m.plan_id=o.plan_id WHERE o.fan_id=$1 AND o.request_key='paid'`, fan.User.ID).
+		Scan(&storedBundle, &displayBundle, &points); err != nil || string(storedBundle) != bundle || displayBundle != "" || points != 99 {
+		t.Fatalf("monthly purchase changed request or relationship: stored=%q display=%q points=%d error=%v", storedBundle, displayBundle, points, err)
 	}
 	subscriptionDMAllowed(t, platform, fan, anchor, true)
 	level := subscriptionGet(t, platform, fan, "/api/sub/level/"+anchorID)["data"].(map[string]any)
@@ -188,8 +208,8 @@ func TestPostgresPaidSubscriptionVerifiesProviderBeforeGrant(t *testing.T) {
 	}
 	subscriptionDMAllowed(t, platform, fan, anchor, false)
 	providerMode.Store(2)
-	first := pay(unknown, http.StatusServiceUnavailable)
-	second := pay(unknown, http.StatusServiceUnavailable)
+	first := pay(platform, unknown, "unchecked", bundle, http.StatusServiceUnavailable)
+	second := pay(peer, unknown, "unchecked", bundle, http.StatusServiceUnavailable)
 	if first["order_no"] == nil || first["order_no"] != second["order_no"] || debitCalls.Load() != 3 {
 		t.Fatalf("uncertain charge was not durably deduplicated: %+v, %+v", first, second)
 	}

@@ -10,6 +10,7 @@ import (
 	"open_live_platform/internal/gift"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/payment"
+	"open_live_platform/internal/posts"
 )
 
 func (s *Store) WheelConfig(ctx context.Context, anchorID int64) (gift.WheelConfig, error) {
@@ -26,12 +27,17 @@ func readWheelConfig(row pgx.Row, anchorID int64) (gift.WheelConfig, error) {
 }
 
 func (s *Store) UpdateWheelConfig(ctx context.Context, anchorID int64, change gift.WheelChange) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO room_wheel_configs(anchor_id,price,options,open_status)
-		VALUES ($1,COALESCE($2::bigint,0),COALESCE($3::text[],'{}'),COALESCE($4::smallint,1))
-		ON CONFLICT(anchor_id) DO UPDATE SET price=COALESCE($2::bigint,room_wheel_configs.price),
-		options=COALESCE($3::text[],room_wheel_configs.options),open_status=COALESCE($4::smallint,room_wheel_configs.open_status)`,
-		anchorID, change.Price, change.Options, change.Status)
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO room_wheel_configs(anchor_id,price,options,open_status)
+			VALUES ($1,COALESCE($2::bigint,0),COALESCE($3::text[],'{}'),COALESCE($4::smallint,1))
+			ON CONFLICT(anchor_id) DO UPDATE SET price=COALESCE($2::bigint,room_wheel_configs.price),
+			options=COALESCE($3::text[],room_wheel_configs.options),open_status=COALESCE($4::smallint,room_wheel_configs.open_status)`,
+			anchorID, change.Price, change.Options, change.Status)
+		if err != nil {
+			return err
+		}
+		return bindStaticReviews(ctx, tx, anchorID, anchorID, posts.ReviewWheelOption)
+	})
 }
 
 func (s *Store) ReserveWheel(ctx context.Context, candidate gift.WheelOrder) (gift.WheelOrder, bool, error) {

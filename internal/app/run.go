@@ -96,6 +96,7 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 		close(dateDone)
 	}
 	mailDone := make(chan struct{})
+	roomMailDone := make(chan struct{})
 	remindersDone := make(chan struct{})
 	if a.db != nil {
 		go func() {
@@ -123,6 +124,14 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 		}()
 	} else {
 		close(mailDone)
+	}
+	if a.db != nil && a.roomModerationMailer != nil {
+		go func() {
+			defer close(roomMailDone)
+			a.monitorRoomModerationMail(monitorCtx)
+		}()
+	} else {
+		close(roomMailDone)
 	}
 
 	rpcServer := grpc.NewServer()
@@ -184,6 +193,7 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 	<-sttDone
 	<-dateDone
 	<-mailDone
+	<-roomMailDone
 	<-remindersDone
 	<-kafkaDone
 	clusterDone.Wait()

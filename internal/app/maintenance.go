@@ -5,27 +5,44 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"net/http"
+	"os"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
+
+	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/store/postgres"
 	"open_live_platform/internal/transport/httpx"
-	"os"
-	"slices"
-	"strconv"
-	"strings"
 )
 
-func newConfigDiagnostics(file string) (http.HandlerFunc, error) {
-	var items []struct {
-		ID         int32
-		Name, Desc string
-		Count      int32
-		Key        string
-	}
+const demoItemTable = "demo_tbitem"
+
+type demoItem struct {
+	ID    int32  `json:"id"`
+	Name  string `json:"name"`
+	Desc  string `json:"desc"`
+	Count int32  `json:"count"`
+	Key   string `json:"key"`
+}
+
+type demoConfigView struct {
+	Len  int    `json:"len"`
+	List string `json:"list,omitempty"`
+	Map  string `json:"map,omitempty"`
+}
+
+type configDiagnostics struct {
+	view atomic.Pointer[demoConfigView]
+}
+
+func newConfigDiagnostics(file string) (*configDiagnostics, error) {
+	var items []demoItem
 	if file != "" {
 		data, err := os.ReadFile(file)
 		if err != nil {
@@ -35,21 +52,69 @@ func newConfigDiagnostics(file string) (http.HandlerFunc, error) {
 			return nil, err
 		}
 	}
-	info := map[string]any{"len": len(items)}
-	if len(items) > 0 {
-		order := []string{}
-		pairs := []string{}
-		for _, v := range items {
-			row := fmt.Sprintf("item { id: %d, name: %q, desc: %q, count: %d, key: %q }", v.ID, v.Name, v.Desc, v.Count, v.Key)
-			order = append(order, row)
-			pairs = append(pairs, fmt.Sprintf("%d: %s", v.ID, row))
-		}
-		info["list"] = "[" + strings.Join(order, ", ") + "]"
-		info["map"] = "{" + strings.Join(pairs, ", ") + "}"
+	diagnostics := new(configDiagnostics)
+	diagnostics.view.Store(renderDemoItems(items))
+	return diagnostics, nil
+}
+
+func (d *configDiagnostics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	httpx.JSON(w, http.StatusOK, struct {
+		Status string          `json:"status"`
+		Data   *demoConfigView `json:"data"`
+	}{"200", d.view.Load()})
+}
+
+func readLubanDemoItems(value []byte) (*demoConfigView, error) {
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(value, &rows); err != nil {
+		return nil, fmt.Errorf("%s: %w", demoItemTable, err)
 	}
-	return func(w http.ResponseWriter, _ *http.Request) {
-		httpx.JSON(w, 200, map[string]any{"status": "200", "data": info})
-	}, nil
+	if rows == nil {
+		return nil, fmt.Errorf("%s must be an array", demoItemTable)
+	}
+	items := make([]demoItem, 0, len(rows))
+	for i, row := range rows {
+		var item demoItem
+		for _, field := range []struct {
+			name string
+			into any
+		}{{"id", &item.ID}, {"name", &item.Name}, {"desc", &item.Desc}, {"count", &item.Count}, {"key", &item.Key}} {
+			raw := row[field.name]
+			if len(raw) == 0 || string(raw) == "null" {
+				return nil, fmt.Errorf("%s row %d requires %s", demoItemTable, i+1, field.name)
+			}
+			if err := json.Unmarshal(raw, field.into); err != nil {
+				return nil, fmt.Errorf("%s row %d %s: %w", demoItemTable, i+1, field.name, err)
+			}
+		}
+		items = append(items, item)
+	}
+	return renderDemoItems(items), nil
+}
+
+func renderDemoItems(items []demoItem) *demoConfigView {
+	view := &demoConfigView{Len: len(items)}
+	if len(items) == 0 {
+		return view
+	}
+	list := make([]string, 0, len(items))
+	byID := make(map[int32]string, len(items))
+	ids := make([]int32, 0, len(items))
+	for _, v := range items {
+		row := fmt.Sprintf("item { id: %d, name: %q, desc: %q, count: %d, key: %q }", v.ID, v.Name, v.Desc, v.Count, v.Key)
+		list = append(list, row)
+		if _, ok := byID[v.ID]; !ok {
+			ids = append(ids, v.ID)
+		}
+		byID[v.ID] = row
+	}
+	slices.Sort(ids)
+	pairs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		pairs = append(pairs, fmt.Sprintf("%d: %s", id, byID[id]))
+	}
+	view.List, view.Map = "["+strings.Join(list, ", ")+"]", "{"+strings.Join(pairs, ", ")+"}"
+	return view
 }
 
 func registerMaintenance(mux *http.ServeMux, cfg Config, db *postgres.Store, rooms live.RoomStore, signer rtc.Signer, diagnostics http.HandlerFunc) {

@@ -56,6 +56,7 @@ type AccountStore interface {
 	TranslationLanguages(ctx context.Context, ids []int64) (map[int64]string, error)
 	SetTranslationLanguage(ctx context.Context, id int64, language string) error
 	SetTranslationSettings(ctx context.Context, id int64, enabled *bool, language *string) error
+	UpdateUserProfile(ctx context.Context, id int64, change UserProfilePatch) error
 	ChangePassword(ctx context.Context, id int64, oldPassword, newPassword string) error
 	Users(ctx context.Context) ([]User, error)
 	Names(ctx context.Context, ids []int64) (map[int64]string, error)

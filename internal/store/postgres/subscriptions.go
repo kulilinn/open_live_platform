@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/dm"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/subscription"
 )
 
@@ -69,7 +70,10 @@ func (s *Store) ChangePlan(ctx context.Context, anchorID, planID int64, change s
 		_, err = tx.Exec(ctx, `UPDATE subscription_plans SET price=$2,name=$3,url=$4,remark=$5,published=$6,deleted=$7,updated_at=now(),
 			bundles=$8,promotion=$9,promotion_ends_at=$10 WHERE id=$1`, plan.ID, plan.Price, plan.Name, plan.URL, plan.Remark, published,
 			change.Delete, plan.Bundle, plan.Promote, plan.PromotionEndsAt)
-		return err
+		if err != nil {
+			return err
+		}
+		return bindStaticReviews(ctx, tx, anchorID, planID, posts.ReviewPlanName)
 	})
 }
 

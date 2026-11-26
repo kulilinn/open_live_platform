@@ -284,10 +284,6 @@ func (b backoffice) registerOperations(mux *http.ServeMux) {
 			backofficeError(w, http.StatusBadRequest, "400", "invalid streamer action")
 			return
 		}
-		if body.Kind == "Alert" {
-			backofficeError(w, http.StatusServiceUnavailable, "503", "streamer alert delivery unavailable")
-			return
-		}
 		backofficeReply(w, nil, b.store.ApplyBackofficeAction(r.Context(), p,
 			Action{Kind: kind, Path: r.URL.Path, UserID: body.ID, RoomID: body.Room, Duration: duration, Reason: body.Reason}))
 	})

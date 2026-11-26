@@ -247,7 +247,7 @@ func (m *Memory) applyRelationship(ctx context.Context, members dm.Metadata, key
 }
 
 // Real debits require durable reservation and reconciliation history.
-func (*Memory) ReservePurchase(context.Context, int64, int64, int64, string) (Purchase, error) {
+func (*Memory) ReservePurchase(context.Context, int64, int64, int64, PurchaseRequest) (Purchase, error) {
 	return Purchase{}, ErrPurchaseReview
 }
 

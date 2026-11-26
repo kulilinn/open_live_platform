@@ -12,17 +12,18 @@ import (
 	"open_live_platform/internal/subscription"
 )
 
-func (s *Store) ReservePurchase(ctx context.Context, fanID, anchorID, planID int64, orderNo string) (subscription.Purchase, error) {
-	return s.reserveSubscriptionOrder(ctx, fanID, anchorID, planID, orderNo, nil)
+func (s *Store) ReservePurchase(ctx context.Context, fanID, anchorID, planID int64, request subscription.PurchaseRequest) (subscription.Purchase, error) {
+	return s.reserveSubscriptionOrder(ctx, fanID, anchorID, planID, request, nil)
 }
 
 func (s *Store) ReserveRenewal(ctx context.Context, candidate subscription.RenewalCandidate, orderNo string) (subscription.Purchase, error) {
-	return s.reserveSubscriptionOrder(ctx, candidate.FanID, candidate.AnchorID, candidate.PlanID, orderNo, &candidate.ExpiresAt)
+	return s.reserveSubscriptionOrder(ctx, candidate.FanID, candidate.AnchorID, candidate.PlanID,
+		subscription.PurchaseRequest{OrderNo: orderNo}, &candidate.ExpiresAt)
 }
 
-func (s *Store) reserveSubscriptionOrder(ctx context.Context, fanID, anchorID, planID int64, orderNo string, renewalFrom *time.Time) (subscription.Purchase, error) {
+func (s *Store) reserveSubscriptionOrder(ctx context.Context, fanID, anchorID, planID int64, request subscription.PurchaseRequest, renewalFrom *time.Time) (subscription.Purchase, error) {
 	var purchase subscription.Purchase
-	if fanID < 1 || anchorID < 1 || fanID == anchorID || planID < 1 || orderNo == "" {
+	if fanID < 1 || anchorID < 1 || fanID == anchorID || planID < 1 || request.OrderNo == "" {
 		return purchase, subscription.ErrInvalidPlan
 	}
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -30,6 +31,27 @@ func (s *Store) reserveSubscriptionOrder(ctx context.Context, fanID, anchorID, p
 			return err
 		}
 		purchase = subscription.Purchase{FanID: fanID, AnchorID: anchorID, PlanID: planID}
+		if request.Key != "" {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('subscription-request:'||$1::bigint::text||':'||$2,0))`, fanID, request.Key); err != nil {
+				return err
+			}
+			var storedPlan, storedAnchor int64
+			var bundle []byte
+			var status int
+			err := tx.QueryRow(ctx, `SELECT o.order_no,o.points,o.plan_id,p.anchor_id,o.request_bundle,o.status
+				FROM subscription_orders o JOIN subscription_plans p ON p.id=o.plan_id WHERE o.fan_id=$1 AND o.request_key=$2`, fanID, request.Key).
+				Scan(&purchase.OrderNo, &purchase.Points, &storedPlan, &storedAnchor, &bundle, &status)
+			if err == nil {
+				if storedPlan != planID || storedAnchor != anchorID || string(bundle) != request.Bundle {
+					return subscription.ErrPurchaseConflict
+				}
+				purchase.Paid, purchase.Declined = status == 1, status == 2
+				return nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
 		var price int64
 		err := tx.QueryRow(ctx, `SELECT price FROM subscription_plans WHERE id=$1 AND anchor_id=$2 AND published
 			AND NOT deleted AND plan_type IN (3,4) FOR SHARE`, planID, anchorID).Scan(&price)
@@ -51,9 +73,13 @@ func (s *Store) reserveSubscriptionOrder(ctx context.Context, fanID, anchorID, p
 				return subscription.ErrRenewalIneligible
 			}
 		}
-		err = tx.QueryRow(ctx, `SELECT order_no,points FROM subscription_orders WHERE fan_id=$1 AND plan_id=$2 AND status=0`, fanID, planID).
-			Scan(&purchase.OrderNo, &purchase.Points)
+		var pendingBundle []byte
+		err = tx.QueryRow(ctx, `SELECT order_no,points,request_bundle FROM subscription_orders WHERE fan_id=$1 AND plan_id=$2 AND status=0`, fanID, planID).
+			Scan(&purchase.OrderNo, &purchase.Points, &pendingBundle)
 		if err == nil {
+			if renewalFrom == nil && string(pendingBundle) != request.Bundle {
+				return subscription.ErrPurchaseConflict
+			}
 			return nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -68,9 +94,9 @@ func (s *Store) reserveSubscriptionOrder(ctx context.Context, fanID, anchorID, p
 				return nil
 			}
 		}
-		purchase.OrderNo, purchase.Points, purchase.New = orderNo, price/10, true
-		_, err = tx.Exec(ctx, `INSERT INTO subscription_orders(order_no,fan_id,plan_id,points,renewal_from) VALUES($1,$2,$3,$4,$5)`,
-			purchase.OrderNo, fanID, planID, purchase.Points, renewalFrom)
+		purchase.OrderNo, purchase.Points, purchase.New = request.OrderNo, price/10, true
+		_, err = tx.Exec(ctx, `INSERT INTO subscription_orders(order_no,fan_id,plan_id,points,renewal_from,request_bundle,request_key)
+			VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''))`, purchase.OrderNo, fanID, planID, purchase.Points, renewalFrom, []byte(request.Bundle), request.Key)
 		return err
 	})
 	return purchase, err

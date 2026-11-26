@@ -72,6 +72,7 @@ type BackofficeOptions struct {
 	Images                       upload.Config
 	ImagePrefix                  string
 	Collectibles                 *collectible.Service
+	LegacyWorkbookReader         string
 }
 
 func (b backoffice) registerMCNOnboarding(mux *http.ServeMux) {

@@ -74,7 +74,11 @@ func (b backoffice) registerUploads(mux *http.ServeMux, catalog *gift.Catalog) {
 			}
 			defer file.Close()
 			kind := strings.TrimSuffix(file.FileName(), path.Ext(file.FileName()))
-			batch, err := readGiftSheet(kind, file)
+			batch, err := readGiftSheet(r.Context(), kind, file, b.options.LegacyWorkbookReader)
+			if errors.Is(err, errXLSBReaderUnavailable) {
+				backofficeError(w, http.StatusServiceUnavailable, "503", err.Error())
+				return
+			}
 			if err != nil {
 				backofficeError(w, 400, "400", err.Error())
 				return

@@ -16,18 +16,28 @@ import (
 )
 
 type appCluster struct {
-	client    *clientv3.Client
-	tables    *etcdlive.Tables
-	revision  int64
-	botBase   livebot.Config
-	nft       *collectible.LubanCatalog
-	usesBots  bool
-	usesNFT   bool
-	discovery *etcdlive.Discovery
+	client        *clientv3.Client
+	tables        *etcdlive.Tables
+	revision      int64
+	botBase       livebot.Config
+	nft           *collectible.LubanCatalog
+	usesBots      bool
+	usesNFT       bool
+	discovery     *etcdlive.Discovery
+	diagnostics   *configDiagnostics
+	demoPublished bool
 }
 
-func initCluster(ctx context.Context, config *Config) (*appCluster, error) {
+type lubanSnapshot struct {
+	bots livebot.Config
+	nft  *collectible.LubanCatalog
+	demo *demoConfigView
+}
+
+func initCluster(ctx context.Context, config *Config, diagnostics *configDiagnostics) (*appCluster, error) {
 	ec := config.Etcd
+	configPrefix := strings.TrimRight(ec.ConfigPrefix, "/")
+	usesDemo := configPrefix != "" && len(ec.Endpoints) > 0
 	prefix := ec.DiscoveryPrefix
 	if prefix == "" && ec.AdvertiseAddress != "" {
 		name := os.Getenv("ZENOH_CLUSTER_NAME")
@@ -36,7 +46,7 @@ func initCluster(ctx context.Context, config *Config) (*appCluster, error) {
 		}
 		prefix = "/@grpc-" + name
 	}
-	if !config.LubanRoomBots && !config.LubanCollectibles && prefix == "" {
+	if !config.LubanRoomBots && !config.LubanCollectibles && !usesDemo && prefix == "" {
 		return nil, nil
 	}
 	conn, err := ec.Open()
@@ -44,11 +54,14 @@ func initCluster(ctx context.Context, config *Config) (*appCluster, error) {
 		return nil, err
 	}
 	result := &appCluster{client: conn, botBase: config.RoomBots, usesBots: config.LubanRoomBots, usesNFT: config.LubanCollectibles}
+	if usesDemo {
+		result.diagnostics = diagnostics
+	}
 	if prefix != "" {
 		result.discovery = &etcdlive.Discovery{Client: conn, Prefix: prefix}
 	}
-	if result.usesBots || result.usesNFT {
-		if strings.TrimRight(ec.ConfigPrefix, "/") == "" {
+	if result.usesBots || result.usesNFT || usesDemo {
+		if configPrefix == "" {
 			conn.Close()
 			return nil, fmt.Errorf("ETCD_CONFIG_PREFIX is required for Luban")
 		}
@@ -59,34 +72,56 @@ func initCluster(ctx context.Context, config *Config) (*appCluster, error) {
 		if result.usesNFT {
 			names = append(names, collectible.LubanTables...)
 		}
+		if usesDemo {
+			names = append(names, demoItemTable)
+		}
 		tables := etcdlive.Tables{Client: conn, Prefix: ec.ConfigPrefix, Names: names}
 		data, rev, err := tables.Read(ctx, 0)
+		var snapshot lubanSnapshot
 		if err == nil {
-			config.RoomBots, result.nft, err = result.decode(data)
+			snapshot, err = result.decode(data)
 		}
 		if err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("load Luban tables: %w", err)
 		}
+		config.RoomBots, result.nft = snapshot.bots, snapshot.nft
+		result.applyDemo(snapshot.demo)
 		result.tables, result.revision = &tables, rev
 	}
 	return result, nil
 }
 
-func (c *appCluster) decode(data map[string][]byte) (livebot.Config, *collectible.LubanCatalog, error) {
-	bots := c.botBase
-	var nft *collectible.LubanCatalog
+func (c *appCluster) decode(data map[string][]byte) (lubanSnapshot, error) {
+	snapshot := lubanSnapshot{bots: c.botBase}
 	var err error
 	if c.usesBots {
-		bots, err = livebot.FromLuban(c.botBase, data)
+		snapshot.bots, err = livebot.FromLuban(c.botBase, data)
 		if err != nil {
-			return bots, nil, err
+			return snapshot, err
 		}
 	}
 	if c.usesNFT {
-		nft, err = collectible.ReadLubanCatalog(data)
+		snapshot.nft, err = collectible.ReadLubanCatalog(data)
+		if err != nil {
+			return snapshot, err
+		}
 	}
-	return bots, nft, err
+	if c.diagnostics != nil {
+		if value, found := data[demoItemTable]; found {
+			snapshot.demo, err = readLubanDemoItems(value)
+		} else if c.demoPublished {
+			err = fmt.Errorf("Luban table %s is missing", demoItemTable)
+		}
+	}
+	return snapshot, err
+}
+
+func (c *appCluster) applyDemo(view *demoConfigView) {
+	if view != nil {
+		c.diagnostics.view.Store(view)
+		c.demoPublished = true
+	}
 }
 
 func (c *appCluster) close() {
@@ -115,15 +150,18 @@ func (a *App) monitorCluster(ctx context.Context, listener net.Listener) *sync.W
 		go func() {
 			defer done.Done()
 			a.cluster.tables.Watch(ctx, a.cluster.revision, func(data map[string][]byte) error {
-				bots, nft, err := a.cluster.decode(data)
+				snapshot, err := a.cluster.decode(data)
 				if err == nil && a.cluster.usesBots {
-					err = a.db.ConfigureRoomBots(bots)
+					err = a.db.ConfigureRoomBots(snapshot.bots)
 				}
 				if err == nil && a.cluster.usesNFT {
-					a.collectibleConfig.ConfigureLuban(nft)
+					a.collectibleConfig.ConfigureLuban(snapshot.nft)
 				}
-				if err == nil && a.metrics != nil {
-					a.metrics.Reloads.WithLabelValues("accepted").Inc()
+				if err == nil {
+					a.cluster.applyDemo(snapshot.demo)
+					if a.metrics != nil {
+						a.metrics.Reloads.WithLabelValues("accepted").Inc()
+					}
 				}
 				return err
 			}, func(err error) {

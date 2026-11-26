@@ -23,4 +23,4 @@ Rust 对照版本为 `4c9ee4358857cfd32a880c45fed959ad629bc4a1`。公开和管�
 - [ ] 割接前使用授权的生产快照做只读导入演练，按租户核对用户数、余额、未结订单、分成、过期时间及异常行。停用原定时任务和消费者后切换。旧后台操作员重新登录，历史待确认订单按来源凭证对账。
 - [ ] 在实际部署环境构建镜像，核对负载均衡、证书、共享密钥、异地回调、备份恢复和生产负载。容器配置可从同仓库的 Dockerfile 与 Compose 文件启动。
 
-本地重复执行测试时，设置 `OPEN_LIVE_TEST_DATABASE_URL` 指向专用 PostgreSQL，设置 `OPEN_LIVE_TEST_ETCD_URL` 指向专用 etcd，然后执行 `go test -count=1 ./...`、`go test -race -count=1 ./...`、`go vet ./...` 和 `go build ./...`。数据库用例会创建自己的临时 schema。
+本地重复执行全套测试时，设置 `OPEN_LIVE_TEST_DATABASE_URL` 指向专用 PostgreSQL，`OPEN_LIVE_TEST_ETCD_URL` 指向专用 etcd，`OPEN_LIVE_TEST_KAFKA_BROKERS` 指向可创建主题的专用 Kafka 集群，`OPEN_LIVE_TEST_XLSB_PYTHON` 指向装有 `python-calamine==0.6.1` 的 Python。执行 `go test -count=1 ./...`、`go test -race -count=1 ./...`、`go vet ./...` 和 `go build ./...`。数据库用例会创建自己的临时 schema。Kafka 用例每次分配独立的主题和消费组，结束时请求删除主题。如果临时集群设置了 `delete.topic.enable=false`，主题随整个测试集群回收。

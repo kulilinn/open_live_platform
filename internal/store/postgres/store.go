@@ -15,19 +15,19 @@ import (
 )
 
 type Store struct {
-	rocketRelayScope    string
-	rocketRules         *gift.RocketRules
-	bots                atomic.Pointer[roomBots]
-	pool                *pgxpool.Pool
-	anchorAwayTimeout   time.Duration
-	eventChannel        string
-	eventReady          atomic.Bool
-	stopEvents          context.CancelFunc
-	eventsDone          chan struct{}
-	shutdown            sync.Once
-	anchors             anchorPresence
-	sessionRevocations  auth.SessionRevocations
-	relayDeviceReceiver atomic.Pointer[relayDeviceReceiver]
+	relayScope, agoraAppID string
+	rocketRules            *gift.RocketRules
+	bots                   atomic.Pointer[roomBots]
+	pool                   *pgxpool.Pool
+	anchorAwayTimeout      time.Duration
+	eventChannel           string
+	eventReady             atomic.Bool
+	stopEvents             context.CancelFunc
+	eventsDone             chan struct{}
+	shutdown               sync.Once
+	anchors                anchorPresence
+	sessionRevocations     auth.SessionRevocations
+	relayDeviceReceiver    atomic.Pointer[relayDeviceReceiver]
 	// Independent rooms can publish in parallel. Each shard orders local
 	// subscriptions and delivery with the commits that change their room.
 	streams [32]streams

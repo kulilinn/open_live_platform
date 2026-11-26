@@ -183,31 +183,26 @@ func (s anchorAPI) updateProfile(w http.ResponseWriter, r *http.Request, actor i
 		return
 	}
 	profile := auth.PublicProfile(user)
-	checks := []struct {
-		kind, old, new, status string
-		media                  bool
-	}{
-		{"anchor_avatar", profile.Photo, change.Image, "4055", true},
-		{"anchor_display_name", user.Account, change.DisplayName, "4058", false},
-		{"anchor_search_name", profile.SearchName, change.SearchName, "4059", false},
-		{"anchor_banner", profile.Banner, change.Banner, "4066", true},
-		{"anchor_intro", record.Intro, change.Intro, "4067", false},
+	checks := []staticContent{
+		{typeID: posts.ReviewAvatar, kind: "anchor_avatar", before: profile.Photo, after: change.Image, refusal: "4055", image: true},
+		{typeID: posts.ReviewDisplayName, kind: "anchor_display_name", before: user.Account, after: change.DisplayName, refusal: "4058"},
+		{typeID: posts.ReviewSearchName, kind: "anchor_search_name", before: profile.SearchName, after: change.SearchName, refusal: "4059"},
+		{typeID: posts.ReviewProfileBanner, kind: "anchor_banner", before: profile.Banner, after: change.Banner, refusal: "4066", image: true},
+		{typeID: posts.ReviewIntro, kind: "anchor_intro", before: record.Intro, after: change.Intro, refusal: "4067"},
 	}
-	for _, item := range checks {
-		if item.old == item.new || item.new == "" {
-			continue
-		}
-		request := posts.ReviewRequest{Kind: item.kind, UserID: actor}
-		if item.media {
-			request.Media = []posts.Media{{URL: item.new}}
-		} else {
-			request.Text = item.new
-		}
-		if !s.auditProfile(w, r, request, item.status) {
-			return
+	if s.reviewer == nil {
+		for _, change := range checks {
+			if change.after != "" && change.after != change.before {
+				anchorStatus(w, http.StatusOK, "4069", "profile audit service unavailable")
+				return
+			}
 		}
 	}
-	if err := s.store.EditAnchor(r.Context(), actor, change); err != nil {
+	ctx, ok := submitStaticReviews(w, r.Context(), s.reviewer, actor, checks...)
+	if !ok {
+		return
+	}
+	if err := s.store.EditAnchor(ctx, actor, change); err != nil {
 		anchorError(w, err)
 		return
 	}
@@ -225,23 +220,6 @@ func (s anchorAPI) updateProfile(w http.ResponseWriter, r *http.Request, actor i
 		}
 	}
 	anchorMutation(w, nil)
-}
-
-func (s anchorAPI) auditProfile(w http.ResponseWriter, r *http.Request, change posts.ReviewRequest, rejected string) bool {
-	if s.reviewer == nil {
-		anchorStatus(w, http.StatusOK, "4069", "profile audit service unavailable")
-		return false
-	}
-	decision, err := s.reviewer.Review(r.Context(), change)
-	if err != nil || decision == posts.Pending {
-		anchorStatus(w, http.StatusOK, "4069", "profile audit service unavailable")
-		return false
-	}
-	if decision != posts.Approved {
-		anchorStatus(w, http.StatusOK, rejected, "profile audit rejected")
-		return false
-	}
-	return true
 }
 
 func (s anchorAPI) updateSocial(w http.ResponseWriter, r *http.Request, actor int64) {

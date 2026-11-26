@@ -9,6 +9,7 @@ import (
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/posts"
 )
 
 var _ anchor.Store = (*Store)(nil)
@@ -155,7 +156,10 @@ func (s *Store) EditAnchor(ctx context.Context, id int64, change anchor.ProfileE
 			return err
 		}
 		record.Edit(change)
-		return saveAnchorProfile(ctx, tx, record)
+		if err := saveAnchorProfile(ctx, tx, record); err != nil {
+			return err
+		}
+		return bindStaticReviews(ctx, tx, id, id, posts.ReviewAvatar, posts.ReviewDisplayName, posts.ReviewSearchName, posts.ReviewProfileBanner, posts.ReviewIntro)
 	})
 }
 

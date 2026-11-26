@@ -73,7 +73,3 @@ func (s *Store) sendRocketComboBroadcast(ctx context.Context, conn *pgx.Conn, si
 	}
 	return err
 }
-
-func (s *Store) ConfigureRocketBroadcastScope(appKey string) {
-	s.rocketRelayScope = appKey
-}

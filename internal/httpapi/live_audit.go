@@ -10,10 +10,8 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"time"
 
 	"open_live_platform/internal/liveaudit"
-	"open_live_platform/internal/relay"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -27,7 +25,7 @@ type liveAuditRequestParams struct {
 	} `json:"extra"`
 }
 
-func RegisterLiveAudit(mux *http.ServeMux, provider *liveaudit.Provider, store LiveAuditStore, push relay.PushPrivate, agoraAppID string) {
+func RegisterLiveAudit(mux *http.ServeMux, provider *liveaudit.Provider, store LiveAuditStore) {
 	for _, path := range []string{liveaudit.StreamPath, liveaudit.ManualPath} {
 		mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) {
 			if provider == nil || store == nil {
@@ -47,7 +45,7 @@ func RegisterLiveAudit(mux *http.ServeMux, provider *liveaudit.Provider, store L
 				httpx.Error(w, http.StatusBadRequest, "invalid live media audit callback")
 				return
 			}
-			task, applied, err := store.ApplyLiveMediaAudit(r.Context(), decision)
+			_, _, err = store.ApplyLiveMediaAudit(r.Context(), decision)
 			if errors.Is(err, liveaudit.ErrUnknown) {
 				httpx.Error(w, http.StatusNotFound, "live media audit request not found")
 				return
@@ -55,12 +53,6 @@ func RegisterLiveAudit(mux *http.ServeMux, provider *liveaudit.Provider, store L
 			if err != nil {
 				httpx.Error(w, http.StatusServiceUnavailable, "live media audit decision unavailable")
 				return
-			}
-			if applied && decision.Operation == 1 && push != nil {
-				now := time.Now().Unix()
-				_ = push(r.Context(), task.OwnerID, "streamer_alert", map[string]any{"app_id": agoraAppID,
-					"room_id": decision.Identity.Channel, "uid": decision.Identity.AnchorID, "reason": decision.Reasons,
-					"limit_time": now, "limit_total": 0, "ts": now})
 			}
 			smAuditAcknowledged(w)
 		})

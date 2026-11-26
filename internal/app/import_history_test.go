@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"open_live_platform/internal/admin"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/store/postgres"
 	"strconv"
@@ -69,6 +70,30 @@ func TestImportLegacyRoomAndLedgerHistory(t *testing.T) {
 	r, err = store.Info(ctx, id)
 	if err != nil || r.Title != "updated" {
 		t.Fatal("import overwrote current room", err)
+	}
+	application := record("anchor_users", uid, `{"state":1,"channel":"historical","country":"JP","kyc_status":1}`)
+	identity := record("anchor_users_kyc", uid, `{"applicant_id":"","name":"Fixture","ja_first_name":"Example","status":2,"create_time":"2021-10-10 13:00:00"}`)
+	if counts := add(application, identity); counts.Changed != 2 {
+		t.Fatal(counts)
+	}
+	data, err := store.AnchorReviewDetail(ctx, id, true)
+	var imported struct {
+		JapaneseName string `json:"ja_first_name"`
+	}
+	if err != nil || json.Unmarshal(data, &imported) != nil || imported.JapaneseName != "Example" {
+		t.Fatalf("imported identity %s, err=%v", data, err)
+	}
+	if counts := add(application, identity); counts.Changed != 0 {
+		t.Fatal(counts)
+	}
+	if err := store.CancelAnchorReview(ctx, admin.Principal{ID: 7, Area: admin.OperationArea, Tenant: admin.OperationTenant, Username: "reviewer"}, "/cancel", id); err != nil {
+		t.Fatal(err)
+	}
+	if counts := add(application, identity); counts.Changed != 0 {
+		t.Fatalf("cancelled anchor restored by import: %+v", counts)
+	}
+	if _, err := store.AnchorReviewDetail(ctx, id, true); !errors.Is(err, admin.ErrBackofficeNotFound) {
+		t.Fatalf("cancelled identity still present: %v", err)
 	}
 	broken := room
 	broken.Record = json.RawMessage(`{"plan":"broken"}`)

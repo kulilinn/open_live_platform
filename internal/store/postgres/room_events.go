@@ -90,7 +90,7 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 	case "gift", "rocket_refuel", "rocket_final":
 		signal.CreatedAt = r.event.CreatedAt
 		if r.event.Type == "rocket_refuel" {
-			signal.RelayScope = s.rocketRelayScope
+			signal.RelayScope = s.relayScope
 		}
 	case "room_like":
 		signal.CreatedAt = r.event.CreatedAt

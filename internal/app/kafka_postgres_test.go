@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -71,6 +72,10 @@ func TestPostgresKafkaNoticeReachesRemoteH5Session(t *testing.T) {
 			return
 		}
 		for _, topic := range deleted.Topics {
+			if topic.ErrorCode == kerr.TopicDeletionDisabled.Code {
+				t.Logf("Kafka has topic deletion disabled, the test cluster retains topics with prefix %s", prefix)
+				continue
+			}
 			if topic.ErrorCode != 0 {
 				t.Errorf("remove test topic: Kafka error %d", topic.ErrorCode)
 			}
@@ -98,7 +103,7 @@ func TestPostgresKafkaNoticeReachesRemoteH5Session(t *testing.T) {
 	}
 	cfg.Addr, cfg.GRPCAddr = reserveAddr(), reserveAddr()
 	cfg.Kafka = edge.KafkaConfig{Brokers: brokers, Topics: []edge.NoticeTopic{
-		{Name: quick, Group: "test-realtime", TTL: time.Minute}, {Name: late, Group: "test-delay", TTL: 2 * time.Minute},
+		{Name: quick, Group: prefix + "-realtime", TTL: time.Minute}, {Name: late, Group: prefix + "-delay", TTL: 2 * time.Minute},
 	}}
 	consumer, err := app.New(ctx, cfg)
 	check(err)

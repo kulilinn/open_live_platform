@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -62,14 +63,22 @@ func (s Tables) Read(ctx context.Context, revision int64) (map[string][]byte, in
 		return nil, result.Header.Revision, errors.New("etcd configuration version key missing")
 	}
 	tables := make(map[string][]byte, len(s.Names))
+	var pending, missing bool
 	for i, name := range s.Names {
 		rows := result.Responses[i+1].GetResponseRange()
-		if len(rows.Kvs) > 0 {
-			if revision == 0 && rows.Kvs[0].ModRevision > version[0].ModRevision {
-				published, _, err := s.Read(ctx, version[0].ModRevision)
-				return published, result.Header.Revision, err
-			}
-			tables[name] = rows.Kvs[0].Value
+		if len(rows.Kvs) == 0 {
+			missing = true
+			continue
+		}
+		pending = pending || rows.Kvs[0].ModRevision > version[0].ModRevision
+		tables[name] = rows.Kvs[0].Value
+	}
+	if revision == 0 && (pending || missing) && version[0].ModRevision < result.Header.Revision {
+		// A staged deletion has no current ModRevision, so a missing table can
+		// also require a read at the published revision.
+		published, _, err := s.Read(ctx, version[0].ModRevision)
+		if err == nil || pending || !errors.Is(err, rpctypes.ErrCompacted) {
+			return published, result.Header.Revision, err
 		}
 	}
 	return tables, result.Header.Revision, nil

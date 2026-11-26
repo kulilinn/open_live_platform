@@ -79,11 +79,7 @@ func (h *deviceHub) pushPrivate(ctx context.Context, id int64, content string, p
 	if msg, ok := payload.(QueuedPayload); ok {
 		queue, payload = msg.Queue, msg.Payload
 	}
-	frame, err := json.Marshal(struct {
-		Content string `json:"content"`
-		Queue   string `json:"queue"`
-		Payload any    `json:"payload"`
-	}{content, strconv.FormatInt(queue, 10), payload})
+	frame, err := PrivateFrame(queue, content, payload)
 	if err != nil {
 		return err
 	}
@@ -94,4 +90,12 @@ func (h *deviceHub) pushPrivate(ctx context.Context, id int64, content string, p
 	}
 	h.private.deliver(id, frame)
 	return nil
+}
+
+func PrivateFrame(queue int64, content string, payload any) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Content string `json:"content"`
+		Queue   string `json:"queue"`
+		Payload any    `json:"payload"`
+	}{content, strconv.FormatInt(queue, 10), payload})
 }

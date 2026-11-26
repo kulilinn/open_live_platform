@@ -9,6 +9,7 @@ import (
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/stt"
 	"open_live_platform/internal/transport/httpx"
@@ -23,6 +24,7 @@ type server struct {
 	collectibles      *collectible.Service
 	recentChats       *sync.Map
 	emailVerification *auth.EmailVerification
+	staticReviewer    posts.Reviewer
 }
 
 func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore) {
@@ -34,10 +36,11 @@ func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.
 }
 
 type LiveServices struct {
-	PreloginEnd string
-	Subtitles   *stt.Service
-	Dates       *Dates
-	Collectible *collectible.Service
+	PreloginEnd    string
+	Subtitles      *stt.Service
+	Dates          *Dates
+	Collectible    *collectible.Service
+	StaticReviewer posts.Reviewer
 }
 
 func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer, email *auth.EmailVerification, services ...LiveServices) {
@@ -46,6 +49,7 @@ func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms liv
 		s.subtitles = services[0].Subtitles
 		s.dates = services[0].Dates
 		s.collectibles = services[0].Collectible
+		s.staticReviewer = services[0].StaticReviewer
 	}
 	s.registerCollectibles(mux)
 	s.registerRoomMetrics(mux)

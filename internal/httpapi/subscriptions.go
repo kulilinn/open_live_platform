@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +16,7 @@ import (
 	"open_live_platform/internal/feed"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/payment"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/subscription"
 	"open_live_platform/internal/transport/httpx"
 )
@@ -26,8 +28,11 @@ type subscriptionAPI struct {
 	billing *payment.Client
 }
 
-func RegisterSubscriptions(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, store subscription.Store, billing *payment.Client, inbox feed.Store, renewalToken string) {
+func RegisterSubscriptions(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, store subscription.Store, billing *payment.Client, inbox feed.Store, renewalToken string, reviewer ...posts.Reviewer) {
 	s := subscriptionAPI{server: server{accounts: accounts, rooms: rooms}, store: store, billing: billing, inbox: inbox}
+	if len(reviewer) > 0 {
+		s.staticReviewer = reviewer[0]
+	}
 	for path, handler := range map[string]userHandler{
 		"POST /api/sub/anchor/create_free":     s.createFreePlan,
 		"POST /api/sub/anchor/create_pay":      s.createPaidPlan(subscription.Basic),
@@ -178,19 +183,44 @@ func (s subscriptionAPI) changePlan(action string) userHandler {
 			return
 		}
 		change := subscription.PlanChange{}
+		ctx := r.Context()
 		switch action {
 		case "edit":
 			if !validPaidPlan(w, input.PlanInput) {
 				return
 			}
 			change.Fields = &input.PlanInput
+			if s.staticReviewer != nil {
+				plans, err := s.store.Plans(ctx, actor, true)
+				if err != nil {
+					subscriptionError(w, err)
+					return
+				}
+				var previous *subscription.Plan
+				for i := range plans {
+					if plans[i].ID == int64(input.PlanID) && plans[i].Deleted == 0 {
+						previous = &plans[i]
+						break
+					}
+				}
+				if previous == nil {
+					subscriptionError(w, subscription.ErrNotFound)
+					return
+				}
+				var ok bool
+				ctx, ok = submitStaticReviews(w, ctx, s.staticReviewer, actor, staticContent{typeID: posts.ReviewPlanName,
+					object: int64(input.PlanID), kind: "subscription_plan_name", before: previous.Name, after: input.Name, refusal: "4056"})
+				if !ok {
+					return
+				}
+			}
 		case "delete":
 			change.Delete = true
 		default:
 			published := action == "publish"
 			change.Published = &published
 		}
-		subscriptionStatus(w, s.store.ChangePlan(r.Context(), actor, int64(input.PlanID), change))
+		subscriptionStatus(w, s.store.ChangePlan(ctx, actor, int64(input.PlanID), change))
 	}
 }
 
@@ -320,10 +350,6 @@ func (s subscriptionAPI) subscribePaid(w http.ResponseWriter, r *http.Request, a
 		subscriptionError(w, subscription.ErrInvalidPlan)
 		return
 	}
-	if input.Bundle != "" {
-		httpx.Error(w, http.StatusNotImplemented, "subscription bundle purchase is unavailable")
-		return
-	}
 	if input.Promotion == 0 && s.billing == nil {
 		httpx.Error(w, http.StatusServiceUnavailable, "subscription billing is unavailable")
 		return
@@ -338,13 +364,23 @@ func (s subscriptionAPI) subscribePaid(w http.ResponseWriter, r *http.Request, a
 		subscriptionStatus(w, s.store.SubscribeTrial(ctx, members, int64(input.PlanID)))
 		return
 	}
-	order, err := s.store.ReservePurchase(ctx, actor, members.Anchor.ID, int64(input.PlanID), "sub-"+rand.Text())
+	key := r.Header.Get("Idempotency-Key")
+	if len(key) > 128 || strings.IndexFunc(key, func(c rune) bool { return c <= ' ' || c >= 127 }) >= 0 {
+		httpx.Error(w, http.StatusBadRequest, "invalid Idempotency-Key")
+		return
+	}
+	order, err := s.store.ReservePurchase(ctx, actor, members.Anchor.ID, int64(input.PlanID),
+		subscription.PurchaseRequest{OrderNo: "sub-" + rand.Text(), Key: key, Bundle: input.Bundle})
 	if err != nil {
 		subscriptionError(w, err)
 		return
 	}
 	if order.Paid {
 		subscriptionStatus(w, nil)
+		return
+	}
+	if order.Declined {
+		subscriptionPaymentDeclined(w)
 		return
 	}
 	if !order.New {
@@ -359,7 +395,7 @@ func (s subscriptionAPI) subscribePaid(w http.ResponseWriter, r *http.Request, a
 			subscriptionPaymentPending(w, order.OrderNo)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]string{"status": "4046", "message": "insufficient points"})
+		subscriptionPaymentDeclined(w)
 		return
 	}
 	if err != nil {
@@ -371,6 +407,10 @@ func (s subscriptionAPI) subscribePaid(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 	subscriptionStatus(w, nil)
+}
+
+func subscriptionPaymentDeclined(w http.ResponseWriter) {
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "4046", "message": "insufficient points"})
 }
 
 func (s subscriptionAPI) cancelSubscription(w http.ResponseWriter, r *http.Request, actor int64) {
@@ -423,6 +463,8 @@ func subscriptionError(w http.ResponseWriter, err error) {
 		httpx.JSON(w, http.StatusForbidden, map[string]string{"status": "4016", "message": err.Error()})
 	case errors.Is(err, subscription.ErrPurchaseReview):
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, subscription.ErrPurchaseConflict):
+		httpx.Error(w, http.StatusConflict, err.Error())
 	default:
 		httpx.Error(w, http.StatusInternalServerError, "could not update subscriptions")
 	}

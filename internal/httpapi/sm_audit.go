@@ -42,12 +42,33 @@ func (s postAPI) reviewSMStatic(w http.ResponseWriter, r *http.Request) {
 		postError(w, posts.ErrInvalid)
 		return
 	}
+	subject := input.Data.Subject
+	if subject.ContentType >= posts.ReviewPlanName && subject.ContentType <= posts.ReviewSearchName {
+		store, ok := s.entries.(interface {
+			ApplyStaticReview(context.Context, string, int64, int64, int, int, string) error
+		})
+		if !ok || subject.UserID < 1 || subject.CommentID < 0 || subject.Content == "" || len(input.RequestID) > 256 {
+			httpx.Error(w, http.StatusNotFound, "static review target not found")
+			return
+		}
+		err := store.ApplyStaticReview(r.Context(), input.RequestID, int64(subject.UserID), int64(subject.CommentID), subject.ContentType,
+			input.Result.Operation, subject.Content)
+		if errors.Is(err, posts.ErrNotFound) {
+			httpx.Error(w, http.StatusNotFound, "static review target not found")
+			return
+		}
+		if err != nil {
+			postError(w, err)
+			return
+		}
+		smAuditAcknowledged(w)
+		return
+	}
 	if input.Result.Operation == 1 {
 		smAuditAcknowledged(w)
 		return
 	}
 	const postCommentType = 12
-	subject := input.Data.Subject
 	if subject.ContentType != postCommentType {
 		httpx.Error(w, http.StatusUnprocessableEntity, "unsupported static audit action")
 		return

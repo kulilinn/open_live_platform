@@ -30,6 +30,7 @@ import (
 	"open_live_platform/internal/liveaudit"
 	"open_live_platform/internal/livebot"
 	"open_live_platform/internal/notice"
+	"open_live_platform/internal/notifyemail"
 	"open_live_platform/internal/observability"
 	"open_live_platform/internal/payment"
 	"open_live_platform/internal/posts"
@@ -98,6 +99,7 @@ type Config struct {
 	TrustedOAuthClientsFile    string
 	InternalUserToken          string
 	MailSMTP                   auth.SMTPConfig
+	RoomModerationMail         notifyemail.Config
 	MailCodeSecret             string
 	MailCodeTTL                time.Duration
 	AgoraAppID                 string
@@ -183,6 +185,7 @@ func ConfigFromEnv() Config {
 		TrustedOAuthClientsFile:    os.Getenv("AUTH_INTERNAL_CLIENTS_FILE"),
 		InternalUserToken:          os.Getenv("INTERNAL_USER_TOKEN"),
 		MailSMTP:                   smtpFromEnv(),
+		RoomModerationMail:         roomModerationMailFromEnv(),
 		MailCodeSecret:             os.Getenv("MAIL_CODE_SECRET"),
 		MailCodeTTL:                mailCodeTTLFromEnv(),
 		AgoraAppID:                 os.Getenv("AGORA_APP_ID"),
@@ -207,23 +210,24 @@ func ConfigFromEnv() Config {
 }
 
 type App struct {
-	collectibleConfig *collectible.Service
-	cluster           *appCluster
-	metrics           *observability.Metrics
-	liveAudit         *liveaudit.Provider
-	geoDB             *geo.DB
-	push              relay.PushPrivate
-	dates             *httpapi.Dates
-	mcnMailer         admin.MCNMailSender
-	Config            Config
-	Accounts          auth.AccountStore
-	Rooms             live.RoomStore
-	DM                dm.Store
-	Subtitles         *stt.Service
-	Server            *http.Server
-	Backoffice        *http.Server
-	MCNBackoffice     *http.Server
-	db                *postgres.Store
+	collectibleConfig    *collectible.Service
+	cluster              *appCluster
+	metrics              *observability.Metrics
+	liveAudit            *liveaudit.Provider
+	geoDB                *geo.DB
+	push                 relay.PushPrivate
+	dates                *httpapi.Dates
+	mcnMailer            admin.MCNMailSender
+	roomModerationMailer *notifyemail.Client
+	Config               Config
+	Accounts             auth.AccountStore
+	Rooms                live.RoomStore
+	DM                   dm.Store
+	Subtitles            *stt.Service
+	Server               *http.Server
+	Backoffice           *http.Server
+	MCNBackoffice        *http.Server
+	db                   *postgres.Store
 }
 
 func New(ctx context.Context, config Config) (*App, error) {
@@ -241,7 +245,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if (config.RoomBots.Enabled() || config.LubanRoomBots) && config.DatabaseURL == "" {
 		return nil, fmt.Errorf("live room bots require DATABASE_URL")
 	}
-	cluster, err := initCluster(ctx, &config)
+	cluster, err := initCluster(ctx, &config, diagnostics)
 	if err != nil {
 		return nil, err
 	}
@@ -282,6 +286,13 @@ func New(ctx context.Context, config Config) (*App, error) {
 		return nil, err
 	}
 	mcnMailer, _ := mailSender.(admin.MCNMailSender)
+	var roomModerationMailer *notifyemail.Client
+	if config.RoomModerationMail.URL != "" {
+		roomModerationMailer, err = notifyemail.New(config.RoomModerationMail)
+		if err != nil {
+			return nil, fmt.Errorf("room moderation mail: %w", err)
+		}
+	}
 	gifts, err := gift.Load(config.GiftCatalogFile)
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
@@ -390,7 +401,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 			db.Shutdown()
 			return nil, err
 		}
-		db.ConfigureRocketBroadcastScope(config.RelayRust.AppKey)
+		db.ConfigureRelay(config.RelayRust.AppKey, config.AgoraAppID)
 		if err := db.ImportGiftPromotionContent(ctx, interactions); err != nil {
 			db.Shutdown()
 			return nil, err
@@ -455,7 +466,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		giftOverrides = db
 	}
 	giftCatalog := gift.NewCatalog(gifts, giftOverrides)
-	backoffice, err := managementServer(config, db, principals, config.AdminAddr, admin.OperationArea, giftCatalog, collectibles, finance, diagnostics)
+	backoffice, err := managementServer(config, db, principals, config.AdminAddr, admin.OperationArea, giftCatalog, collectibles, finance, diagnostics.ServeHTTP)
 	if err != nil {
 		db.Shutdown()
 		return nil, err
@@ -491,16 +502,20 @@ func New(ctx context.Context, config Config) (*App, error) {
 		config.RelayRust.Metrics = metrics
 	}
 	push := relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL, config.RelayRust)
-	httpapi.RegisterLiveAudit(mux, liveAudit, db, push, config.AgoraAppID)
+	httpapi.RegisterLiveAudit(mux, liveAudit, db)
 	dates := &httpapi.Dates{Accounts: accounts, Service: date.New(dateStore, accounts, subscriptions, billing),
 		Signer: signer, Subtitles: dateSubtitles, Push: push}
 	dates.Register(mux)
 	httpapi.RegisterDateGiftOrders(mux, dates, billing, giftCatalog)
-	httpapi.RegisterWheel(mux, accounts, rooms, billing)
+	var staticReviewer posts.Reviewer
+	if config.PostReviewToken != "" && db != nil {
+		staticReviewer = postReviewer
+	}
+	httpapi.RegisterWheel(mux, accounts, rooms, billing, staticReviewer)
 	httpapi.RegisterRoomGiftEffects(mux, accounts, rooms, config.RocketLikeSpeedCoefficient)
 
 	httpapi.RegisterWithEmail(mux, accounts, rooms, signer, emailVerification,
-		httpapi.LiveServices{Subtitles: subtitles, Dates: dates, Collectible: collectibles, PreloginEnd: config.PreloginEnd})
+		httpapi.LiveServices{Subtitles: subtitles, Dates: dates, Collectible: collectibles, PreloginEnd: config.PreloginEnd, StaticReviewer: staticReviewer})
 	httpapi.RegisterSTT(mux, accounts, subtitles, dateSubtitles)
 	httpapi.RegisterTranslate(mux, accounts, translate.New(config.TextTranslation))
 	googleLogin := auth.GoogleLogin{Config: config.Google, Accounts: accounts, Backend: backend, Mail: emailVerification}
@@ -517,7 +532,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterAnchorProfiles(mux, accounts, rooms, anchorProfiles, subscriptions, collectibles, postReviewer, kyc)
 	httpapi.RegisterAnchorTasks(mux, accounts, rooms, anchorProfiles, anchorTasks, config.AnchorTaskToken)
 	httpapi.RegisterAnchorChannelReports(mux, channelAuth, channelReports)
-	httpapi.RegisterSubscriptions(mux, accounts, rooms, subscriptions, billing, inbox, config.SubscriptionRenewToken)
+	httpapi.RegisterSubscriptions(mux, accounts, rooms, subscriptions, billing, inbox, config.SubscriptionRenewToken, staticReviewer)
 	httpapi.RegisterPosts(mux, accounts, rooms, anchorPosts, subscriptions, billing, httpapi.PostOptions{
 		Anchors: anchorProfiles, Reviewer: postReviewer, MediaReviewer: mediaReviewer, AuditRequired: config.PostAuditRequired, ReviewToken: config.PostReviewToken,
 	})
@@ -528,7 +543,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	}
 	httpapi.RegisterLiveIncomeSchedule(mux, config.LiveIncomeScheduleToken, incomeCollector)
 	httpapi.RegisterNotices(mux, accounts, notices)
-	httpapi.RegisterFeed(mux, accounts, rooms, subscriptions, inbox, messages, config.DMModerator)
+	httpapi.RegisterFeed(mux, accounts, rooms, subscriptions, inbox, messages, config.DMModerator, staticReviewer)
 	httpapi.RegisterUploads(mux, accounts, config.Upload, uploads)
 	httpapi.RegisterPublicCatalog(mux, reference)
 	httpapi.RegisterClientServices(mux, accounts, config.CDNKey, config.WebPush)
@@ -537,7 +552,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterFeedback(mux, accounts, feedbacks, config.Upload, config.FeedbackHook)
 	httpapi.RegisterDirectMessages(mux, accounts, messages, config.DMModerator, push)
 	httpapi.RegisterBotChat(mux, accounts, botMessages, push)
-	registerMaintenance(mux, config, db, rooms, signer, diagnostics)
+	registerMaintenance(mux, config, db, rooms, signer, diagnostics.ServeHTTP)
 	edge.Register(mux, rooms, notices, config.EdgeToken)
 
 	handler := httpx.BrowserHandler(mux, httpx.BrowserConfig{Origins: config.CORSOrigins, RateLimit: config.RateLimit, TrustedProxies: config.Geo.TrustedProxies})
@@ -549,22 +564,23 @@ func New(ctx context.Context, config Config) (*App, error) {
 	}
 	opened = true
 	return &App{
-		collectibleConfig: collectibles,
-		cluster:           cluster,
-		metrics:           metrics,
-		liveAudit:         liveAudit,
-		geoDB:             geoDB,
-		push:              push,
-		dates:             dates,
-		mcnMailer:         mcnMailer,
-		db:                db,
-		Config:            config,
-		Accounts:          accounts,
-		Rooms:             rooms,
-		DM:                messages,
-		Backoffice:        backoffice,
-		MCNBackoffice:     mcnBackoffice,
-		Subtitles:         subtitles,
+		collectibleConfig:    collectibles,
+		cluster:              cluster,
+		metrics:              metrics,
+		liveAudit:            liveAudit,
+		geoDB:                geoDB,
+		push:                 push,
+		dates:                dates,
+		mcnMailer:            mcnMailer,
+		roomModerationMailer: roomModerationMailer,
+		db:                   db,
+		Config:               config,
+		Accounts:             accounts,
+		Rooms:                rooms,
+		DM:                   messages,
+		Backoffice:           backoffice,
+		MCNBackoffice:        mcnBackoffice,
+		Subtitles:            subtitles,
 		Server: &http.Server{
 			Addr:              config.Addr,
 			Handler:           handler,
@@ -585,7 +601,8 @@ func managementServer(config Config, db *postgres.Store, principals admin.Princi
 		MCNJoinURL: config.MCNJoinURL, MCNInternalToken: config.MCNInternalToken,
 		Finance: finance, ConfigDiagnostics: diagnostics,
 		Images: config.Upload, ImagePrefix: config.AdminImagePrefix,
-		Collectibles: collectibles,
+		Collectibles:         collectibles,
+		LegacyWorkbookReader: os.Getenv("ADMIN_XLSB_PYTHON"),
 	})
 	if err != nil {
 		return nil, err

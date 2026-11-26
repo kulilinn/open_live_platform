@@ -15,6 +15,7 @@ var (
 	ErrForbidden         = errors.New("subscription action is forbidden")
 	ErrInvalidPlan       = errors.New("invalid subscription plan")
 	ErrPurchaseReview    = errors.New("subscription payment is pending verification")
+	ErrPurchaseConflict  = errors.New("subscription purchase request does not match the existing order")
 	ErrTrialClaimed      = errors.New("subscription promotion already claimed")
 	ErrRenewalIneligible = errors.New("subscription is ineligible for renewal")
 )
@@ -126,6 +127,11 @@ type Purchase struct {
 	Points   int64
 	New      bool
 	Paid     bool
+	Declined bool
+}
+
+type PurchaseRequest struct {
+	OrderNo, Key, Bundle string
 }
 
 type Charge struct {
@@ -163,7 +169,7 @@ type Store interface {
 	SubscribeFree(ctx context.Context, members dm.Metadata) error
 	SubscribeTrial(ctx context.Context, members dm.Metadata, planID int64) error
 	Cancel(ctx context.Context, members dm.Metadata, planID int64, reason int) error
-	ReservePurchase(ctx context.Context, fanID, anchorID, planID int64, orderNo string) (Purchase, error)
+	ReservePurchase(ctx context.Context, fanID, anchorID, planID int64, request PurchaseRequest) (Purchase, error)
 	DeclinePurchase(ctx context.Context, orderNo string) error
 	ConfirmPurchase(ctx context.Context, orderNo string, members dm.Metadata, charge Charge) error
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/posts"
 )
 
 const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
@@ -167,7 +168,10 @@ func (s *Store) StartWithSettings(ctx context.Context, owner int64, settings liv
 		}
 		_, err = r.tx.Exec(ctx, `INSERT INTO room_broadcast_metrics(live_id,room_id,started_at)
 			VALUES($1,$2,$3)`, result.Session.LiveID, r.id, result.Session.StartedAt)
-		return err
+		if err != nil {
+			return err
+		}
+		return bindStaticReviews(ctx, r.tx, owner, r.id, posts.ReviewRoomTitle, posts.ReviewRoomBanner, posts.ReviewOfflineInfo)
 	})
 	if err != nil {
 		return live.Room{}, err
@@ -230,7 +234,10 @@ func (s *Store) updateSettings(ctx context.Context, ownerID int64, settings live
 			}
 		}
 		result, err = r.writeSettings(room, hash, password != nil, false)
-		return err
+		if err != nil {
+			return err
+		}
+		return bindStaticReviews(ctx, r.tx, ownerID, r.id, posts.ReviewRoomTitle, posts.ReviewRoomBanner, posts.ReviewOfflineInfo)
 	})
 	if err != nil {
 		return live.Room{}, err

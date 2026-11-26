@@ -122,6 +122,8 @@ docker run --rm --name open-live-platform --stop-timeout 20 \
 
 财务加减点、大额订单入账和坏账登记使用 `PAYMENT_HOST` 上的支付服务。Go 在发送前保存操作编号，在收到上游确认后记录凭证。使用相同 `Idempotency-Key` 重试会读取已保存的结果。大额入账和坏账登记还按支付订单号去重。若返回 `202`，请保留 `X-Finance-Attempt` 编号用于对账。同一操作在结果未知时保持待核对状态。坏账记录保留原始扣款凭证，并按上游回传的交易编号、交易金额和用户核对后供财务与解约清算使用。日充值报表读取导入的原 `order_statistic_data`，点数历史包含导入的 `admin_modify_point_log` 和新确认的财务操作。二次确认邮件需要配置 `PAYMENT_LARGE_ORDER_CONFIRM_TEMPLATE` 和支付通知服务。
 
+运营警告、强制关播和禁播在同一事务中记录违规、写入主播站内信并登记 H5 通知。主播连到另一实例也能收到处分。禁播和恢复还会登记待发邮件。`go run ./cmd/import-live-history` 导入原 `language_template` 后，后台任务按主播语言选择模板，用 `LOVEROSE_PUSH_HOST` 和 `LOVEROSE_PUSH_PATH` 调用原通知服务。发件人使用 `LOVEROSE_PUSH_EMAIL` 和 `LOVEROSE_PUSH_EMAIL_NAME` 中以分号分隔的第二项。临时禁播时间使用日本时间。邮件重试复用同一个投递编号。
+
 私有后台 `/api/payment/{path}` 支持原有 GET 和 POST。通过 `PAYMENT_ADMIN_PROXY_ROUTES` 配置可用的上游方法和路径，格式与 `PAYMENT_PROXY_ROUTES` 相同。财务租户和权限验证在转发之前完成，服务向支付提供方传递当前财务操作员的 `USER_ID`。预留的加减点、大额入账和坏账请求使用各自的财务入口。
 
 运营的 `/api/operation/nft/creation_card` 支持库存分页、编辑、批量开售时间，以及绑卡与解绑。绑卡通过配置的区块链 RPC 核验钱包仍持有该卡片，变更归属、装备和历史记录在同一事务提交。四个写入接口可传 `Idempotency-Key`，跨副本重试使用相同的键和请求内容。
@@ -151,6 +153,8 @@ MCN 后台的机构概览、入驻状态、消息和直播统计按机构隔离�
 ### Luban JSON 配置发布
 
 Go 读取 `{ETCD_CONFIG_PREFIX}/json/{table}.json` 的 Rust Luban JSON 数组。先写所需表，再写同前缀下的 `version`。Go 在该版本的同一 etcd revision 读取并验证配置，失败时继续使用之前的有效配置。
+
+配置 `ETCD_URL` 和 `ETCD_CONFIG_PREFIX` 后，公开和运营监听的 `GET /testconfig` 同时读取 `demo_tbitem.json` 的已发布内容。没有发布该表时读取 `DEMO_ITEMS_FILE`。表更新发布后，两处诊断会切换到同一份快照。表已发布后，空数组可清空内容，缺失或无效的表会保留上次有效值。
 
 - 设置 `USE_LIVEROOM_BOT` 并省略 `LIVEROOM_BOT_FILE` 时，PostgreSQL 模式从 etcd 读取账号、欢迎语和礼物回复。支持 `robot_create_property`、`robot_welcome_message_text`、`robot_interactive_gift_text`，以及房间人数、进出时间和两类回复延时的权重表。
 - 设置 `PLATFORM_ETCD_NFT=true` 时，从 `nft_equity_data`、`live_decoration_config` 和 `nft_card` 热更新 NFT 权益、装扮及已有卡片的展示数据。持有人、交易状态和库存继续来自原有持久记录及链上验证。
@@ -221,7 +225,7 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 
 免费订阅开通双方私信。付费订阅需要 PostgreSQL 和 `PAYMENT_HOST`、`PAYMENT_APPID`。Go 服务向原点数接口请求扣款，验证返回订单后保存付款凭据和订阅，并在同一数据库事务开通私信。仍有有效订阅时保留私信权限，最后一条订阅退订或到期后停止发送。上游结果不明确时保留待核对订单，同一计划的重试复用该订单号。
 
-主播用 `anchor/promote` 和 `anchor/unpromote` 管理计划的限时促销。`pay_sub` 的 `promotion: 1` 保留旧服务的免费体验流程，限初次订阅者领取，体验期结束后停止对应权限。`anchor/create_buddle` 和 `anchor/del_buddle` 管理计划中的套餐展示。套餐付款需要独立的计价和结算能力。
+主播用 `anchor/promote` 和 `anchor/unpromote` 管理计划的限时促销。`pay_sub` 的 `promotion: 1` 保留旧服务的免费体验流程，限初次订阅者领取，体验期结束后停止对应权限。`anchor/create_buddle` 和 `anchor/del_buddle` 管理套餐展示。普通 `pay_sub` 即使带有旧 `buddle` 字符串也按订阅计划的月价扣款。Go 把原始字符串保存在订单中，用于核对重复请求。
 
 设置 `SUBSCRIPTION_RENEW_TOKEN` 后，调度服务可持该 Bearer 令牌调用 `POST /api/sub/renew_sub`。每次检查最多 100 笔将在 UTC 后天零点前到期的有效订阅。续期要求先前已有验证通过的付费订单，且当前点数价格和最近一次实际扣款相同。点数不足时记录续费失败并取消续期。上游结果不明确时保留订单号供核对，并在结果确定前返回待核对状态。
 
@@ -235,7 +239,7 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 
 设置 `POST_AUDIT_URL` 会将帖子和评论提交审核，可用 `POST_AUDIT_TOKEN` 传入 Bearer 凭证。审核服务接受 `kind`、`user_id`、`post_id`、`text` 和可选 `media`，以 HTTP 200 返回 `pass_status`，其中 1 为待审、2 为拒绝、3 为通过。设置 `POST_AUDIT_REQUIRED=true` 可让未接入审核服务的新帖子待审。配置 `POST_REVIEW_TOKEN` 后，审核服务可持该 Bearer 凭证调用 `POST /internal/anchor-post/review`，传入 `post_id` 和最终 `pass_status`。待审和拒绝的帖子只对作者可见。未开启审核时新帖子直接发布。
 
-审核适配服务可返回 `request_id` 和 `manual_request_id`，用于原 `/sm/media/callback`、`/sm/media_manual/callback` 和针对帖子评论的 `/sm/static/callback`。这些回调要求 `POST_REVIEW_TOKEN`，且请求 ID 与审核对象要和提交时一致。公共聊天审核仍用用户自己的令牌调用 `POST /sm/public_chat/audit`。
+审核适配服务可返回 `request_id` 和 `manual_request_id`，用于原 `/sm/media/callback`、`/sm/media_manual/callback` 和 `/sm/static/callback`。这些回调要求 `POST_REVIEW_TOKEN`。静态审核覆盖主播资料、直播主题和封面、离线公告、订阅欢迎语、订阅计划名称、转盘选项及帖子评论。资料更新提交时，将后台返回的 `manual_request_id` 与内容和版本一同保存。回调的 `data.passThrough` 需携带提审时的 `userId`、对象 `id`、`contentType` 和原始 `content`。内容即使改动后恢复为原值，早期回调也无法清除新版本。公共聊天审核用用户自己的令牌调用 `POST /sm/public_chat/audit`。
 
 配置 `SM_MEDIA_URL`、`SM_ACCESS_KEY`、`SM_APPID` 和 `SM_CALLBACK_URL` 可将新帖子中的文本、图片和视频直接提交数美融媒体审核。配置 `SM_MANUAL_MEDIA_URL` 后，匹配的 `REVIEW` 回调会按原协议转人工审核并保存人工请求 ID。只有与对应阶段及帖子作者匹配的回调才会修改状态，审核结果保存在 PostgreSQL。其他内容仍使用各自的审核服务配置。
 
@@ -421,6 +425,8 @@ PostgreSQL 模式支持旧的 `POST /api/date/give/gifts`。只有当前约会�
 
 在运营后台 `/api/operation/gifts/` 管理 `activity`、`product` 限购模板、`gift_box`、`gift_shortcut`。1vN 送礼使用启用且在有效期内的 `limit_id` 按 `discountPrice × quantity` 扣款，`discountIncome` 按订单计入主播收益。和 Rust 一样，数量不能超过配置的单次限值，每笔确认成功的订单在配置窗口内计入一份用户和平台用量。待确认支付占用额度，明确被拒绝后可再次购买。导入已有受限促销时，需要 `usedByUser`、`usedPlatform` 中适用的历史计数以及 `discountIncome`，否则该促销无法结算。上线时从旧 Redis 保存实际配额，初始 JSON 用 `GIFT_INTERACTION_FILE` 导入，之后后台更新由 PostgreSQL 统一生效。
 
+礼物工作簿上传保留原 `gift_config`、`gift_box`、`quick_gift_config` 和 `product_limit_config` 文件基名，并从 `Sheet1` 读取固定列。服务器按内容识别格式，内置读取 OpenXML、Excel 97–2003 `.xls` 和 OpenDocument `.ods`。需要直接上传 `.xlsb` 时，在独立 Python 虚拟环境安装 `python-calamine==0.6.1`，将 `ADMIN_XLSB_PYTHON` 设为其中 Python 可执行文件的绝对路径。基础容器可直接导入前述内置格式。导入读取公式的保存值，无需打开 Excel。超过 Excel 数值精度范围的 ID 应作为文本保存。
+
 为调度端配置单独的 `LIVE_INCOME_SCHEDULE_TOKEN`，每天使用 Bearer 凭证请求 `GET /schedule/statistic/streamer_live_income`。任务汇总上一完整 UTC 日内已结算的直播直送礼物、火箭奖品及转盘收益，扣除已确认坏账。财务后台 `POST /api/finance/purchase/streamer_live_income` 可按主播、机构和开播时间查询日报。已导入的原 `anchor_live_income_statistic` 也可查询。Go 订阅账没有直播场次标识，无法把这部分订阅收入计入某场直播日报。
 
 ## PostgreSQL
@@ -454,7 +460,9 @@ PG 模式下，账号、登录会话、房间、成员、管理员、禁言、�
 
 分享发布、更新和删除沿用 `/api/shares/*` 与 5 MiB 图片上传，公开列表返回 CDN 图片地址和下一页偏移量。更新和删除要求登录账号是分享作者。用户反馈在 `/api/feedback/submit` 保存，可选附件存入 S3；`FEEDBACK_HOOK_URL` 配置通知接收方。每位用户每分钟可提交一次。
 
-旧应用目录、版本、国家、帮助分类/问答、跑马灯及 PWA 主播清单通过 `go run ./cmd/import-live-catalog` 迁入 PostgreSQL。命令读取 `LIVEMEDIA_MYSQL_DSN` 和 `DATABASE_URL`，每次成功导入会在同一事务中替换整套公开资料。导入只选用公开列，应用密钥留在源库。
+旧应用目录、版本、国家、帮助分类和问答、跑马灯及 PWA 主播清单通过 `go run ./cmd/import-live-catalog` 迁入 PostgreSQL。命令读取 `LIVEMEDIA_MYSQL_DSN` 和 `DATABASE_URL`，在同一事务中补齐缺失栏目并保留已有内容。`-replace=public` 可刷新这些公开栏目，同时保留已有的广播配置、访问和提现设置及屏蔽词库。`-replace=all` 会用旧库整套覆盖上述资料和运营设置。应用密钥留在源库。
+
+有旧词库快照时可加 `-word-list-dir <目录>`。命令在该目录内按旧文件 URL 路径、保存的文件名或 URL 的末段查找，读取原始字节后写入 PostgreSQL。命令只读取本地快照。缺失文件的记录保留元数据，终端列出源记录中匹配和缺失的数量。默认复跑可为元数据完全相同的旧条目补文件，并保留 Go 已上传的文件和运营修改。执行 `-replace=all` 时，旧库词库会整体替换现有词库，需同时提供要保留的文件快照。
 
 ## 检查
 
@@ -469,10 +477,12 @@ Telegram Mini App 通过 `TELEGRAM_BOT_TOKEN` 校验登录签名。Web Push 订�
 浏览器来源沿用 `CORS_ORIGIN`，多个域名以分号分隔。公开服务按 Rust 的登录、机器人聊天等入口执行进程内每 IP 和路径限流。连续 601 次请求后，客户端待最后一次获准请求经过 6 秒即可重试。`TEST_MODE=true` 可在本地关闭该限制。
 
 ```powershell
-go test ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
 go vet ./...
+go build ./...
 ```
 
-配置 `OPEN_LIVE_TEST_DATABASE_URL` 后，`go test -count=1 ./internal/app` 会执行真实数据库回归测试。请使用专用测试数据库。
+完整回归使用专用 PostgreSQL、etcd 和 Kafka，以及读取二进制工作簿的 Python 环境。四项测试配置及验收范围见 [TODO.md](./TODO.md)。
 
 模块边界和源项目分析见 [MIGRATION_ANALYSIS.md](./MIGRATION_ANALYSIS.md)。

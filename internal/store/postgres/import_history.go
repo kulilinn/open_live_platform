@@ -30,6 +30,16 @@ func (s *Store) ImportLegacyHistory(ctx context.Context, rows iter.Seq2[HistoryR
 			if err != nil {
 				return err
 			}
+			if row.Source == "language_template" {
+				tag, err := tx.Exec(ctx, `INSERT INTO room_moderation_mail_templates AS t(key,texts) VALUES($1,$2::jsonb-'key')
+					ON CONFLICT(key) DO UPDATE SET texts=excluded.texts WHERE t.texts IS DISTINCT FROM excluded.texts`, row.ID, row.Record)
+				if err != nil {
+					return fmt.Errorf("import language template: %w", err)
+				}
+				c.Read++
+				c.Changed += tag.RowsAffected()
+				continue
+			}
 			if row.Source == "anchor_users" || row.Source == "anchor_users_kyc" {
 				n, err := restoreAnchorReview(ctx, tx, row)
 				if err != nil {

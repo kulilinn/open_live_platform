@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -49,7 +50,12 @@ func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) 
 	}
 	rust := rustRoomCompat(r) || (input.Title == nil && (input.Subject != nil || input.Banner != nil || input.Tag != nil ||
 		input.Description != nil || input.OfflineInfo != nil || input.Plan != nil || input.Gifts != nil || input.TranslationEnabled != nil))
-	room, err := s.rooms.StartWithSettings(r.Context(), userID, input.settings(), rust)
+	settings := input.settings()
+	ctx, ok := s.auditRoomFields(w, r.Context(), userID, settings, true)
+	if !ok {
+		return
+	}
+	room, err := s.rooms.StartWithSettings(ctx, userID, settings, rust)
 	if err != nil {
 		if rust && errors.Is(err, live.ErrRoomLimited) {
 			httpx.JSON(w, http.StatusOK, map[string]string{"status": "4035", "message": "room is limited"})
@@ -180,14 +186,18 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 	settings := input.settings()
+	ctx, ok := s.auditRoomFields(w, r.Context(), userID, settings, false)
+	if !ok {
+		return
+	}
 	rust := rustRoomCompat(r)
 	var room live.Room
 	var err error
 	if rust {
 		settings.Password = cmp.Or(settings.Password, new(string))
-		room, err = s.rooms.ConfigureRoom(r.Context(), userID, settings)
+		room, err = s.rooms.ConfigureRoom(ctx, userID, settings)
 	} else {
-		room, err = s.rooms.UpdateSettings(r.Context(), userID, settings)
+		room, err = s.rooms.UpdateSettings(ctx, userID, settings)
 	}
 	if err != nil {
 		httpx.LiveError(w, err)
@@ -205,6 +215,24 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": info})
+}
+
+func (s server) auditRoomFields(w http.ResponseWriter, ctx context.Context, owner int64, settings live.RoomSettings, start bool) (context.Context, bool) {
+	if s.staticReviewer == nil || (settings.Title == nil && settings.Banner == nil && settings.OfflineInfo == nil) {
+		return ctx, true
+	}
+	room, err := s.rooms.Info(ctx, owner)
+	if err != nil && !errors.Is(err, live.ErrRoomNotFound) {
+		httpx.LiveError(w, err)
+		return ctx, false
+	}
+	if start && room.Online {
+		return ctx, true
+	}
+	return submitStaticReviews(w, ctx, s.staticReviewer, owner,
+		staticContent{typeID: posts.ReviewRoomTitle, object: owner, kind: "room_title", before: room.Title, after: optionalStaticValue(settings.Title), refusal: "4064"},
+		staticContent{typeID: posts.ReviewRoomBanner, object: owner, kind: "room_banner", before: room.Banner, after: optionalStaticValue(settings.Banner), refusal: "4063", image: true},
+		staticContent{typeID: posts.ReviewOfflineInfo, object: owner, kind: "room_offline_info", before: room.OfflineInfo, after: optionalStaticValue(settings.OfflineInfo), refusal: "4057"})
 }
 
 func (s server) listRooms(w http.ResponseWriter, r *http.Request, userID int64) {

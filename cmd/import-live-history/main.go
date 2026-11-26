@@ -32,6 +32,7 @@ var tables = []sourceTable{
 	{"pay_orders", "id", "user_id", "id ?no user_id amount point payment_method_name status create_time"},
 	{"order_statistic_data", "id", "0", "id dau first_purchase_num purchase_user_num point_total consume_point_total platform_point_total pay_amount receivable_amount create_time"},
 	{"admin_modify_point_log", "id", "create_by", "id users point create_by create_by_name create_time reason"},
+	{"language_template", "key", "0", "key zh_cn zh_tw en_us ja_jp"},
 	{"point_transactions", "id", "user_id", "id no user_id anchor_id live_id transaction_type transaction_order_id transaction_order_no subject total_point income_or_expenses total_bad_debt_point create_time update_time"},
 	{"gift_production_marketing", "id", "sender_id", "id gift_id sender_id"},
 	{"gifts", "id", "id", "id name"},

@@ -16,6 +16,7 @@ import (
 	"open_live_platform/internal/gift"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/payment"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -25,12 +26,15 @@ type wheelAPI struct {
 	billing *payment.Client
 }
 
-func RegisterWheel(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, billing *payment.Client) {
+func RegisterWheel(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, billing *payment.Client, reviewer ...posts.Reviewer) {
 	store, ok := rooms.(gift.WheelStore)
 	if !ok {
 		return
 	}
 	a := wheelAPI{server{accounts: accounts, rooms: rooms}, store, billing}
+	if len(reviewer) > 0 {
+		a.staticReviewer = reviewer[0]
+	}
 	mux.HandleFunc("POST /api/date/set/wheel/price", a.authenticated(a.change("price")))
 	mux.HandleFunc("POST /api/date/set/wheel/value", a.authenticated(a.change("values")))
 	mux.HandleFunc("POST /api/date/wheel/open_or_close", a.authenticated(a.change("status")))
@@ -69,6 +73,7 @@ func (a wheelAPI) change(kind string) userHandler {
 			}
 		}
 		var change gift.WheelChange
+		ctx := r.Context()
 		switch kind {
 		case "price":
 			if input.Price < 10 || input.Price > math.MaxInt32 {
@@ -90,6 +95,25 @@ func (a wheelAPI) change(kind string) userHandler {
 				options = append(options, value)
 			}
 			change.Options = &options
+			if a.staticReviewer != nil {
+				previous, err := a.store.WheelConfig(ctx, actor)
+				if err != nil {
+					httpx.LiveError(w, err)
+					return
+				}
+				var checks []staticContent
+				for index, option := range options {
+					if index >= len(previous.Options) || previous.Options[index] != option {
+						checks = append(checks, staticContent{typeID: posts.ReviewWheelOption, object: int64(index) + 1, slot: index + 1,
+							kind: "wheel_option", after: option, refusal: "4065"})
+					}
+				}
+				var ok bool
+				ctx, ok = submitStaticReviews(w, ctx, a.staticReviewer, actor, checks...)
+				if !ok {
+					return
+				}
+			}
 		case "status":
 			if input.Status == nil || *input.Status < 0 || *input.Status > 1 {
 				httpx.Error(w, http.StatusBadRequest, "invalid wheel status")
@@ -97,7 +121,7 @@ func (a wheelAPI) change(kind string) userHandler {
 			}
 			change.Status = input.Status
 		}
-		if err := a.store.UpdateWheelConfig(r.Context(), actor, change); err != nil {
+		if err := a.store.UpdateWheelConfig(ctx, actor, change); err != nil {
 			httpx.LiveError(w, err)
 			return
 		}

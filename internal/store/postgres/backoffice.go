@@ -14,6 +14,7 @@ import (
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/relay"
 )
 
 var _ admin.BackofficeStore = (*Store)(nil)
@@ -262,11 +263,25 @@ func (s *Store) applyBackofficeAction(ctx context.Context, r *roomChange, actor 
 	if until > 0 {
 		until += time.Now().Unix()
 	}
+	if ty := map[string]int{"streamer_disable": 11, "streamer_alert": 12, "streamer_end_stream": 13}[op.Kind]; ty != 0 {
+		if _, err := r.tx.Exec(ctx, `INSERT INTO notices(id,notice_target,notice_type,receive_id,content,create_time)
+			VALUES(nextval('local_notice_ids'),1,$1,$2,jsonb_build_object('reason',coalesce($3::text[],'{}')),now())`, ty, op.UserID, op.Reason); err != nil {
+			return err
+		}
+		now := time.Now().Unix()
+		frame, err := relay.PrivateFrame(op.UserID, op.Kind, map[string]any{"appId": s.agoraAppID,
+			"roomId": strconv.FormatInt(op.RoomID, 10), "uid": strconv.FormatInt(op.UserID, 10), "reason": op.Reason,
+			"limitTime": now + max(op.Duration, 0), "limitTotal": op.Duration, "ts": now})
+		if err != nil {
+			return err
+		}
+		if err := s.publishDeviceSignal(ctx, r.tx, relay.RustDeviceSignal{Scope: s.relayScope, UserID: op.UserID, Kind: "private", Data: frame}); err != nil {
+			return err
+		}
+	}
 	switch op.Kind {
 	case "streamer_alert":
-		_, err := r.tx.Exec(ctx, `INSERT INTO notices(id,notice_target,notice_type,receive_id,content,create_time)
-				VALUES(nextval('local_notice_ids'),1,12,$1,jsonb_build_object('reason',coalesce($2::text[],'{}')),now())`, op.UserID, op.Reason)
-		return err
+		return nil
 	case "account_reset":
 		if _, err := r.tx.Exec(ctx, `UPDATE users SET account='',profile=coalesce(profile,'{}'::jsonb)||'{"Name":"","Photo":""}' WHERE id=$1`, op.UserID); err != nil {
 			return err
@@ -302,6 +317,9 @@ func (s *Store) applyBackofficeAction(ctx context.Context, r *roomChange, actor 
 			until, op.Duration, reason = 0, 0, ""
 		}
 		if _, err := r.tx.Exec(ctx, `UPDATE rooms SET moderation_until=$2,moderation_total=$3,moderation_reason=$4 WHERE id=$1`, op.RoomID, until, op.Duration, reason); err != nil {
+			return err
+		}
+		if err := queueRoomModerationMail(ctx, r.tx, op); err != nil {
 			return err
 		}
 		if op.Kind == "streamer_enable" {

@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,35 +16,32 @@ import (
 )
 
 // LiveMedia publishes these four sheets with a header and fixed column positions.
-func readGiftSheet(kind string, src io.Reader) (GiftSheetBatch, error) {
+func readGiftSheet(ctx context.Context, kind string, src io.Reader, legacyReader string) (GiftSheetBatch, error) {
 	var batch GiftSheetBatch
 	if !slices.Contains([]string{"gift_config", "gift_box", "quick_gift_config", "product_limit_config"}, kind) {
 		return batch, errors.New("unknown workbook name")
 	}
-	book, err := excelize.OpenReader(src, excelize.Options{RawCellValue: true, UnzipSizeLimit: 64 << 20, UnzipXMLSizeLimit: 2 << 20})
-	if err != nil {
-		return batch, errors.New("invalid Excel workbook")
-	}
-	defer book.Close()
-	rows, err := book.Rows("Sheet1")
-	if err != nil {
-		return batch, errors.New("missing Sheet1")
-	}
-	defer rows.Close()
-	props, err := book.GetWorkbookProps()
+	rows, oldDate, closeBook, err := openGiftSheet(ctx, src, legacyReader)
 	if err != nil {
 		return batch, err
 	}
+	defer closeBook()
+	return parseGiftRows(kind, rows, oldDate)
+}
+
+func parseGiftRows(kind string, rows iter.Seq2[[]string, error], oldDate bool) (GiftSheetBatch, error) {
+	var batch GiftSheetBatch
 	count := 0
-	for n := 1; rows.Next(); n++ {
-		raw, err := rows.Columns(excelize.Options{RawCellValue: true})
+	n := 0
+	for raw, err := range rows {
+		n++
 		if err != nil {
 			return batch, err
 		}
 		if n == 1 || len(raw) == 0 {
 			continue
 		}
-		r := sheetRow{cells: raw, oldDate: props.Date1904 != nil && *props.Date1904}
+		r := sheetRow{cells: raw, oldDate: oldDate}
 		switch kind {
 		case "gift_config":
 			price := r.money(3)
@@ -67,9 +66,6 @@ func readGiftSheet(kind string, src io.Reader) (GiftSheetBatch, error) {
 			return batch, fmt.Errorf("row %d: %w", n, r.err)
 		}
 		count++
-	}
-	if err := rows.Error(); err != nil {
-		return batch, err
 	}
 	if count == 0 {
 		return batch, errors.New("Sheet1 contains no records")
@@ -141,7 +137,7 @@ func (r *sheetRow) money(i int) int64 {
 }
 func (r *sheetRow) date(i int) time.Time {
 	s := strings.TrimSpace(r.text(i))
-	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t.UTC()
 		}

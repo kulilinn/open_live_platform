@@ -1,4 +1,4 @@
-// Command import-live-catalog copies public LiveMedia reference data from MySQL to PostgreSQL.
+// Command import-live-catalog copies LiveMedia reference data and operator settings from MySQL to PostgreSQL.
 package main
 
 import (
@@ -6,15 +6,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
-	"github.com/go-sql-driver/mysql"
+	"io"
 	"log"
-	"open_live_platform/internal/catalog"
-	"open_live_platform/internal/store/postgres"
 	"os"
 	"os/signal"
 	"strconv"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"open_live_platform/internal/catalog"
+	"open_live_platform/internal/store/postgres"
 )
 
 var sections = []struct{ name, query string }{
@@ -32,13 +35,67 @@ var sections = []struct{ name, query string }{
 }
 
 func main() {
+	opts, err := parseOptions(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	if err := run(ctx); err != nil {
+	if err := run(ctx, opts); err != nil {
 		log.Fatal(err)
 	}
 }
-func run(ctx context.Context) error {
+
+type options struct {
+	replace   string
+	wordLists string
+}
+
+func parseOptions(args []string, output io.Writer) (options, error) {
+	var opts options
+	flags := flag.NewFlagSet("import-live-catalog", flag.ContinueOnError)
+	flags.SetOutput(output)
+	flags.StringVar(&opts.replace, "replace", "none", "replace existing sections: none, public (reference data), or all (including operator settings and word lists)")
+	flags.StringVar(&opts.wordLists, "word-list-dir", "", "trusted local directory of legacy word-list files, matched by stored URL path or file name")
+	flags.Usage = func() {
+		fmt.Fprintln(output, "Usage: import-live-catalog [options]\nReads LIVEMEDIA_MYSQL_DSN and DATABASE_URL from the environment.")
+		flags.PrintDefaults()
+	}
+	if err := flags.Parse(args); err != nil {
+		return opts, err
+	}
+	if flags.NArg() != 0 {
+		return opts, errors.New("unexpected positional arguments")
+	}
+	switch opts.replace {
+	case "none", "public", "all":
+		return opts, nil
+	default:
+		return opts, errors.New("-replace must be none, public, or all")
+	}
+}
+
+func (opts options) importCatalog(ctx context.Context, dest *postgres.Store, data catalog.Snapshot) error {
+	if opts.replace == "all" {
+		return dest.ReplacePublicCatalog(ctx, data)
+	}
+	replace := map[string]bool{}
+	if opts.replace == "public" {
+		for _, section := range sections {
+			switch section.name {
+			case "broadcast_configs", "common_settings", "bad_words":
+			default:
+				replace[section.name] = true
+			}
+		}
+	}
+	return dest.SeedPublicCatalog(ctx, data, replace)
+}
+
+func run(ctx context.Context, opts options) error {
 	sourceDSN, targetDSN := os.Getenv("LIVEMEDIA_MYSQL_DSN"), os.Getenv("DATABASE_URL")
 	if sourceDSN == "" || targetDSN == "" {
 		return errors.New("set LIVEMEDIA_MYSQL_DSN and DATABASE_URL")
@@ -73,16 +130,26 @@ func run(ctx context.Context) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	var files int
+	if opts.wordLists != "" {
+		files, err = attachWordListFiles(opts.wordLists, data["bad_words"])
+		if err != nil {
+			return err
+		}
+	}
 	dest, err := postgres.Open(ctx, targetDSN)
 	if err != nil {
 		return err
 	}
 	defer dest.Shutdown()
-	if err := dest.ReplacePublicCatalog(ctx, data); err != nil {
+	if err := opts.importCatalog(ctx, dest, data); err != nil {
 		return err
 	}
 	for _, section := range sections {
 		fmt.Printf("%s=%d\n", section.name, len(data[section.name]))
+	}
+	if opts.wordLists != "" {
+		fmt.Printf("word_list_files=%d missing=%d\n", files, len(data["bad_words"])-files)
 	}
 	return nil
 }

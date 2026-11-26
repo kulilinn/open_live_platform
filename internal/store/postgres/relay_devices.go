@@ -7,10 +7,15 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"open_live_platform/internal/relay"
 )
 
 const relayDevicePrefix = "relay_device:"
+
+func (s *Store) ConfigureRelay(appKey, agoraAppID string) {
+	s.relayScope, s.agoraAppID = appKey, agoraAppID
+}
 
 type relayDeviceReceiver struct {
 	accept  func(relay.RustDeviceSignal) bool
@@ -18,12 +23,18 @@ type relayDeviceReceiver struct {
 }
 
 func (s *Store) PublishRustDeviceSignal(ctx context.Context, signal relay.RustDeviceSignal) error {
+	return s.publishDeviceSignal(ctx, s.pool, signal)
+}
+
+func (s *Store) publishDeviceSignal(ctx context.Context, db interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, signal relay.RustDeviceSignal) error {
 	payload, err := json.Marshal(signal)
 	if err != nil {
 		return err
 	}
 	if len(payload)+len(relayDevicePrefix) < 8000 {
-		_, err = s.pool.Exec(ctx, `SELECT pg_notify($1,$2)`, s.eventChannel, relayDevicePrefix+string(payload))
+		_, err = db.Exec(ctx, `SELECT pg_notify($1,$2)`, s.eventChannel, relayDevicePrefix+string(payload))
 		return err
 	}
 	data := signal.Data
@@ -32,7 +43,7 @@ func (s *Store) PublishRustDeviceSignal(ctx context.Context, signal relay.RustDe
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `WITH stored AS (
+	_, err = db.Exec(ctx, `WITH stored AS (
 		INSERT INTO relay_device_payloads(app_key,node,user_id,kind,payload,expires_at)
 		VALUES($4,$5,$6,$7,$8::jsonb,statement_timestamp()+INTERVAL '1 minute') RETURNING id
 	), expired AS (
