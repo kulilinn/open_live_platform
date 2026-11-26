@@ -3,15 +3,17 @@ package httpapi
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/dm"
+	"open_live_platform/internal/relay"
 	"open_live_platform/internal/transport/httpx"
 )
 
-func RegisterDirectMessages(mux *http.ServeMux, accounts auth.AccountStore, store dm.Store, moderator dm.Moderator) {
+func RegisterDirectMessages(mux *http.ServeMux, accounts auth.AccountStore, store dm.Store, moderator dm.Moderator, push relay.PushPrivate) {
 	s := server{accounts: accounts}
 	const base = "/api/dm/"
 	mux.HandleFunc("POST "+base+"send_message", s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {
@@ -31,6 +33,13 @@ func RegisterDirectMessages(mux *http.ServeMux, accounts auth.AccountStore, stor
 		}
 		if body.SenderID != userID {
 			dmErrorResponse(w, http.StatusUnauthorized, "401", "Unauthorized request")
+			return
+		}
+		if err := auth.CheckCommunication(r.Context(), accounts, userID); err != nil {
+			if errors.Is(err, auth.ErrCommunicationRestricted) {
+				err = dm.ErrForbidden
+			}
+			dmReply(w, nil, err)
 			return
 		}
 		input := dm.SendInput{ConversationID: body.ConversationID, SenderID: userID, ReceiverID: body.ReceiverID,
@@ -53,6 +62,11 @@ func RegisterDirectMessages(mux *http.ServeMux, accounts auth.AccountStore, stor
 			return
 		}
 		message, err := store.SendDM(r.Context(), input)
+		if err == nil {
+			if pushErr := push(r.Context(), body.ReceiverID, "dm", map[string]any{"message": body}); pushErr != nil {
+				log.Printf("notify recipient of persisted direct message: %v", pushErr)
+			}
+		}
 		dmReply(w, message, err)
 	}))
 	mux.HandleFunc("GET "+base+"page_conversation", s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {

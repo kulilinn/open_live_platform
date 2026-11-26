@@ -17,17 +17,22 @@ import (
 )
 
 type RustOptions struct {
+	AppID     int64
 	AppKey    string
 	AppSecret string
+	AppUsers  []int64
 	TTL       time.Duration
 	Tickets   RustTicketStore
 	Devices   RustDeviceStore
+	Grants    RustControlStore
 }
 
 type RustTicketRecord struct {
 	Token     string
+	LoginKey  auth.SessionKey
 	UserID    int64
 	Login     auth.RelaySession
+	Debug     bool
 	IssuedAt  int64
 	ExpiresAt time.Time
 }
@@ -44,7 +49,9 @@ type rustTicket struct {
 }
 
 type rustTickets struct {
+	appID          int64
 	appKey, secret string
+	appUsers       map[int64]struct{}
 	ttl            time.Duration
 	mu             sync.Mutex
 	byToken        map[string]*rustTicket
@@ -56,7 +63,11 @@ func newRustTickets(options RustOptions) *rustTickets {
 	if options.TTL <= 0 {
 		options.TTL = 24 * time.Hour
 	}
-	return &rustTickets{appKey: options.AppKey, secret: options.AppSecret, ttl: options.TTL, store: options.Tickets,
+	users := make(map[int64]struct{}, len(options.AppUsers))
+	for _, id := range options.AppUsers {
+		users[id] = struct{}{}
+	}
+	return &rustTickets{appID: options.AppID, appKey: options.AppKey, secret: options.AppSecret, appUsers: users, ttl: options.TTL, store: options.Tickets,
 		byToken: make(map[string]*rustTicket), bySession: make(map[auth.SessionKey]*rustTicket)}
 }
 
@@ -67,9 +78,18 @@ func rustSignature(appKey, secret, message string) string {
 }
 
 func (s *rustTickets) issue(ctx context.Context, login auth.RelaySession, uid int64, now time.Time) (*rustTicket, error) {
+	return s.issueTicket(ctx, login, uid, now, true, false)
+}
+
+func (s *rustTickets) issueTicket(ctx context.Context, login auth.RelaySession, uid int64, now time.Time, reusable, debug bool) (*rustTicket, error) {
 	var random [16]byte
 	rand.Read(random[:])
-	record := RustTicketRecord{Token: hex.EncodeToString(random[:]), UserID: uid, Login: login, IssuedAt: now.Unix(), ExpiresAt: now.Add(s.ttl)}
+	token := hex.EncodeToString(random[:])
+	key := login.Key()
+	if !reusable {
+		key = auth.SessionKey("relay-acquire:" + token)
+	}
+	record := RustTicketRecord{Token: token, LoginKey: key, UserID: uid, Login: login, Debug: debug, IssuedAt: now.Unix(), ExpiresAt: now.Add(s.ttl)}
 	if s.store != nil {
 		record, err := s.store.IssueRustRelayTicket(ctx, s.appKey, record, s.ttl)
 		if err != nil {
@@ -79,12 +99,12 @@ func (s *rustTickets) issue(ctx context.Context, login auth.RelaySession, uid in
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ticket := s.bySession[login.Key()]; ticket != nil && now.Before(ticket.ExpiresAt) {
+	if ticket := s.bySession[key]; ticket != nil && now.Before(ticket.ExpiresAt) {
 		return ticket, nil
 	}
 	ticket := s.sign(record)
 	s.byToken[record.Token] = ticket
-	s.bySession[login.Key()] = ticket
+	s.bySession[key] = ticket
 	time.AfterFunc(s.ttl, func() { s.removeExpired(ticket) })
 	return ticket, nil
 }
@@ -138,9 +158,19 @@ func (s *rustTickets) removeExpired(ticket *rustTicket) {
 		return
 	}
 	delete(s.byToken, ticket.Token)
-	if s.bySession[ticket.Login.Key()] == ticket {
-		delete(s.bySession, ticket.Login.Key())
+	if s.bySession[ticket.LoginKey] == ticket {
+		delete(s.bySession, ticket.LoginKey)
 	}
+}
+
+func (s *rustTickets) loginUser(ctx context.Context, accounts auth.AccountStore, ticket *rustTicket) (auth.User, bool, error) {
+	if ticket.Login.AppUser {
+		if _, ok := s.appUsers[ticket.UserID]; !ok {
+			return auth.User{}, false, nil
+		}
+	}
+	user, ok, err := ticket.Login.Lookup(ctx, accounts)
+	return user, ok && user.ID == ticket.UserID && !user.Moderation.Banned(), err
 }
 
 func connectorURL(r *http.Request, publicURL, token, signature string) string {
@@ -165,12 +195,12 @@ func (s *rustTickets) verifyHTTP(accounts auth.AccountStore, w http.ResponseWrit
 		return
 	}
 	if ticket != nil {
-		user, ok, err := ticket.Login.Lookup(r.Context(), accounts)
+		user, ok, err := s.loginUser(r.Context(), accounts, ticket)
 		if err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "authentication failed")
 			return
 		}
-		if ok && user.ID == ticket.UserID {
+		if ok {
 			httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": map[string]any{"app_key": s.appKey, "uid": user.ID}})
 			return
 		}

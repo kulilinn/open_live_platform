@@ -43,9 +43,9 @@ func run(ctx context.Context, dsn, appName string, input io.Reader, output io.Wr
 	defer store.Shutdown()
 	counts := make(map[postgres.LegacyJWTImportResult]int)
 	err = importSessions(ctx, appName, input, store, counts)
-	_, reportErr := fmt.Fprintf(output, "imported=%d expired=%d account_mismatch=%d existing_session=%d\n",
+	_, reportErr := fmt.Fprintf(output, "imported=%d expired=%d account_mismatch=%d existing_session=%d restricted=%d\n",
 		counts[postgres.LegacyJWTImported], counts[postgres.LegacyJWTExpired],
-		counts[postgres.LegacyJWTAccountMismatch], counts[postgres.LegacyJWTExistingSession])
+		counts[postgres.LegacyJWTAccountMismatch], counts[postgres.LegacyJWTExistingSession], counts[postgres.LegacyJWTRestricted])
 	return errors.Join(err, reportErr)
 }
 

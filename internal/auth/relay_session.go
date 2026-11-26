@@ -8,6 +8,7 @@ import (
 // RelaySession identifies the login behind an authenticated relay ticket. A
 // JWT ticket follows its refresh family through access-token rotation.
 type RelaySession struct {
+	AppUser     bool
 	OpaqueToken string
 	UserID      int64
 	FamilyID    int64
@@ -27,13 +28,23 @@ func RelaySessionForToken(accounts AccountStore, token string) (RelaySession, bo
 }
 
 func (s RelaySession) Key() SessionKey {
+	if s.AppUser {
+		return RelayAppSessionKey(s.UserID)
+	}
 	if s.OpaqueToken != "" {
 		return OpaqueSessionKey(s.OpaqueToken)
 	}
 	return JWTSessionKey(s.UserID, s.FamilyID)
 }
 
+func RelayAppSessionKey(userID int64) SessionKey {
+	return SessionKey("relay-app-user:" + strconv.FormatInt(userID, 10))
+}
+
 func (s RelaySession) Lookup(ctx context.Context, accounts AccountStore) (User, bool, error) {
+	if s.AppUser {
+		return accounts.Find(ctx, s.UserID)
+	}
 	if s.OpaqueToken != "" {
 		return accounts.Lookup(ctx, s.OpaqueToken)
 	}

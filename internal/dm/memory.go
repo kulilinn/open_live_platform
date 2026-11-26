@@ -13,6 +13,11 @@ type memoryConversation struct {
 	Conversation
 	hidden   map[int64]bool
 	messages []Message
+	until    time.Time
+}
+
+func (c *memoryConversation) canMessage() bool {
+	return c.CanMessage && (c.until.IsZero() || time.Now().Before(c.until))
 }
 
 type Memory struct {
@@ -26,7 +31,30 @@ func pair(first, second int64) [2]int64 {
 	return [2]int64{min(first, second), max(first, second)}
 }
 
+func (m *Memory) LatestDMFromSenders(ctx context.Context, receiver int64) (map[int64]time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[int64]time.Time)
+	for _, c := range m.conversations {
+		if c.Metadata.Fan.ID != receiver && c.Metadata.Anchor.ID != receiver {
+			continue
+		}
+		for i := len(c.messages) - 1; i >= 0; i-- {
+			msg := c.messages[i]
+			if msg.ReceiverID == receiver {
+				result[msg.SenderID] = msg.CreatedAt
+				break
+			}
+		}
+	}
+	return result, ctx.Err()
+}
+
 func (m *Memory) SetDMSubscription(ctx context.Context, members Metadata, active bool, welcome string) (int64, error) {
+	return m.SetDMSubscriptionUntil(ctx, members, active, welcome, time.Time{})
+}
+
+func (m *Memory) SetDMSubscriptionUntil(ctx context.Context, members Metadata, active bool, welcome string, until time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -39,6 +67,7 @@ func (m *Memory) SetDMSubscription(ctx context.Context, members Metadata, active
 	key := pair(fanID, anchorID)
 	if id, exists := m.pairs[key]; exists {
 		m.conversations[id].CanMessage = active
+		m.conversations[id].until = until
 		return id, nil
 	}
 	if !active {
@@ -53,7 +82,7 @@ func (m *Memory) SetDMSubscription(ctx context.Context, members Metadata, active
 	conversation := &memoryConversation{Conversation: Conversation{
 		ID: id, Type: 1, Members: []string{strconv.FormatInt(anchorID, 10), strconv.FormatInt(fanID, 10)},
 		Metadata: members, CreatedAt: time.Now().UTC(), CanMessage: true,
-	}}
+	}, until: until}
 	m.conversations[id], m.pairs[key] = conversation, id
 	m.appendMessage(conversation, SendInput{ConversationID: id, SenderID: anchorID, ReceiverID: fanID,
 		Type: 1, Content: cmp.Or(welcome, Welcome)})
@@ -70,7 +99,7 @@ func (m *Memory) FindDMConversation(ctx context.Context, userID, otherID int64) 
 	if conversation == nil {
 		return 0, false, ErrNotFound
 	}
-	return conversation.ID, conversation.CanMessage, nil
+	return conversation.ID, conversation.canMessage(), nil
 }
 
 func (m *Memory) DMConversations(ctx context.Context, userID int64, page PageRequest) (Page[Conversation], error) {
@@ -86,6 +115,7 @@ func (m *Memory) DMConversations(ctx context.Context, userID int64, page PageReq
 			continue
 		}
 		conversation := c.Conversation
+		conversation.CanMessage = c.canMessage()
 		conversation.OtherUser = other
 		conversation.Members = slices.Clone(conversation.Members)
 		for _, msg := range c.messages {
@@ -215,7 +245,7 @@ func (m *Memory) sendableConversation(input SendInput) (*memoryConversation, err
 		return nil, err
 	}
 	other, _ := otherParticipant(c.Metadata, input.SenderID)
-	if !c.CanMessage || other.ID != input.ReceiverID {
+	if !c.canMessage() || other.ID != input.ReceiverID {
 		return nil, ErrForbidden
 	}
 	return c, nil

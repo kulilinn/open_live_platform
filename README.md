@@ -42,6 +42,8 @@ go run .\cmd\platform
 - `GET /api/device/qrcode` 领取 WebSocket 连接地址
 - `GET /api/connector/{token}/{sig}` WebSocket 握手
 - `GET /api/gift/list` 读取已配置的礼物目录
+- `POST /api/date/1vN/give/gifts` 赠送普通直播礼物，`GET /api/payment/points/get` 查询积分
+- `GET|POST /api/live/room/rank/{room}` 查看礼物榜，`GET /api/date/anchor/income/log` 与 `/api/date/anchor/total/income` 查看主播礼物收益
 - `/api/dm` 查看私信会话、分页读取消息、标记已读、隐藏会话及发送私信
 - `GET /api/admin/rooms`、`GET /api/admin/users`
 - `POST /api/edge/events`
@@ -50,9 +52,33 @@ go run .\cmd\platform
 
 `/api/dm` 使用登录令牌。已存在的粉丝与主播会话允许双方查看消息，标记已读只处理当前用户收到的消息，隐藏只影响当前用户的会话列表。会话收到新消息后恢复显示。会话、消息与用户 ID 在 JSON 响应中使用十进制字符串。
 
-订阅服务需在确认订阅与到期时调用内部 `SetDMSubscription`。首次授权创建会话及欢迎消息，订阅到期后可继续查看历史。Go 服务尚未接入原 Rust 的订阅事件、历史私信导入或私信 WebSocket 推送。
+订阅服务在确认订阅与到期时调用内部 `SetDMSubscription`。首次授权创建会话及欢迎消息，订阅到期后可继续查看历史。旧 Rust 历史私信仍需单独导入。
 
 设置 `DM_MODERATION_URL` 以接入私信内容审核。服务使用与 `/api/dm/send_message` 相同的 JSON 请求体向该地址发起 POST。审核端返回 HTTP 200 及 `{"pass":true}` 或 `{"pass":false}`。拒绝时返回业务码 `4061`。审核未配置或不可用时，发送请求返回 HTTP 503。
+
+## 礼物与积分
+
+配置 `GIFT_CATALOG_FILE`、`PAYMENT_HOST` 和 `PAYMENT_APPID` 后，普通直播礼物按服务端目录价格向原积分服务扣款。发送者必须已进入该直播场次，收件人必须是主播。扣款确认后保存订单和收益，向 H5 连接发送礼物消息。活动折扣、火箭、设备控制和私聊礼物依赖各自的配置或队列，当前普通礼物入口不处理这些购买。
+
+需要可重试时，客户端给每次有意购买发送一个唯一的 `Idempotency-Key`，重试沿用同一键和请求。省略该头会按每次请求生成新订单。响应包含订单键及 `X-Payment-Order`，扣款结果未能确认时保留待核对订单，并返回 HTTP 409。对照积分服务确认该订单后再决定后续处理。生产扣款使用 PostgreSQL，内存模式仅用于单进程开发，其订单和重试记录在重启后失效。
+
+## 钱包、订单与支付确认
+
+`GET /api/payment/check/get` 读取当前用户的付款确认选项。`GET /api/payment/check/edit` 保存 `confirm_check` 和 `adult_check`，并接受可选的 `confirm_pay_check`、`confirm_country_check`。选项按用户保存三年。
+
+钱包、订单查询、结账和退款由 `PAYMENT_HOST` 上的支付服务处理。将部署已验证的用户 API 方法及路径加入 `PAYMENT_PROXY_ROUTES`，用逗号分隔，例如 `GET /api/payment/实际钱包路径,POST /api/payment/实际订单路径`。Go 转发经过认证的 `USER_ID` 及配置的 `PAYMENT_APPID`、`PAYMENT_BORROW_APPID`。支付服务负责订单归属、价格、退款和回调验证，Go 转发其状态与响应体。平台内部扣款、批量积分查询、坏账和积分发放接口保留在服务边界内。
+
+启用 `POST /api/payment/large_order/apply` 时，设置可信部署地区 `PAYMENT_LARGE_ORDER_REGION`，并按地区设置对应的 `PAYMENT_LARGE_ORDER_TEMPLATE_JA_JP`、`_ZH_CN`、`_ZH_TW` 或 `_EN_US`。通知服务沿用 `LOVEROSE_PUSH_HOST`、`LOVEROSE_PUSH_PATH`、`LOVEROSE_PUSH_EMAIL` 和 `LOVEROSE_PUSH_EMAIL_NAME`。服务确认零积分订单及通知请求后返回原有响应。使用 `Idempotency-Key` 重试时会读取已保存的结果，未确认的订单需与支付及通知服务对账。当前地区来自部署配置，IP 地区库需要单独接入。
+
+`GET /pass/{pass_key}` 读取现有的 Apple Wallet 签名包。用 `uv run scripts/export_legacy_wallet_passes.py --app <原 APP_NAME>` 从各旧 Redis 分片导出 `pass_key|pkpass|APP_NAME` 条目，并合并为 `WALLET_PASS_INDEX_FILE` 指向的 JSONL 文件。导出记录保留原对象路径和绝对到期时间。配置 `AWS_PASSES_S3_BUCKET` 及现有 S3 访问配置后，Go 从原 bucket 读取 `/passes/{uid}/{pass_key}.pkpass`。应用启动时载入索引，已过期或缺失的链接返回业务码 `4005`。签发仍依赖原 Apple 证书与打包流程。
+
+## 管理后台
+
+运营后台和 MCN 后台沿用各自的 Rust 路径。它们需要通过 `PLATFORM_ADMIN_ADDR` 和 `PLATFORM_MCN_ADMIN_ADDR` 显式设置各自的监听地址，并配置 `DATABASE_URL` 及 `ADMIN_ACCOUNTS_FILE`。例如各自监听回环地址并由部署网关接入。主业务监听不会注册兼容后台路径。原 Go `/api/admin` 查询接口只接受显式设置的 `ADMIN_TOKEN`。
+
+`ADMIN_ACCOUNTS_FILE` 是由部署者从现有后台权限数据导出的 JSON 数组。条目包含 `id`、`area`、`passwordHash`、`admin`、`roles`、`permissions` 和 `routes`。`id` 是十进制字符串，`passwordHash` 是原 Rust Argon2id PHC 字符串。`area` 为 `admin` 时用 `username`、`nickName` 和 `tenant` 登录。运营接口要求 `operation-admin` 租户。`area` 为 `mcn` 时用 `email` 登录，`mcnId` 是十进制字符串，`manager` 代表只可查看本人的主播归属。菜单和权限来自导出文件，改动后重启服务。账号文件含凭据哈希，按凭据权限保管。旧后台 JWT 需重新登录，Go 后台会话的 access 和 refresh 分别有效两小时和七天。
+
+运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。MCN 提供限定在当前机构的主播列表和分页，数据来自导入的 `backoffice_mcn_streamers`。历史后台权限和机构归属由部署者迁移，登录历史筛选、主播警告投递及独立财务后台仍依赖未迁移的服务。
 
 ## 内部 gRPC
 
@@ -97,7 +123,7 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 
 导入读取目标库的 `DATABASE_URL`。每行包含 `key`、`value_base64` 和 RFC 3339 格式的 `expires_at`。导出保留 bincode 原值和 Redis 中的绝对过期时间，`APP_NAME` 未配置的旧服务使用 `unknown`。导入要求键、账号 ID 与邮箱对应，保留记录中 Rust JWT 原始邮箱大小写。原 JWT 的签名和 `exp` 继续验证，且会话最迟在 Redis 原过期时间失效。
 
-导入结果分别统计成功、已过期、账号不匹配以及已有会话。输入错误会给出行号并保留已成功写入的记录。重跑会跳过已有、已登出或已经被新 Go 登录替换的会话。每条旧 Redis 记录仅保存当时的 refresh ID，因此保留该 refresh 及其签发的 access。导出文件含账号标识和会话状态，请按凭据的访问权限保管。
+导入结果分别统计成功、已过期、账号不匹配、已有会话及处于封禁期的账号。输入错误会给出行号并保留已成功写入的记录。重跑会跳过已有、已登出或已经被新 Go 登录替换的会话。每条旧 Redis 记录仅保存当时的 refresh ID，因此保留该 refresh 及其签发的 access。导出文件含账号标识和会话状态，请按凭据的访问权限保管。
 
 ### 邮箱验证与令牌交换
 
@@ -108,11 +134,19 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 - 省略 SMTP 配置时，既有注册继续可用，邮件验证码、邮件登录和重置接口返回 HTTP 503。
 - `POST /api/auth/exchange_code` 用有效的 access JWT 领取 5 分钟有效的一次性登录码。`POST /api/auth/exchange_token` 以 `{"code":"…"}` 换取一枚新的 refresh JWT。兑换会替换原 JWT 会话。原会话登出、过期或已被替换时，登录码也会失效。
 
+## 订阅与私信
+
+`/api/sub/anchor` 下的接口管理主播自己的免费、付费和一对一计划。`get_anchor_plan` 查看公开计划，`anchor_id: "0"` 查看自己的全部计划。`free_sub` 订阅主播的公开免费计划，`cancel_sub` 使用 `anchor_id`、`plan_id` 和 `reason` 退订。`get_sub`、`get_my_sub`、`sub_list` 及粉丝、订阅分页接口返回已保存的订阅关系。
+
+免费订阅开通双方私信。付费订阅需要 PostgreSQL 和 `PAYMENT_HOST`、`PAYMENT_APPID`。Go 服务向原点数接口请求扣款，验证返回订单后保存付款凭据和订阅，并在同一数据库事务开通私信。仍有有效订阅时保留私信权限，最后一条订阅退订或到期后停止发送。上游结果不明确时保留待核对订单，同一计划的重试复用该订单号。自动续费、订阅促销和捆绑购买需额外的业务接入。
+
 ## 从 LiveMedia 导入账号
 
-`go run ./cmd/import-live-accounts` 从 `LIVEMEDIA_MYSQL_DSN` 读取 Rust 的 `user` 和 `email_login` 表，写入 `DATABASE_URL` 指向的 PostgreSQL。源端使用只读账号，在停止旧服务写入后执行导入，再迁移 Redis 登录会话。
+`go run ./cmd/import-live-accounts` 从 `LIVEMEDIA_MYSQL_DSN` 读取 Rust 的 `user`、`email_login` 和 `user_violation_records`，写入 `DATABASE_URL` 指向的 PostgreSQL。源端使用只读账号，在停止旧服务写入后执行导入，再迁移 Redis 登录会话。
 
-导入保留原有 64 位 ID、昵称、搜索名、头像、主播标记、语言和 Argon2id 密码。目标库中有相同 ID 或邮箱的本地账号时整批回滚。重复执行保留迁移后修改的密码和资料。输出中的 `restricted` 和 `without_email` 是跳过的行数，分别对应有处罚状态和没有邮箱的用户。这些 ID 同样计入目标库新账号的起始序号。
+导入保留原有 64 位 ID、昵称、搜索名、头像、主播标记、语言、Argon2id 密码、封禁和禁言及其处罚记录。目标库中有相同 ID 或邮箱的本地账号时整批回滚。重复执行保留迁移后修改的密码和资料，并同步源处罚状态。输出中的 `restricted` 和 `without_email` 分别统计有处罚状态和没有邮箱的用户。没有邮箱的账号保留身份和匹配的旧 JWT 会话，可继续关联历史记录。
+
+账号数据导入后，`go run ./cmd/import-live-interactions` 使用相同连接配置导入私信和通知。命令保留原有 ID、时间、每个会话成员的隐藏状态及已读状态。若旧会话允许发送且源 `subscription_user_sub` 中有对应的未取消、未过期权益，则保留发送权限直至该权益到期。输出统计成功导入、已存在和跳过的记录。跳过群聊、逻辑删除或缺少目标账号的记录。相同 ID 或成员对的本地数据冲突时回滚该次导入。
 
 ## 站内通知
 
@@ -158,15 +192,38 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 
 同时设置 `RELAY_APP_KEY` 和 `RELAY_APP_SECRET`，`/api/device/qrcode` 会签发 Rust 格式的连接票据。票据可在同一登录会话内重复使用，默认有效期 24 小时，可用 `WS_TOEKN_EXPIRE` 设置秒数。活跃的 WebSocket 会延长票据有效期。`GET /relay/verify/{token}/{sig}` 可校验票据并返回应用标识与用户 ID。JWT 票据关联 refresh family，退出登录时，同一会话的 H5 和设备连接会收到 `1000 SERVICE_LOGOUT`。
 
-使用 Rust 票据时，浏览器选择 `h5relayer`，设备选择 `devicerelayer`。设备可直接连接，直播浏览器连接则附带 `room_id` 或 `hash=/live/{房间号}`。同账号的设备状态和摇杆消息可以发送给浏览器，浏览器可以向同账号设备发送振动、波形模式和马达强度指令。已登录用户可调用 `GET /api/device/toyinfo` 刷新自己的设备状态。PostgreSQL 模式下，配置相同应用身份且连接同一 schema 的实例共享票据并转发短设备消息。票据跨应用重启保留，通知受 PostgreSQL 单条 8 KB 限制。
+使用 Rust 票据时，浏览器选择 `h5relayer`，设备选择 `devicerelayer`。设备可直接连接，直播浏览器连接则附带 `room_id` 或 `hash=/live/{房间号}`。同账号的设备状态和摇杆消息可以发送给浏览器，浏览器可以向同账号设备发送振动、波形模式和马达强度指令。已登录用户可调用 `GET /api/device/toyinfo` 刷新自己的设备状态。PostgreSQL 模式下，配置相同应用身份且连接同一 schema 的实例共享票据并转发设备消息。票据跨应用重启保留，达到 PostgreSQL 单条通知上限的大消息改用一分钟数据库引用投递。
 
-自动测试覆盖两实例领票、验证、重启、过期和注销，并用模拟 WebSocket 设备验证状态、转发和账号隔离。真实设备执行、前端联调、跨账号授权控制，以及 Rust 应用对应用的 `acquire`、`vibrate`、`remote` 接口仍待验证或移植。
+配置 `RELAY_APP_ID` 启用 Rust 的 `POST /api/connector/acquire`、`/api/connector/vibrate` 和 `/api/connector/remote`。`RELAY_APP_USERS` 可填写该应用获准管理的现有用户 ID，多个 ID 用逗号分隔。这些绑定账号可以通过原应用签名或凭据申请连接和向自身设备发指令。其余账号在这两条路由上还需附带本人 Bearer 令牌。跨账号控制需由受控账号用本人 Bearer 限时授权，`expiry` 单位为秒，传 `0` 撤销。`duplex` 允许发出方同时控制自己和授权设备，反向控制需另行授权。
+
+自动测试覆盖两实例领票、验证、重启、过期和注销，并用模拟 WebSocket 设备验证跨实例状态、24 KB 波形、账号隔离、应用绑定和远程授权的同意、过期与撤销。真实设备执行和前端联调仍待验证。
 
 直播中最后一个主播 H5 连接断开时，观众收到同格式的状态值 `"3"`，已有连接、`liveId` 与聊天历史继续可用。主播重新进房或重连本场 H5 后，观众收到状态值 `"1"`。兼容房间详情和 `GET /api/live/room/online` 会返回相应的数字状态。
 
 主播连续暂离 5 分钟后，服务自动关播并发送状态值 `"0"`。可用 `TEMP_OFFLINE_TIMEOUT` 设置正整数秒数，默认 `300`。每次重新进入暂离都重新计时。PostgreSQL 模式会持久化截止时间，服务重启后继续检查。主播连接登记每 5 秒续期，30 秒租约过期时，其他实例在确认同一场直播没有剩余主播连接后进入暂离。升级前的连接登记有 30 秒重连时间，升级时已经暂离的房间从迁移时刻起获得 5 分钟。
 
 房间状态接口沿用 Rust 的 `status/data` 包装。`kicked` 和 `banned` 的 `data` 是布尔值，`limited` 返回 `limit_ty`、`limit_reason`、`limit_allow`、`limit_duration`、`limit_total`。观众接口返回字符串形式的用户 ID，并提供昵称、管理员和禁言状态。
+
+## 文本翻译和直播字幕
+
+登录后向 `POST /api/translate` 发送 `{"text":"你好","to":["ja","en"]}`。服务按 Qwen、Azure、LibreTranslate、AWS、Qwen-MT 的顺序选择第一个启用的供应商。`llm:true` 直接选择 Qwen-MT。LibreTranslate 和 Qwen-MT 返回首个目标语种，其余路径返回所有目标。供应商异常时为对应目标返回原文，响应保留 `status/data.translations/data.detectedLanguage`。
+
+| 供应商 | 环境配置 |
+| --- | --- |
+| Qwen | `USE_QWEN_TRANSLATE=1`，默认启用。读取 `OPENAI_API_BASE`、`OPENAI_API_KEY`、可选 `OPENAI_API_MODEL` |
+| Azure | `USE_AZURE_TRANSLATE=1`，读取 `AZURE_TRANSLATOR_KEY`、可选 `AZURE_TRANSLATOR_ENDPOINT`、`AZURE_LOCATION` |
+| LibreTranslate | `USE_LOCAL_TRANSLATE=1`，读取 `LIBRETRANSLATE_URL` |
+| AWS | `USE_AWS_TRANSLATE=1`，读取 `AWS_TRANSLATE_ACCESS_KEY_ID`、`AWS_TRANSLATE_SECRET_ACCESS_KEY`、可选 `AWS_TRANSLATE_ENDPOINT_URL`、`AWS_TRANSLATE_REGION` |
+| Qwen-MT | `USE_QWEN_MT_TRANSLATE=1`，共享 Qwen 配置，默认模型为 `qwen-mt-turbo` |
+
+直播字幕需要现有 Agora RTC 的 `AGORA_APP_ID`、`AGORA_APP_CERTIFICATE`，以及 Agora REST 的 `AGORA_API_ID`、`AGORA_API_SECRET`。字幕 REST 默认使用 v2 agent 协议。已有旧项目可用 `AGORA_STT_API_VERSION=v1` 选择 builderToken 协议。直播开启 `trans` 时会尝试自动创建 v2 agent，语言优先取 `X-Lr-Stt-Lang`，其次取直播间 `transLang`。测试环境可通过 `AGORA_STT_BASE_URL` 替换 `https://api.agora.io`。
+
+- `POST /api/live/room/stt-start/{room}` 接受语言数组。空数组使用 `X-Lr-Stt-Lang`。
+- `GET /api/live/room/stt-query/{room}` 返回 Agora 任务状态，当前直播没有任务时返回 `STOPPED`。
+- `POST /api/live/room/stt-update/{room}` 使用 `X-Lr-Stt-Lang` 更新语言。
+- `POST /api/live/room/stt-stop/{room}` 停止任务。开始、更新和停止仅限房主。
+
+PostgreSQL 保存字幕任务和所属 `liveId`。关播后后台清理旧任务，两实例可以查询同一个任务。设置 `AGORA_STT_CALLBACK_SECRET` 后，可在 Agora Notifications 配置 `POST /api/live/stt/callback`，让已签名的 v7 结束通知清理对应的 agent。字幕文本通过 Agora RTC 数据流传输。自动测试使用本地 Agora 服务模拟及真实 PostgreSQL，覆盖新旧 REST 协议、任务状态、房主权限、重启、回调和关播。真实 Agora 项目、字幕前端和私聊 1v1 语音场次仍待验证或迁移。[Agora STT REST 快速入门](https://github.com/AgoraIO/docs-portal/blob/main/content/docs/en/realtime-media/speech-to-text/get-started/quickstart.md) · [Agora STT 数据流](https://github.com/AgoraIO/docs-portal/blob/main/content/docs/en/realtime-media/speech-to-text/build/process-transcription-data/parse-data.mdx)
 
 ## 聊天记录
 
@@ -201,6 +258,16 @@ PG 模式下，账号、登录会话、房间、成员、管理员、禁言、�
 连接同一 PostgreSQL 数据库和 schema 的 Go 实例会互相广播房间事件。服务通过独立的 `LISTEN` 连接接收通知，数据库连接地址须支持长连接会话。监听中断时旧订阅会结束，客户端重连后可回查持久化聊天历史。
 
 升级到聊天历史版本时，数据库保留已有消息。旧版本未记录聊天的场次边界，升级时在线房间仅展示最后一次房间更新后可确认属于本场的消息。之后的开播、关播会记录精确边界。
+
+## 消息、上传和第三方登录
+
+原 Feed 消息入口在 `/api/feed/message/`，包含 inbox、config、search、welcome、enabled、未读计数、已读和隐藏。订阅关系控制可私信状态，主播审核通过的欢迎语用于新建私信会话。已批准的私信通过接收方的 H5 连接定向推送。
+
+配置 `KAFKA_BROKERS` 和 `REALTIME_NOTICE_TOPIC`、`REALTIME_NOTICE_GROUP` 或对应的 `DELAY_NOTICE_*` 后，服务启动 Kafka 消费者。`KAFKA_SSL` 启用 TLS。两个主题的默认过期时间分别为 3600 和 7200 秒，可用 `REALTIME_NOTICE_TTL` 和 `DELAY_NOTICE_TTL` 调整。
+
+`GET /api/guid` 和 `POST /api/upload` 沿用编号从 0 开始的分片协议。分片可乱序到达。启用 PostgreSQL 后可跨实例接续，最后一个缺片到达后合并并签名写入对象存储。配置 `AWS_S3_BUCKET`、`AWS_S3_REGION`、`AWS_S3_ACCESS_KEY_ID`、`AWS_S3_SECRET_ACCESS_KEY` 和公开访问前缀 `BASE_STATIC_URL`。兼容 S3 的私有服务可设置 `AWS_S3_ENDPOINT_URL`。
+
+`POST /api/auth/verifygoogle` 接受原有的 `{"token":"…"}`。配置 `GOOGLE_CLIENT_ID` 后，服务向 Google 核实 access token 所属应用、有效期和邮箱，使用稳定的 Google 用户标识关联本地账号。首次关联第三方托管邮箱时需要通过平台邮箱验证码，已有绑定可直接登录。启用 `JWT_SECRET` 后返回与邮箱登录相同的 refresh JWT。
 
 ## 检查
 

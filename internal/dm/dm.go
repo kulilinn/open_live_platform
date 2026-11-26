@@ -30,8 +30,9 @@ type User struct {
 }
 
 type Metadata struct {
-	Fan    User `json:"fansInfo"`
-	Anchor User `json:"anchorInfo"`
+	Welcome string `json:"-"`
+	Fan     User   `json:"fansInfo"`
+	Anchor  User   `json:"anchorInfo"`
 }
 
 type Conversation struct {
@@ -105,6 +106,7 @@ func (p PageRequest) Window(total int64) (offset, limit int64, details Paginatio
 }
 
 type Store interface {
+	LatestDMFromSenders(ctx context.Context, receiver int64) (map[int64]time.Time, error)
 	// SetDMSubscription is called by trusted subscription handling. A new grant
 	// creates one conversation and welcome message. Repeated grants reopen it.
 	SetDMSubscription(ctx context.Context, members Metadata, active bool, welcome string) (int64, error)

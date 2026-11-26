@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"open_live_platform/internal/live"
@@ -43,15 +44,21 @@ func (s server) limited(w http.ResponseWriter, r *http.Request, _ int64) {
 		return
 	}
 	limitType, allow, reason := 0, true, []string{}
-	if _, err := s.rooms.Info(r.Context(), roomID); errors.Is(err, live.ErrRoomNotFound) {
+	duration, total := int64(0), int64(0)
+	room, err := s.rooms.Info(r.Context(), roomID)
+	if errors.Is(err, live.ErrRoomNotFound) {
 		limitType, allow, reason = 2, false, []string{""}
 	} else if err != nil {
 		roomStatusError(w, err)
 		return
 	}
+	if room.Limited(time.Now()) {
+		limitType, allow, reason = 2, false, strings.Split(room.ModerationReason, ",")
+		duration, total = room.ModerationUntil, room.ModerationTotal
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": map[string]any{
 		"limit_ty": limitType, "limit_reason": reason, "limit_allow": allow,
-		"limit_duration": 0, "limit_total": 0,
+		"limit_duration": duration, "limit_total": total,
 	}})
 }
 

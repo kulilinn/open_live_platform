@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"open_live_platform/internal/gift"
 	"open_live_platform/internal/live"
 )
 
@@ -84,6 +85,8 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 	case "room_status":
 		signal.CreatedAt = r.event.CreatedAt
 		signal.RoomStatus = r.event.RoomStatus
+	case "gift":
+		signal.CreatedAt = r.event.CreatedAt
 	}
 	if err := s.notifyRoomSignal(r, signal); err != nil {
 		return err
@@ -164,7 +167,9 @@ func (s *Store) readRoomEvents(ctx context.Context, conn *pgx.Conn) {
 		if s.readSessionRevocation(n.Payload) {
 			continue
 		}
-		if s.readRelayDeviceSignal(n.Payload) {
+		if handled, err := s.readRelayDeviceSignal(ctx, conn, n.Payload); err != nil {
+			return
+		} else if handled {
 			continue
 		}
 		var signal roomSignal
@@ -225,6 +230,24 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 		}
 		event = live.TranslationChangeEvent(ownerID, signal.CreatedAt, languages)
 		event.RoomID = signal.RoomID
+	case "gift":
+		var result gift.Result
+		err := conn.QueryRow(ctx, `SELECT g.result FROM gift_orders g JOIN rooms r ON r.id=g.room_id
+			WHERE g.id=$1 AND g.room_id=$2 AND g.state=1 AND r.online AND r.live_id=g.live_id`, signal.MessageID, signal.RoomID).Scan(&result)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		event.CreatedAt = signal.CreatedAt
+		event.Payload = string(result.Success)
+		stream.publish(event)
+		if len(result.Performance) != 0 && string(result.Performance) != "null" {
+			event.Payload = string(result.Performance)
+			stream.publish(event)
+		}
+		return nil
 	}
 	stream.publish(event)
 	return nil

@@ -87,7 +87,8 @@ func (s *Store) ResetVerifiedPassword(ctx context.Context, userID int64, email, 
 	if err != nil {
 		return err
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE users SET password_salt=$1,password_hash=$2 WHERE id=$3 AND email=$4`, salt[:], key, userID, email)
+	tag, err := s.pool.Exec(ctx, `UPDATE users u SET password_salt=$1,password_hash=$2 WHERE id=$3 AND email=$4
+		AND NOT (u.account_status=2 AND `+activeAccountLimit+`)`, salt[:], key, userID, email)
 	if err == nil && tag.RowsAffected() == 0 {
 		return auth.ErrInvalidEmailCode
 	}
@@ -95,13 +96,5 @@ func (s *Store) ResetVerifiedPassword(ctx context.Context, userID int64, email, 
 }
 
 func (s *Store) IssueVerifiedSession(ctx context.Context, user auth.User) (auth.Session, error) {
-	token := rand.Text()
-	tag, err := s.pool.Exec(ctx, `INSERT INTO sessions (token,user_id) SELECT $1,id FROM users WHERE id=$2 AND email=$3`, token, user.ID, user.Email)
-	if err != nil {
-		return auth.Session{}, err
-	}
-	if tag.RowsAffected() == 0 {
-		return auth.Session{}, auth.ErrInvalidCredentials
-	}
-	return auth.Session{Token: token, User: user}, nil
+	return s.issueOpaqueSession(ctx, user)
 }

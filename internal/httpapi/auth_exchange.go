@@ -37,6 +37,9 @@ func (s server) exchangeToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func exchangeError(w http.ResponseWriter, err error) {
+	if writeBanned(w, err, true) {
+		return
+	}
 	switch {
 	case errors.Is(err, auth.ErrExchangeUnavailable):
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())

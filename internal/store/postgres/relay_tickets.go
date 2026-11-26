@@ -9,12 +9,12 @@ import (
 	"open_live_platform/internal/relay"
 )
 
-const relayTicketFields = `token,user_id,COALESCE(opaque_token,''),family_id,issuer,issued_at,expires_at`
+const relayTicketFields = `token,user_id,COALESCE(opaque_token,''),family_id,issuer,issued_at,expires_at,app_user,is_debug`
 
 func scanRelayTicket(row pgx.Row) (relay.RustTicketRecord, error) {
 	var ticket relay.RustTicketRecord
 	err := row.Scan(&ticket.Token, &ticket.UserID, &ticket.Login.OpaqueToken, &ticket.Login.FamilyID,
-		&ticket.Login.Issuer, &ticket.IssuedAt, &ticket.ExpiresAt)
+		&ticket.Login.Issuer, &ticket.IssuedAt, &ticket.ExpiresAt, &ticket.Login.AppUser, &ticket.Debug)
 	ticket.Login.UserID = ticket.UserID
 	return ticket, err
 }
@@ -28,15 +28,15 @@ func (s *Store) IssueRustRelayTicket(ctx context.Context, appKey string, candida
 		return relay.RustTicketRecord{}, err
 	}
 	return scanRelayTicket(s.pool.QueryRow(ctx, `INSERT INTO relay_tickets AS t
-		(app_key,login_key,token,user_id,opaque_token,family_id,issuer,issued_at,expires_at)
-		VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,clock_timestamp()+make_interval(secs => $9))
+		(app_key,login_key,token,user_id,opaque_token,family_id,issuer,issued_at,expires_at,app_user,is_debug)
+		VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,clock_timestamp()+make_interval(secs => $9),$10,$11)
 		ON CONFLICT (app_key,login_key) DO UPDATE SET
 			token=CASE WHEN t.expires_at<=statement_timestamp() THEN EXCLUDED.token ELSE t.token END,
 			issued_at=CASE WHEN t.expires_at<=statement_timestamp() THEN EXCLUDED.issued_at ELSE t.issued_at END,
 			expires_at=CASE WHEN t.expires_at<=statement_timestamp() THEN EXCLUDED.expires_at ELSE t.expires_at END
 		RETURNING `+relayTicketFields,
-		appKey, string(candidate.Login.Key()), candidate.Token, candidate.UserID, candidate.Login.OpaqueToken,
-		candidate.Login.FamilyID, candidate.Login.Issuer, candidate.IssuedAt, ttl.Seconds()))
+		appKey, string(candidate.LoginKey), candidate.Token, candidate.UserID, candidate.Login.OpaqueToken,
+		candidate.Login.FamilyID, candidate.Login.Issuer, candidate.IssuedAt, ttl.Seconds(), candidate.Login.AppUser, candidate.Debug))
 }
 
 func (s *Store) LookupRustRelayTicket(ctx context.Context, appKey, token string) (relay.RustTicketRecord, bool, error) {

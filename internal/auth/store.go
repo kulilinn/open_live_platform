@@ -20,13 +20,14 @@ var (
 )
 
 type User struct {
-	ID                  int64    `json:"id"`
-	Email               string   `json:"email"`
-	Account             string   `json:"account"`
-	Language            string   `json:"language,omitempty"`
-	TranslationLanguage string   `json:"-" db:"-"`
-	TranslationEnabled  bool     `json:"-" db:"-"`
-	Profile             *Profile `json:"-" db:"-"`
+	ID                  int64      `json:"id"`
+	Email               string     `json:"email"`
+	Account             string     `json:"account"`
+	Language            string     `json:"language,omitempty"`
+	TranslationLanguage string     `json:"-" db:"-"`
+	TranslationEnabled  bool       `json:"-" db:"-"`
+	Profile             *Profile   `json:"-" db:"-"`
+	Moderation          Moderation `json:"-" db:"-"`
 }
 
 type Session struct {
@@ -59,6 +60,7 @@ type credentials struct {
 }
 
 type Store struct {
+	googleSubjects       map[string]int64
 	mu                   sync.RWMutex
 	nextID               int64
 	users                map[string]credentials
@@ -143,6 +145,9 @@ func (s *Store) VerifyPassword(ctx context.Context, email, password string) (Use
 	if subtle.ConstantTimeCompare(key, login.key) != 1 {
 		return User{}, ErrInvalidCredentials
 	}
+	if login.user.Moderation.Banned() {
+		return User{}, BannedError{Moderation: login.user.Moderation}
+	}
 	return login.user, nil
 }
 
@@ -153,6 +158,9 @@ func (s *Store) Lookup(ctx context.Context, token string) (User, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	user, exists := s.sessions[token]
+	if exists {
+		user.Moderation = s.users[user.Email].user.Moderation
+	}
 	return user, exists, nil
 }
 
@@ -176,6 +184,10 @@ func (s *Store) Refresh(ctx context.Context, token string) (Session, bool, error
 	user, ok := s.sessions[token]
 	if !ok {
 		return Session{}, false, nil
+	}
+	user = s.users[user.Email].user
+	if user.Moderation.Banned() {
+		return Session{}, false, BannedError{Moderation: user.Moderation}
 	}
 	return s.newSession(user), true, nil
 }
@@ -284,6 +296,9 @@ func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPa
 		oldKey, err := PasswordKey(oldPassword, login.salt[:])
 		if err != nil || subtle.ConstantTimeCompare(oldKey, login.key) != 1 {
 			return ErrInvalidCredentials
+		}
+		if login.user.Moderation.Banned() {
+			return BannedError{Moderation: login.user.Moderation}
 		}
 		var salt [16]byte
 		if _, err := rand.Read(salt[:]); err != nil {

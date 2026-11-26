@@ -45,10 +45,12 @@ func NewLoginCode(ctx context.Context, accounts AccountStore, token string) (str
 		return "", ErrInvalidCredentials
 	}
 	familyID, _ := strconv.ParseInt(claims.Aud, 10, 64)
-	if _, found, err := jwtAccounts.JWTUser(ctx, claims.Sub, familyID, claims.Iss); err != nil {
+	if user, found, err := jwtAccounts.JWTUser(ctx, claims.Sub, familyID, claims.Iss); err != nil {
 		return "", err
 	} else if !found {
 		return "", ErrInvalidCredentials
+	} else if user.Moderation.Banned() {
+		return "", BannedError{Moderation: user.Moderation}
 	}
 	var random [16]byte
 	rand.Read(random[:])
@@ -85,6 +87,9 @@ func ExchangeLoginCode(ctx context.Context, accounts AccountStore, code string) 
 	}
 	if !found {
 		return Session{}, ErrInvalidLoginCode
+	}
+	if user.Moderation.Banned() {
+		return Session{}, BannedError{Moderation: user.Moderation}
 	}
 	token, claims, err := jwtAccounts.tokens.IssueRefresh(user.ID, user.Email)
 	if err != nil {
@@ -140,7 +145,7 @@ func (s *Store) ReplaceJWTSession(ctx context.Context, grant LoginGrant, user Us
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	login, ok := s.users[user.Email]
-	if !ok || login.user.ID != grant.UserID || !time.Now().Before(grant.ExpiresAt) || s.jwtSessions[grant.UserID] != grant.FamilyID {
+	if !ok || login.user.ID != grant.UserID || login.user.Moderation.Banned() || !time.Now().Before(grant.ExpiresAt) || s.jwtSessions[grant.UserID] != grant.FamilyID {
 		return false, nil
 	}
 	s.jwtSessions[grant.UserID] = newFamilyID

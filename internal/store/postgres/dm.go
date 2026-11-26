@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/dm"
@@ -15,36 +16,44 @@ var _ dm.Store = (*Store)(nil)
 const dmPair = `member_low=LEAST($1::bigint,$2::bigint) AND member_high=GREATEST($1::bigint,$2::bigint)`
 const dmVisible = `((fan_id=$1 AND NOT hidden_by_fan) OR (anchor_id=$1 AND NOT hidden_by_anchor))`
 const dmMessageColumns = `id,conversation_id,sender_id,receiver_id,message_type,content,status,create_time`
+const dmCanMessage = `(can_message AND (subscription_expires_at IS NULL OR subscription_expires_at>now()))`
 
 func (s *Store) SetDMSubscription(ctx context.Context, members dm.Metadata, active bool, welcome string) (int64, error) {
+	var id int64
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		id, err = setDMSubscription(ctx, tx, members, active, welcome, nil)
+		return err
+	})
+	return id, err
+}
+
+func setDMSubscription(ctx context.Context, tx pgx.Tx, members dm.Metadata, active bool, welcome string, until *time.Time) (int64, error) {
 	var id int64
 	fanID, anchorID := members.Fan.ID, members.Anchor.ID
 	if fanID < 1 || anchorID < 1 || fanID == anchorID || (active && !members.Anchor.Anchor) {
 		return 0, dm.ErrForbidden
 	}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if active {
-			err := tx.QueryRow(ctx, `INSERT INTO dm_conversations(fan_id,anchor_id,metadata)
-				VALUES($1,$2,$3) ON CONFLICT(member_low,member_high) DO NOTHING RETURNING id`, fanID, anchorID, members).Scan(&id)
-			if err == nil {
-				_, err = addDM(ctx, tx, dm.SendInput{ConversationID: id, SenderID: anchorID, ReceiverID: fanID,
-					Type: 1, Content: cmp.Or(welcome, dm.Welcome)})
-				return err
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
+	if active {
+		err := tx.QueryRow(ctx, `INSERT INTO dm_conversations(fan_id,anchor_id,metadata,subscription_expires_at)
+			VALUES($1,$2,$3,$4) ON CONFLICT(member_low,member_high) DO NOTHING RETURNING id`, fanID, anchorID, members, until).Scan(&id)
+		if err == nil {
+			_, err = addDM(ctx, tx, dm.SendInput{ConversationID: id, SenderID: anchorID, ReceiverID: fanID,
+				Type: 1, Content: cmp.Or(welcome, dm.Welcome)})
+			return id, err
 		}
-		err := tx.QueryRow(ctx, `UPDATE dm_conversations SET can_message=$3 WHERE `+dmPair+` RETURNING id`, fanID, anchorID, active).Scan(&id)
-		return dmError(err)
-	})
-	return id, err
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, err
+		}
+	}
+	err := tx.QueryRow(ctx, `UPDATE dm_conversations SET can_message=$3,subscription_expires_at=$4 WHERE `+dmPair+` RETURNING id`, fanID, anchorID, active, until).Scan(&id)
+	return id, dmError(err)
 }
 
 func (s *Store) FindDMConversation(ctx context.Context, userID, otherID int64) (int64, bool, error) {
 	var id int64
 	var allowed bool
-	err := s.pool.QueryRow(ctx, `SELECT id,can_message FROM dm_conversations WHERE `+dmPair, userID, otherID).Scan(&id, &allowed)
+	err := s.pool.QueryRow(ctx, `SELECT id,`+dmCanMessage+` FROM dm_conversations WHERE `+dmPair, userID, otherID).Scan(&id, &allowed)
 	return id, allowed, dmError(err)
 }
 
@@ -60,7 +69,7 @@ func (s *Store) DMConversations(ctx context.Context, userID int64, page dm.PageR
 		if limit == 0 {
 			return nil
 		}
-		rows, err := tx.Query(ctx, `SELECT id,fan_id,anchor_id,metadata,last_message,last_message_time,create_time,can_message,
+		rows, err := tx.Query(ctx, `SELECT id,fan_id,anchor_id,metadata,last_message,last_message_time,create_time,`+dmCanMessage+`,
 			(SELECT count(*) FROM dm_messages m WHERE m.conversation_id=c.id AND receiver_id=$1 AND status IN (1,2))
 			FROM dm_conversations c WHERE `+dmVisible+` ORDER BY last_message_time DESC,id DESC LIMIT $2 OFFSET $3`, userID, limit, offset)
 		if err != nil {
@@ -154,7 +163,8 @@ func (s *Store) SendDM(ctx context.Context, input dm.SendInput) (dm.Message, err
 	return result, err
 }
 
-const selectDMSend = `SELECT (CASE WHEN fan_id=$1 THEN anchor_id ELSE fan_id END), can_message
+const selectDMSend = `SELECT (CASE WHEN fan_id=$1 THEN anchor_id ELSE fan_id END), ` + dmCanMessage + ` AND
+	NOT COALESCE((SELECT u.account_status IN (1,2) AND ` + activeAccountLimit + ` FROM users u WHERE u.id=$1 FOR SHARE),TRUE)
 	FROM dm_conversations WHERE id=$2 AND $1 IN (fan_id,anchor_id)`
 
 func checkDMSend(row pgx.Row, receiverID int64) error {
@@ -192,4 +202,21 @@ func dmError(err error) error {
 		return dm.ErrNotFound
 	}
 	return err
+}
+func (s *Store) LatestDMFromSenders(ctx context.Context, receiver int64) (map[int64]time.Time, error) {
+	rows, err := s.pool.Query(ctx, "SELECT sender_id,max(create_time) FROM dm_messages WHERE receiver_id=$1 GROUP BY sender_id", receiver)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64]time.Time)
+	for rows.Next() {
+		var id int64
+		var at time.Time
+		if err := rows.Scan(&id, &at); err != nil {
+			return nil, err
+		}
+		result[id] = at.UTC()
+	}
+	return result, rows.Err()
 }

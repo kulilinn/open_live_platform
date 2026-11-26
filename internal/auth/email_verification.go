@@ -151,6 +151,9 @@ func (s *EmailVerification) Login(ctx context.Context, email, code string) (Sess
 	if !found || user.Email != canonical {
 		return Session{}, ErrInvalidEmailCode
 	}
+	if user.Moderation.Banned() {
+		return Session{}, BannedError{Moderation: user.Moderation}
+	}
 	if accounts, ok := s.accounts.(*JWTAccounts); ok {
 		return accounts.signInUser(ctx, user)
 	}
@@ -161,6 +164,16 @@ func (s *EmailVerification) Reset(ctx context.Context, email, code, password str
 	canonical, userID, err := s.redeem(ctx, email, code, UseCodeForReset)
 	if err != nil {
 		return err
+	}
+	user, found, err := s.accounts.Find(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !found || user.Email != canonical {
+		return ErrInvalidEmailCode
+	}
+	if user.Moderation.Banned() {
+		return BannedError{Moderation: user.Moderation}
 	}
 	return s.store.ResetVerifiedPassword(ctx, userID, canonical, password)
 }

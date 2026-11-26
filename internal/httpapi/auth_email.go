@@ -99,6 +99,9 @@ func validRustPassword(w http.ResponseWriter, value string) bool {
 }
 
 func emailCodeError(w http.ResponseWriter, err error, rustCodeError bool) {
+	if writeBanned(w, err, true) {
+		return
+	}
 	switch {
 	case errors.Is(err, auth.ErrInvalidEmailCode) && rustCodeError:
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "4013", "message": err.Error()})

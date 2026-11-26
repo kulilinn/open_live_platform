@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -26,13 +27,17 @@ type deviceFrame struct {
 }
 
 type deviceHub struct {
-	mu       sync.Mutex
-	users    map[int64]map[*devicePeer]struct{}
-	cluster  RustDeviceStore
-	scope    string
-	node     string
-	remote   map[int64]map[string]*remoteDeviceStatus
-	sequence uint64
+	private         privateStreams
+	mu              sync.Mutex
+	users           map[int64]map[*devicePeer]struct{}
+	cluster         RustDeviceStore
+	scope           string
+	node            string
+	remote          map[int64]map[string]*remoteDeviceStatus
+	sequence        uint64
+	controlsEnabled bool
+	grants          RustControlStore
+	memoryGrants    map[controlGrantKey]controlGrantState
 }
 
 type devicePeer struct {
@@ -128,7 +133,7 @@ func (p *devicePeer) send(frame any) {
 	}
 }
 
-func (p *devicePeer) publish(ctx context.Context, raw string) {
+func (p *devicePeer) publish(ctx context.Context, target int64, raw string) {
 	var cmd deviceCommand
 	if json.Unmarshal([]byte(raw), &cmd) != nil {
 		return
@@ -150,6 +155,7 @@ func (p *devicePeer) publish(ctx context.Context, raw string) {
 				p.toBrowsers(cmd)
 				p.hub.mu.Unlock()
 				p.hub.broadcast(ctx, p.uid, "joystick", cmd)
+				p.forwardJoystick(ctx, cmd)
 				return
 			}
 		case "heartbeat":
@@ -163,9 +169,27 @@ func (p *devicePeer) publish(ctx context.Context, raw string) {
 		p.hub.mu.Unlock()
 		return
 	}
-	p.hub.sendControl(p.uid, cmd)
 	p.hub.mu.Unlock()
-	p.hub.broadcast(ctx, p.uid, "control", cmd)
+	switch cmd.Name {
+	case "vibrate", "mode_vibrate", "mode_vibrate_v2", "motor_strength":
+		p.hub.routeControl(ctx, p.uid, target, cmd)
+	}
+}
+
+func (p *devicePeer) forwardJoystick(ctx context.Context, cmd deviceCommand) {
+	var joystick struct {
+		Device string
+		Event  string
+		Value  int32
+	}
+	if json.Unmarshal(cmd.Data, &joystick) != nil || !strings.EqualFold(joystick.Event, "motion") {
+		return
+	}
+	grant, ok, err := p.hub.activeGrant(ctx, p.uid, 0)
+	if err == nil && ok {
+		vibrate := makeDeviceCommand("vibrate", map[string]any{"device": joystick.Device, "primary": joystick.Value, "secondary": 0, "duration": 5})
+		_ = p.hub.emitControl(ctx, grant.ControlledID, vibrate)
+	}
 }
 
 func (h *deviceHub) sendControl(uid int64, cmd deviceCommand) {
@@ -245,8 +269,16 @@ func parseRustH5Command(raw json.RawMessage, roomID, uid int64) (command, bool) 
 	if frame.Content == "live_chat" && roomID != 0 {
 		return parseH5Command(raw, roomID, uid)
 	}
-	if (frame.Content != "control" && frame.Content != "device") || (frame.Queue != "" && frame.Queue != strconv.FormatInt(uid, 10)) {
+	if frame.Content != "control" && frame.Content != "device" {
 		return command{}, false
+	}
+	var target int64
+	if frame.Queue != "" {
+		var err error
+		target, err = strconv.ParseInt(frame.Queue, 10, 64)
+		if err != nil || target <= 0 {
+			return command{}, false
+		}
 	}
 	var embedded string
 	if json.Unmarshal(frame.Payload, &embedded) == nil {
@@ -259,5 +291,7 @@ func parseRustH5Command(raw json.RawMessage, roomID, uid int64) (command, bool) 
 		}
 		frame.Payload = frames[0]
 	}
-	return parseDeviceCommand(frame.Payload)
+	cmd, ok := parseDeviceCommand(frame.Payload)
+	cmd.DeviceTarget = target
+	return cmd, ok
 }

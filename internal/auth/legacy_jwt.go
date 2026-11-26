@@ -36,7 +36,7 @@ func ParseLegacyJWTSession(record LegacySessionRecord, appName string) (LegacyJW
 		return LegacyJWTSession{}, errors.New("Redis key does not match AuthUser ID and application name")
 	}
 	email, ok := readBincodeString(r)
-	if !ok || NormalizeEmail(email) == "" {
+	if !ok {
 		return LegacyJWTSession{}, invalid
 	}
 	session.Email = email

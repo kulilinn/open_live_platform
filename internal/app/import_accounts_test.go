@@ -4,6 +4,7 @@ import (
 	"errors"
 	"iter"
 	"testing"
+	"time"
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/store/postgres"
@@ -31,9 +32,40 @@ func TestPostgresImportLiveMediaAccounts(t *testing.T) {
 			}
 		}
 	}
-	counts, err := db.ImportLegacyAccounts(ctx, batch(source, postgres.LegacyAccount{ID: id + 1, Status: 2}, postgres.LegacyAccount{ID: id + 2}))
-	if err != nil || counts != (postgres.AccountImportCounts{Imported: 1, Restricted: 1, WithoutEmail: 1}) {
+	banned := postgres.LegacyAccount{ID: id + 1, Email: "banned@example.org", LoginEmail: "banned@example.org", Password: phc,
+		Status: auth.AccountBanned, LimitUntil: -1, ViolationID: 7}
+	violations := func(yield func(postgres.LegacyViolationRecord, error) bool) {
+		yield(postgres.LegacyViolationRecord{ID: 7, UserID: banned.ID, Reason: "test-spam,test-policy", LimitDuration: -1,
+			CreatedAt: time.Now(), CreatedBy: "Test reviewer", Type: 1}, nil)
+	}
+	counts, err := db.ImportLegacyAccountSnapshot(ctx, batch(source, banned, postgres.LegacyAccount{ID: id + 2}), violations)
+	if err != nil || counts != (postgres.AccountImportCounts{Imported: 3, Restricted: 1, WithoutEmail: 1}) {
 		t.Fatalf("import counts = %+v, error = %v", counts, err)
+	}
+	if _, found, err := db.Find(ctx, id+2); !found || err != nil {
+		t.Fatalf("email-less account missing: %t, %v", found, err)
+	}
+	if _, err := db.SignIn(ctx, "", "12345678"); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("empty email allowed password login: %v", err)
+	}
+	const jwtSecret = "source-no-email-jwt-secret"
+	refresh, claims, err := auth.NewJWTService(jwtSecret).IssueRefresh(id+2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := auth.LegacyJWTSession{UserID: id + 2, FamilyID: claims.JTI, ExpiresAt: time.Now().Add(time.Hour)}
+	if result, err := db.ImportLegacyJWTSession(ctx, active); result != postgres.LegacyJWTImported || err != nil {
+		t.Fatalf("import email-less Redis session = %s, %v", result, err)
+	}
+	if session, ok, err := auth.WithJWT(db, jwtSecret).Refresh(ctx, refresh); err != nil || !ok || session.User.ID != id+2 || session.User.Email != "" {
+		t.Fatalf("email-less legacy refresh = %t, user ID = %d, email = %q, error = %v", ok, session.User.ID, session.User.Email, err)
+	}
+	var penalty auth.BannedError
+	if _, err := db.SignIn(ctx, banned.Email, "12345678"); !errors.As(err, &penalty) || penalty.Moderation.Reason != "test-spam,test-policy" {
+		t.Fatalf("banned account login = %v, moderation = %+v", err, penalty)
+	}
+	if _, err := db.SignIn(ctx, banned.Email, "wrong password"); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("incorrect credentials returned moderation details: %v", err)
 	}
 	user, err := db.SignIn(ctx, source.Email, "12345678")
 	if err != nil || user.User.ID != id || user.User.Account != source.Account {

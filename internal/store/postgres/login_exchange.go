@@ -35,7 +35,8 @@ func (s *Store) ReplaceJWTSession(ctx context.Context, grant auth.LoginGrant, us
 	tag, err := s.pool.Exec(ctx, `WITH replaced AS (
 		UPDATE jwt_sessions js SET family_id=$3, expires_at=NULL, revoked_at=NULL, legacy_issuer=NULL
 		FROM users u WHERE js.user_id=$1 AND js.family_id=$2 AND js.revoked_at IS NULL AND (js.expires_at IS NULL OR js.expires_at>now())
-			AND u.id=js.user_id AND u.email=$4 AND COALESCE(js.legacy_issuer,u.email)=$5 AND $6::timestamptz>now() RETURNING 1
+			AND u.id=js.user_id AND COALESCE(u.email,'')=$4 AND COALESCE(js.legacy_issuer,u.email,'')=$5
+			AND NOT (u.account_status=2 AND `+activeAccountLimit+`) AND $6::timestamptz>now() RETURNING 1
 	) SELECT pg_notify($7,$8) FROM replaced`, grant.UserID, grant.FamilyID, newFamilyID, user.Email, grant.Issuer, grant.ExpiresAt,
 		s.eventChannel, sessionRevocationPrefix+string(key))
 	replaced := err == nil && tag.RowsAffected() != 0

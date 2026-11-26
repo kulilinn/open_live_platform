@@ -51,7 +51,7 @@ func LiveError(w http.ResponseWriter, err error) {
 		Error(w, http.StatusNotFound, err.Error())
 	case live.ErrRoomClosed, live.ErrRoomAlreadyOnline:
 		Error(w, http.StatusConflict, err.Error())
-	case live.ErrForbidden, live.ErrNotMember, live.ErrMuted, live.ErrKicked, live.ErrInvalidRoomPassword:
+	case live.ErrForbidden, live.ErrNotMember, live.ErrMuted, live.ErrKicked, live.ErrInvalidRoomPassword, live.ErrRoomLimited:
 		Error(w, http.StatusForbidden, err.Error())
 	case live.ErrRoomPasswordLocked:
 		Error(w, http.StatusTooManyRequests, err.Error())

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"time"
 
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/transport/httpx"
@@ -51,6 +52,11 @@ func roomInfoFields(userID int64, room live.Room, ownerName string, members []in
 		memberIDs = append(memberIDs, strconv.FormatInt(id, 10))
 	}
 	roomIDText := strconv.FormatInt(room.ID, 10)
+	limited := room.Limited(time.Now())
+	var limitedTime any
+	if limited {
+		limitedTime = strconv.FormatInt(room.ModerationUntil, 10)
+	}
 	return map[string]any{
 		"id": room.ID, "owner_id": room.OwnerID,
 		"room": roomIDText, "name": ownerName, "avatar": "",
@@ -60,7 +66,7 @@ func roomInfoFields(userID int64, room live.Room, ownerName string, members []in
 		"members": memberIDs, "memberCount": room.MemberCount, "member_count": room.MemberCount,
 		"isAnchor": userID == room.OwnerID, "showing": false,
 		"chatId": roomIDText, "liveId": strconv.FormatInt(room.Session.LiveID, 10), "gifts": room.Gifts, "plan": room.Plan,
-		"offlineInfo": room.OfflineInfo, "limited": false, "limitedTime": nil, "fans": []any{},
+		"offlineInfo": room.OfflineInfo, "limited": limited, "limitedTime": limitedTime, "fans": []any{},
 		"area": "", "toyLabel": false, "hotLabel": "0", "systemMessages": []any{},
 		"teacherLabel": "", "ticketLabel": "", "role": role, "silence": muted,
 		"subLevel": -1, "freePlanId": "0", "toyInfo": "{}",

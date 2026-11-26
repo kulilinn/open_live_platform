@@ -9,6 +9,8 @@ import (
 // JWTBackend supplies credentials and the active refresh family for each user.
 type JWTBackend interface {
 	AccountStore
+	ResolveGoogleUser(ctx context.Context, subject, email, language string, mayLink bool) (id int64, created bool, err error)
+	IssueVerifiedSession(context.Context, User) (Session, error)
 	VerifyPassword(ctx context.Context, email, password string) (User, error)
 	SaveJWTSession(ctx context.Context, userID, familyID int64) error
 	JWTUser(ctx context.Context, userID, familyID int64, email string) (User, bool, error)
@@ -37,6 +39,9 @@ func (s *JWTAccounts) SignInJWT(ctx context.Context, email, password string) (Se
 }
 
 func (s *JWTAccounts) signInUser(ctx context.Context, user User) (Session, error) {
+	if user.Moderation.Banned() {
+		return Session{}, BannedError{Moderation: user.Moderation}
+	}
 	token, claims, err := s.tokens.IssueRefresh(user.ID, user.Email)
 	if err != nil {
 		return Session{}, err
@@ -77,6 +82,9 @@ func (s *JWTAccounts) Refresh(ctx context.Context, token string) (Session, bool,
 	user, ok, err := s.sessionUser(ctx, claims)
 	if err != nil || !ok {
 		return Session{}, ok, err
+	}
+	if user.Moderation.Banned() {
+		return Session{}, false, BannedError{Moderation: user.Moderation}
 	}
 	return Session{Token: access, User: user}, true, nil
 }

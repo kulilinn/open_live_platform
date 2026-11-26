@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/transport/httpx"
 )
@@ -38,9 +39,18 @@ func (s server) chat(w http.ResponseWriter, r *http.Request, userID int64) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	communicationErr := auth.CheckCommunication(r.Context(), s.accounts, userID)
+	if communicationErr != nil && !errors.Is(communicationErr, auth.ErrCommunicationRestricted) {
+		httpx.Error(w, http.StatusInternalServerError, "could not check communication status")
+		return
+	}
 	if native.RoomID != 0 || native.Channel == nil {
 		if native.Text == "" {
 			httpx.Error(w, http.StatusBadRequest, "chat text is required")
+			return
+		}
+		if communicationErr != nil {
+			httpx.LiveError(w, live.ErrMuted)
 			return
 		}
 		liveResult(w, s.rooms.Send(r.Context(), native.RoomID, userID, native.Text))
@@ -63,6 +73,10 @@ func (s server) chat(w http.ResponseWriter, r *http.Request, userID int64) {
 	text, _ := body["message"].(string)
 	if text == "" {
 		httpx.Error(w, http.StatusBadRequest, "chat text is required")
+		return
+	}
+	if communicationErr != nil {
+		httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": false, "msgId": input.ID})
 		return
 	}
 	// Hash the JSON value, so spacing and the order of object keys do not affect retries.

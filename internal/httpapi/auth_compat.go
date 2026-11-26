@@ -67,6 +67,9 @@ func (s server) signInCompat(w http.ResponseWriter, r *http.Request) {
 		signIn = accounts.SignInJWT
 	}
 	session, err := signIn(r.Context(), input.Email, input.Password)
+	if writeBanned(w, err, true) {
+		return
+	}
 	if err != nil {
 		sessionResponse(w, http.StatusOK, session, err)
 		return
@@ -88,6 +91,9 @@ func (s server) sessionCompat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, ok, err := s.accounts.Refresh(r.Context(), token)
+	if writeBanned(w, err, true) {
+		return
+	}
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not refresh session")
 		return

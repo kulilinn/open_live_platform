@@ -14,7 +14,8 @@ import (
 const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
     (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
     live_id, live_started_at, live_ended_at, trans_lang, anchor_away, anchor_away_until,
-    banner, tag, description, offline_info, plan::text, gifts::text, trans_enabled`
+    banner, tag, description, offline_info, plan::text, gifts::text, trans_enabled,
+    moderation_until, moderation_total, moderation_reason`
 
 const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
@@ -25,7 +26,8 @@ func scanRoom(row pgx.Row) (live.Room, error) {
 	var startedAt, endedAt, awayUntil *time.Time
 	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
 		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway, &awayUntil,
-		&room.Banner, &room.Tag, &room.Description, &room.OfflineInfo, &room.Plan, &room.Gifts, &room.TranslationEnabled)
+		&room.Banner, &room.Tag, &room.Description, &room.OfflineInfo, &room.Plan, &room.Gifts, &room.TranslationEnabled,
+		&room.ModerationUntil, &room.ModerationTotal, &room.ModerationReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
 	}
@@ -105,6 +107,9 @@ func (s *Store) StartWithSettings(ctx context.Context, owner int64, settings liv
 		newRoom := errors.Is(err, live.ErrRoomNotFound)
 		if err != nil && !newRoom {
 			return err
+		}
+		if room.Limited(time.Now()) {
+			return live.ErrRoomLimited
 		}
 		if room.Online {
 			if requireOffline {
@@ -649,7 +654,8 @@ func (s *Store) SendChat(ctx context.Context, msg live.ChatMessage) (int64, erro
 			return err
 		}
 		var muted bool
-		if err := r.tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM room_mutes WHERE room_id=$1 AND user_id=$2 AND expires_at>now())", msg.RoomID, msg.UserID).Scan(&muted); err != nil {
+		if err := r.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM room_mutes WHERE room_id=$1 AND user_id=$2 AND expires_at>now())
+			OR COALESCE((SELECT u.account_status IN (1,2) AND `+activeAccountLimit+` FROM users u WHERE u.id=$2 FOR SHARE),FALSE)`, msg.RoomID, msg.UserID).Scan(&muted); err != nil {
 			return err
 		}
 		if muted {

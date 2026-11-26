@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
@@ -57,11 +58,17 @@ func (s server) setUserInfo(w http.ResponseWriter, r *http.Request, userID int64
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
 }
 
-func (s server) checkUserStatus(w http.ResponseWriter, _ *http.Request, _ int64) {
+func (s server) checkUserStatus(w http.ResponseWriter, r *http.Request, userID int64) {
+	user, found, err := s.accounts.Find(r.Context(), userID)
+	if err != nil || !found {
+		httpx.Error(w, http.StatusInternalServerError, "could not read account status")
+		return
+	}
+	m := user.Moderation.Status()
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200",
 		"data": map[string]any{
-			"ty": 0, "allow": true, "limit_total": 0, "duration": 0, "reason": []string{},
+			"ty": m.Type, "allow": !m.ActiveAt(time.Now()), "limit_total": m.Total, "duration": m.Until, "reason": m.Reasons(),
 		},
 	})
 }
@@ -93,6 +100,7 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 	if p == nil {
 		p = &auth.Profile{Name: user.Account, SearchName: user.Account, ToyInfo: "{}", UserType: "normal"}
 	}
+	m := user.Moderation.Status()
 	data := map[string]any{
 		"id": strconv.FormatInt(user.ID, 10), "name": p.Name,
 		"gender": strconv.Itoa(p.Gender), "photo": p.Photo, "online": 0,
@@ -100,8 +108,8 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 		"toyInfo": p.ToyInfo, "anchorStatus": 0,
 		"displayName": user.Account, "searchName": p.SearchName,
 		"groupRoom": p.GroupRoom, "level": 0, "exp": 0, "maxExp": 0,
-		"trans": user.TranslationEnabled, "transLang": user.TranslationLanguage, "limitTy": 0, "limitAllow": true,
-		"limitTotal": 0, "limitTime": 0, "limitReason": []string{},
+		"trans": user.TranslationEnabled, "transLang": user.TranslationLanguage, "limitTy": m.Type, "limitAllow": !m.ActiveAt(time.Now()),
+		"limitTotal": m.Total, "limitTime": m.Until, "limitReason": m.Reasons(),
 		"teacherLabel": "",
 	}
 	if r.PathValue("user_id") == "me" {

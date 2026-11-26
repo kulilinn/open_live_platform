@@ -39,6 +39,8 @@ type Token struct {
 	IsAnchor bool   `json:"isAnchor"`
 }
 
+func (s Signer) Configured() bool { return s.appID != "" }
+
 func (s Signer) ForRoom(roomID, userID int64, nid uint32, publisher bool) (Token, error) {
 	token := Token{
 		AppID: s.appID, Channel: strconv.FormatInt(roomID, 10), UID: strconv.FormatInt(userID, 10),

@@ -59,20 +59,41 @@ func (s *Store) SignIn(ctx context.Context, email, password string) (auth.Sessio
 		return auth.Session{}, err
 	}
 
+	return s.issueOpaqueSession(ctx, user)
+}
+
+func (s *Store) issueOpaqueSession(ctx context.Context, user auth.User) (auth.Session, error) {
 	token := rand.Text()
-	if _, err := s.pool.Exec(ctx, `INSERT INTO sessions (token, user_id) VALUES ($1, $2)`, token, user.ID); err != nil {
+	tag, err := s.pool.Exec(ctx, `INSERT INTO sessions(token,user_id)
+		SELECT $1,u.id FROM users u WHERE u.id=$2 AND COALESCE(u.email,'')=$3
+		AND NOT (u.account_status=2 AND `+activeAccountLimit+`) FOR SHARE`, token, user.ID, user.Email)
+	if err != nil {
 		return auth.Session{}, err
 	}
+	if tag.RowsAffected() == 0 {
+		return auth.Session{}, s.sessionIssueError(ctx, user.ID)
+	}
 	return auth.Session{Token: token, User: user}, nil
+}
+
+func (s *Store) sessionIssueError(ctx context.Context, userID int64) error {
+	user, found, err := s.Find(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if found && user.Moderation.Banned() {
+		return auth.BannedError{Moderation: user.Moderation}
+	}
+	return auth.ErrInvalidCredentials
 }
 
 func (s *Store) VerifyPassword(ctx context.Context, email, password string) (auth.User, error) {
 	var user auth.User
 	var salt, storedKey []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, email, account, language, password_salt, password_hash
-		FROM users WHERE email = $1`, auth.NormalizeEmail(email)).
-		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &salt, &storedKey)
+		SELECT u.id, u.email, u.account, u.language, u.password_salt, u.password_hash, `+accountModerationColumns+`
+		FROM users u`+accountModerationJoin+`WHERE u.email=$1`, auth.NormalizeEmail(email)).
+		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &salt, &storedKey, &user.Moderation.Type, &user.Moderation.Until, &user.Moderation.Total, &user.Moderation.Reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, auth.ErrInvalidCredentials
 	}
@@ -81,6 +102,9 @@ func (s *Store) VerifyPassword(ctx context.Context, email, password string) (aut
 	}
 	if !passwordMatches(password, salt, storedKey) {
 		return auth.User{}, auth.ErrInvalidCredentials
+	}
+	if user.Moderation.Banned() {
+		return auth.User{}, auth.BannedError{Moderation: user.Moderation}
 	}
 	return user, nil
 }
@@ -97,9 +121,10 @@ func passwordMatches(password string, salt, storedKey []byte) bool {
 func (s *Store) Lookup(ctx context.Context, token string) (auth.User, bool, error) {
 	var user auth.User
 	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.email, u.account, u.language
-		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token = $1`, token).Scan(&user.ID, &user.Email, &user.Account, &user.Language)
+		SELECT u.id, COALESCE(u.email,''), u.account, u.language, `+accountModerationColumns+`
+		FROM sessions s JOIN users u ON u.id=s.user_id`+accountModerationJoin+`
+		WHERE s.token = $1`, token).Scan(&user.ID, &user.Email, &user.Account, &user.Language,
+		&user.Moderation.Type, &user.Moderation.Until, &user.Moderation.Total, &user.Moderation.Reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
@@ -115,23 +140,15 @@ func (s *Store) Bearer(ctx context.Context, authorization string) (auth.User, bo
 }
 
 func (s *Store) Refresh(ctx context.Context, token string) (auth.Session, bool, error) {
-	var user auth.User
-	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.email, u.account, u.language
-		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token = $1`, token,
-	).Scan(&user.ID, &user.Email, &user.Account, &user.Language)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return auth.Session{}, false, nil
-	}
-	if err != nil {
+	user, found, err := s.Lookup(ctx, token)
+	if err != nil || !found {
 		return auth.Session{}, false, err
 	}
-	newToken := rand.Text()
-	if _, err := s.pool.Exec(ctx, `INSERT INTO sessions (token, user_id) VALUES ($1, $2)`, newToken, user.ID); err != nil {
-		return auth.Session{}, false, err
+	if user.Moderation.Banned() {
+		return auth.Session{}, false, auth.BannedError{Moderation: user.Moderation}
 	}
-	return auth.Session{Token: newToken, User: user}, true, nil
+	session, err := s.issueOpaqueSession(ctx, user)
+	return session, err == nil, err
 }
 
 func (s *Store) Revoke(ctx context.Context, token string) error {
@@ -148,8 +165,10 @@ func (s *Store) Revoke(ctx context.Context, token string) error {
 func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
 	var user auth.User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, account, language, trans_lang, trans_enabled, profile FROM users WHERE id = $1`, id,
-	).Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.TranslationLanguage, &user.TranslationEnabled, &user.Profile)
+		`SELECT u.id,COALESCE(u.email,''),u.account,u.language,u.trans_lang,u.trans_enabled,u.profile,`+accountModerationColumns+
+			` FROM users u`+accountModerationJoin+`WHERE u.id=$1`, id,
+	).Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.TranslationLanguage, &user.TranslationEnabled, &user.Profile,
+		&user.Moderation.Type, &user.Moderation.Until, &user.Moderation.Total, &user.Moderation.Reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
@@ -220,8 +239,8 @@ func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPa
 		return err
 	}
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE users SET password_salt=$2, password_hash=$3
-		 WHERE id=$1 AND password_salt=$4 AND password_hash=$5`,
+		`UPDATE users u SET password_salt=$2, password_hash=$3
+		 WHERE id=$1 AND password_salt=$4 AND password_hash=$5 AND NOT (u.account_status=2 AND `+activeAccountLimit+`)`,
 		id, newSalt, newKey, salt, storedKey,
 	)
 	if err == nil && tag.RowsAffected() == 0 {
@@ -231,7 +250,7 @@ func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPa
 }
 
 func (s *Store) Users(ctx context.Context) ([]auth.User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, email, account, language FROM users ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT id, COALESCE(email,''), account, language FROM users ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -50,12 +51,24 @@ func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) 
 		input.Description != nil || input.OfflineInfo != nil || input.Plan != nil || input.Gifts != nil || input.TranslationEnabled != nil))
 	room, err := s.rooms.StartWithSettings(r.Context(), userID, input.settings(), rust)
 	if err != nil {
+		if rust && errors.Is(err, live.ErrRoomLimited) {
+			httpx.JSON(w, http.StatusOK, map[string]string{"status": "4035", "message": "room is limited"})
+			return
+		}
 		if rust && errors.Is(err, live.ErrRoomAlreadyOnline) {
 			httpx.JSON(w, http.StatusOK, map[string]string{"status": "4079", "message": "live stream already start"})
 			return
 		}
 		httpx.LiveError(w, err)
 		return
+	}
+	if room.TranslationEnabled && s.subtitles != nil && s.subtitles.Enabled() {
+		language := cmp.Or(r.Header.Get(sttLanguageHeader), room.TranslationLanguage)
+		if language != "" {
+			if err := s.subtitles.Start(r.Context(), room.ID, userID, []string{language}, true); err != nil {
+				log.Printf("start Agora STT for room %d: %v", room.ID, err)
+			}
+		}
 	}
 	if rust {
 		info, infoErr := s.roomInfo(r.Context(), userID, room)
@@ -132,6 +145,9 @@ func (s server) roomToken(w http.ResponseWriter, r *http.Request, userID int64) 
 		return
 	}
 	role := r.PathValue("role")
+	if s.dates != nil && s.dates.roomToken(w, r, roomID, userID, role) {
+		return
+	}
 	if role != "2" && (role != "1" || roomID != userID) {
 		httpx.LiveError(w, live.ErrForbidden)
 		return

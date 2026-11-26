@@ -180,6 +180,18 @@ func TestPostgresRustRelayTicketAcrossInstancesAndRestart(t *testing.T) {
 	if vibration.Cmd != "vibrate" || vibration.Data.Device != "cross-instance-toy" || vibration.Data.Primary != 27 {
 		t.Fatalf("device command from other instance = %+v", vibration)
 	}
+	wave := strings.Repeat(`{"primary":27,"secondary":9},`, 900)
+	check(browser.WriteJSON(map[string]any{"content": "control", "payload": map[string]any{
+		"cmd": "mode_vibrate_v2", "data": map[string]any{"device": "cross-instance-toy", "wave": wave, "repeat": 1, "duration": 5},
+	}}))
+	var waveform struct {
+		Cmd  string
+		Data struct{ Wave string }
+	}
+	check(conn.ReadJSON(&waveform))
+	if waveform.Cmd != "mode_vibrate_v2" || waveform.Data.Wave != wave {
+		t.Fatalf("cross-instance mode command %q carried %d bytes, want %d", waveform.Cmd, len(waveform.Data.Wave), len(wave))
+	}
 	check(otherDevice.WriteJSON(map[string]string{"cmd": "heartbeat"}))
 	var unrelated struct{ Cmd string }
 	check(otherDevice.ReadJSON(&unrelated))

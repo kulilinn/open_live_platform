@@ -12,10 +12,14 @@ const (
 	RoomOffline    RoomStatus = 0
 	RoomOnline     RoomStatus = 1
 	RoomAnchorAway RoomStatus = 3
+	RoomLimited    RoomStatus = 4
 )
 
 // Status reports the Rust room status. Online describes whether a broadcast is active.
 func (r Room) Status() RoomStatus {
+	if r.Limited(time.Now()) {
+		return RoomLimited
+	}
 	if !r.Online {
 		return RoomOffline
 	}
@@ -23,6 +27,10 @@ func (r Room) Status() RoomStatus {
 		return RoomAnchorAway
 	}
 	return RoomOnline
+}
+
+func (r Room) Limited(now time.Time) bool {
+	return r.ModerationUntil == -1 || (r.ModerationUntil > 0 && r.ModerationUntil >= now.Unix())
 }
 
 // LiveSession identifies a broadcast independently of its room.

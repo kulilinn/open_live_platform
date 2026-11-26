@@ -8,6 +8,7 @@ import (
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/rtc"
+	"open_live_platform/internal/stt"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -15,6 +16,8 @@ type server struct {
 	accounts          auth.AccountStore
 	rooms             live.RoomStore
 	rtc               rtc.Signer
+	subtitles         *stt.Service
+	dates             *Dates
 	recentChats       *sync.Map
 	emailVerification *auth.EmailVerification
 }
@@ -27,8 +30,17 @@ func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.
 	RegisterWithEmail(mux, accounts, rooms, signer, nil)
 }
 
-func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer, email *auth.EmailVerification) {
+type LiveServices struct {
+	Subtitles *stt.Service
+	Dates     *Dates
+}
+
+func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer, email *auth.EmailVerification, services ...LiveServices) {
 	s := server{accounts: accounts, rooms: rooms, rtc: signer, recentChats: &sync.Map{}, emailVerification: email}
+	if len(services) > 0 {
+		s.subtitles = services[0].Subtitles
+		s.dates = services[0].Dates
+	}
 
 	mux.HandleFunc("GET /healthchecker", health)
 	mux.HandleFunc("GET /health", health)
@@ -101,6 +113,9 @@ func (s server) signIn(w http.ResponseWriter, r *http.Request) {
 	var input credentials
 	if httpx.Decode(w, r, &input) {
 		session, err := s.accounts.SignIn(r.Context(), input.Email, input.Password)
+		if writeBanned(w, err, false) {
+			return
+		}
 		sessionResponse(w, http.StatusOK, session, err)
 	}
 }
@@ -147,6 +162,14 @@ func (s server) authenticated(next userHandler) http.HandlerFunc {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
 			return
+		}
+		if user.Moderation.Banned() {
+			switch r.URL.Path {
+			case "/api/user/check_user_status", "/api/user/me", "/api/auth/signout":
+			default:
+				writeBanned(w, auth.BannedError{Moderation: user.Moderation}, rustAuthCompat(r))
+				return
+			}
 		}
 		next(w, r, user.ID)
 	}

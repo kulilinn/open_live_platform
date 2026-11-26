@@ -38,7 +38,7 @@ The Go implementation keeps the primary runtime path small and explicit:
 
 The Go migration replaces `/internal/rpc/platform.stats` and the custom JSON RPC client and registry with gRPC. `PLATFORM_GRPC_ADDR` configures the listener, which defaults to `127.0.0.1:9090`. Frontend clients continue to use HTTP and WebSocket. The Go service has no interoperability with the Rust Zenoh service layer.
 
-The Go service tracks applied SQL migrations in its PostgreSQL schema. The Rust application's MySQL data and migration history require a separate import. Redis, etcd, S3, Kafka and payment integrations are outside this port. Agora media calls still need end-to-end verification.
+The Go service tracks SQL migrations in its PostgreSQL schema. The import commands read legacy MySQL accounts, moderation, conversations, messages and notices. A separate Redis snapshot importer preserves active refresh sessions. The backend has S3-compatible uploads, Kafka notification consumers, payment-provider clients and Agora RTC/STT adapters. The current verification scope and remaining areas are listed in [TODO.md](TODO.md).
 
 ## 4. Deliberate implementation style
 

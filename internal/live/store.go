@@ -11,6 +11,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"open_live_platform/internal/gift"
 )
 
 var (
@@ -23,6 +25,7 @@ var (
 	ErrInvalidRoomPassword = errors.New("invalid room password")
 	ErrRoomPasswordLocked  = errors.New("room password attempts exhausted")
 	ErrRoomAlreadyOnline   = errors.New("room is already online")
+	ErrRoomLimited         = errors.New("room is limited")
 	ErrViewerNIDExhausted  = errors.New("room RTC IDs exhausted")
 )
 
@@ -45,6 +48,9 @@ type Room struct {
 	OfflineInfo         string      `json:"-"`
 	Plan                RoomItemIDs `json:"-"`
 	Gifts               RoomItemIDs `json:"-"`
+	ModerationUntil     int64       `json:"-"`
+	ModerationTotal     int64       `json:"-"`
+	ModerationReason    string      `json:"-"`
 }
 
 type JoinedRoom struct {
@@ -265,6 +271,9 @@ type Store struct {
 	mu                sync.Mutex
 	rooms             map[int64]*roomState
 	viewerRooms       map[int64]int64
+	giftOrders        map[giftOrderKey]gift.Order
+	giftReceipts      map[int64]struct{}
+	nextGiftOrderID   int64
 	lastMessageID     int64
 	nextLiveID        int64
 	anchorAwayTimeout time.Duration
@@ -975,7 +984,7 @@ func (r *roomState) unsubscribe(events chan Event) {
 func (r *roomState) publish(event Event) {
 	event.RoomID = r.ID
 	for events, subscriber := range r.subscribers {
-		if event.Type == "translate_change" && !subscriber.translations {
+		if (event.Type == "translate_change" || event.Type == "gift") && !subscriber.translations {
 			continue
 		}
 		if !event.Enqueue(events) {

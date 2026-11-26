@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
-	"open_live_platform/internal/relay"
 )
 
 type Store struct {
@@ -24,7 +23,7 @@ type Store struct {
 	shutdown            sync.Once
 	anchors             anchorPresence
 	sessionRevocations  auth.SessionRevocations
-	relayDeviceReceiver atomic.Pointer[func(relay.RustDeviceSignal)]
+	relayDeviceReceiver atomic.Pointer[relayDeviceReceiver]
 	// Independent rooms can publish in parallel. Each shard orders local
 	// subscriptions and delivery with the commits that change their room.
 	streams [32]streams
@@ -98,7 +97,7 @@ func (s *Store) stream(id int64) *streams {
 func (s *streams) publish(event live.Event) {
 	listeners := s.rooms[event.RoomID]
 	for ch, sub := range listeners {
-		if sub.marker != "" || (event.Type == "translate_change" && !sub.translations) {
+		if sub.marker != "" || ((event.Type == "translate_change" || event.Type == "gift") && !sub.translations) {
 			continue
 		}
 		disconnect := event.Type == "close" || (event.Type == "kick" && sub.userID == event.TargetID) || (event.Type == "leave" && sub.userID == event.UserID)

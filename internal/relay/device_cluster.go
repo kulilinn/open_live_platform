@@ -10,7 +10,7 @@ import (
 
 type RustDeviceStore interface {
 	PublishRustDeviceSignal(context.Context, RustDeviceSignal) error
-	ReceiveRustDeviceSignals(func(RustDeviceSignal))
+	ReceiveRustDeviceSignals(accept func(RustDeviceSignal) bool, receive func(RustDeviceSignal))
 }
 
 type RustDeviceSignal struct {
@@ -19,6 +19,7 @@ type RustDeviceSignal struct {
 	UserID int64           `json:"uid"`
 	Kind   string          `json:"kind"`
 	Data   json.RawMessage `json:"data,omitempty"`
+	Ref    int64           `json:"ref,omitempty"`
 }
 
 type remoteDeviceStatus struct {
@@ -31,14 +32,30 @@ type remoteDeviceStatus struct {
 const remoteDeviceTimeout = 75 * time.Second
 
 func (h *deviceHub) configure(options RustOptions) {
+	h.scope = options.AppKey
+	h.grants = options.Grants
+	h.controlsEnabled = options.AppID > 0
 	if options.Devices == nil {
 		return
 	}
-	h.scope = options.AppKey
 	h.node = rand.Text()
 	h.cluster = options.Devices
 	h.remote = make(map[int64]map[string]*remoteDeviceStatus)
-	h.cluster.ReceiveRustDeviceSignals(h.receive)
+	h.cluster.ReceiveRustDeviceSignals(h.accepts, h.receive)
+}
+
+func (h *deviceHub) accepts(signal RustDeviceSignal) bool {
+	if signal.Scope != h.scope || signal.Node == h.node {
+		return false
+	}
+	if signal.Kind == "private" {
+		h.private.mu.Lock()
+		defer h.private.mu.Unlock()
+		return len(h.private.users[signal.UserID]) != 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.users[signal.UserID]) != 0
 }
 
 func (h *deviceHub) hasDevice(uid int64) bool {
@@ -85,21 +102,25 @@ func (h *deviceHub) publishPresence(ctx context.Context, uid int64) {
 	h.broadcast(ctx, uid, "presence", presence)
 }
 
-func (h *deviceHub) broadcast(ctx context.Context, uid int64, kind string, payload any) {
+func (h *deviceHub) broadcast(ctx context.Context, uid int64, kind string, payload any) error {
 	if h.cluster == nil {
-		return
+		return nil
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	_ = h.cluster.PublishRustDeviceSignal(ctx, RustDeviceSignal{Scope: h.scope, Node: h.node, UserID: uid, Kind: kind, Data: data})
+	return h.cluster.PublishRustDeviceSignal(ctx, RustDeviceSignal{Scope: h.scope, Node: h.node, UserID: uid, Kind: kind, Data: data})
 }
 
 func (h *deviceHub) receive(signal RustDeviceSignal) {
 	if signal.Scope != h.scope || signal.Node == h.node {
+		return
+	}
+	if signal.Kind == "private" {
+		h.private.deliver(signal.UserID, signal.Data)
 		return
 	}
 	h.mu.Lock()

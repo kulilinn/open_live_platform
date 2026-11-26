@@ -106,6 +106,9 @@ func (s *Store) ResetVerifiedPassword(ctx context.Context, userID int64, email, 
 	if !ok || login.user.ID != userID {
 		return ErrInvalidEmailCode
 	}
+	if login.user.Moderation.Banned() {
+		return BannedError{Moderation: login.user.Moderation}
+	}
 	login.salt, login.key = salt, key
 	s.users[email] = login
 	return nil
@@ -120,6 +123,9 @@ func (s *Store) IssueVerifiedSession(ctx context.Context, user User) (Session, e
 	login, ok := s.users[user.Email]
 	if !ok || login.user.ID != user.ID {
 		return Session{}, ErrInvalidCredentials
+	}
+	if login.user.Moderation.Banned() {
+		return Session{}, BannedError{Moderation: login.user.Moderation}
 	}
 	return s.newSession(login.user), nil
 }

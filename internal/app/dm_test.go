@@ -9,10 +9,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"open_live_platform/internal/app"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/dm"
+	"open_live_platform/internal/relay"
 )
 
 func TestDirectMessages(t *testing.T) {
@@ -44,6 +46,7 @@ func testDirectMessages(t *testing.T, config app.Config, reopen bool) {
 	}))
 	t.Cleanup(audit.Close)
 	config.DMModerationURL = audit.URL
+	config.RelayRust = relay.RustOptions{AppKey: "dm", AppSecret: "local-test"}
 	open := func() (*app.App, *httptest.Server) {
 		t.Helper()
 		platform, err := app.New(ctx, config)
@@ -56,6 +59,10 @@ func testDirectMessages(t *testing.T, config app.Config, reopen bool) {
 		return platform, server
 	}
 	platform, server := open()
+	receiverServer := server
+	if reopen {
+		_, receiverServer = open()
+	}
 	signUp := func(name string) auth.Session {
 		t.Helper()
 		session, err := platform.Accounts.SignUp(ctx, name+"@example.test", "secret", name)
@@ -65,6 +72,8 @@ func testDirectMessages(t *testing.T, config app.Config, reopen bool) {
 		return session
 	}
 	fan, anchor, outsider := signUp("fan"), signUp("anchor"), signUp("outsider")
+	receiverSocket := openPrivateH5(t, receiverServer, anchor)
+	defer receiverSocket.Close()
 	fanID, anchorID, outsiderID := strconv.FormatInt(fan.User.ID, 10), strconv.FormatInt(anchor.User.ID, 10), strconv.FormatInt(outsider.User.ID, 10)
 	const base = "/api/dm/"
 	type response struct {
@@ -167,6 +176,21 @@ func testDirectMessages(t *testing.T, config app.Config, reopen bool) {
 	}
 	sent := post(fan, fanID, anchorID, "Approved", http.StatusOK, "200")
 	var message dm.Message
+	receiverSocket.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var frame struct {
+		Content, Queue string
+		Payload        struct {
+			Message struct{ Content, ReceiverID string }
+		}
+	}
+	for frame.Content != "dm" {
+		if err := receiverSocket.ReadJSON(&frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if frame.Queue != anchorID || frame.Payload.Message.Content != "Approved" || frame.Payload.Message.ReceiverID != anchorID {
+		t.Fatalf("private frame = %+v", frame)
+	}
 	if err := json.Unmarshal(sent.Data, &message); err != nil || message.ID == 0 || message.ConversationID != id ||
 		message.Status != dm.Pending || message.ReceiverID != anchor.User.ID || message.Content != "Approved" {
 		t.Fatalf("sent message = %+v, err = %v", message, err)
