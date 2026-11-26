@@ -22,6 +22,21 @@ const (
 	Approved = 3
 )
 
+const (
+	NoticePublished        = 2
+	NoticeLike             = 7
+	NoticeComment          = 8
+	NoticeTip              = 9
+	NoticeMachineRejection = 17
+	NoticeManualRejection  = 18
+	NoticeCommentRejection = 30
+)
+
+type ReviewDecision struct {
+	Status int
+	Notice int8
+}
+
 type Media struct {
 	URL      string  `json:"url"`
 	Filename string  `json:"filename"`
@@ -45,6 +60,7 @@ type Input struct {
 
 type Post struct {
 	Input
+	AuditRequest, ManualAuditRequest          string
 	ID, OwnerID                               int64
 	Status                                    int
 	CreatedAt                                 time.Time
@@ -74,6 +90,7 @@ type Comment struct {
 	ID, PostID, AuthorID int64
 	ParentID             *int64
 	Content              string
+	ManualAuditRequest   string
 	CreatedAt            time.Time
 	Likes                int64
 	Liked, Deleted       bool
@@ -91,7 +108,9 @@ type Stats struct {
 
 type Store interface {
 	CreatePost(ctx context.Context, actor int64, input Input, status int) (Post, error)
-	ReviewPost(ctx context.Context, id int64, status int) error
+	ReviewPost(ctx context.Context, id int64, decision ReviewDecision) error
+	BindPostReview(ctx context.Context, id int64, result Evaluation) error
+	MatchPostReview(ctx context.Context, id, owner int64, request string, manual bool) (bool, error)
 	GetPost(ctx context.Context, actor, id int64) (Post, error)
 	ListPosts(ctx context.Context, filter Filter) (Page[Post], error)
 	DeletePost(ctx context.Context, actor, id int64) error
@@ -101,6 +120,7 @@ type Store interface {
 	CreatePostComment(ctx context.Context, comment Comment) error
 	PostComments(ctx context.Context, actor, id int64) ([]Comment, error)
 	DeletePostComment(ctx context.Context, actor, id int64) error
+	RejectPostComment(ctx context.Context, actor, id int64, content, request string) error
 	LikePost(ctx context.Context, actor, id int64, liked bool) (int64, error)
 	LikePostComment(ctx context.Context, actor, id int64, liked bool) (int64, error)
 	PostReactions(ctx context.Context, actor, id int64, tips bool, offset, limit int) (Page[Reaction], error)

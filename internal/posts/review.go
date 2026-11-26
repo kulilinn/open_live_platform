@@ -23,6 +23,16 @@ type Reviewer interface {
 	Review(context.Context, ReviewRequest) (int, error)
 }
 
+type Evaluation struct {
+	Status          int    `json:"pass_status"`
+	RequestID       string `json:"request_id"`
+	ManualRequestID string `json:"manual_request_id"`
+}
+
+type TrackedReviewer interface {
+	Evaluate(context.Context, ReviewRequest) (Evaluation, error)
+}
+
 type HTTPReviewer struct {
 	endpoint, token string
 	client          *http.Client
@@ -41,13 +51,19 @@ func NewHTTPReviewer(endpoint, token string) (Reviewer, error) {
 }
 
 func (r *HTTPReviewer) Review(ctx context.Context, input ReviewRequest) (int, error) {
+	result, err := r.Evaluate(ctx, input)
+	return result.Status, err
+}
+
+func (r *HTTPReviewer) Evaluate(ctx context.Context, input ReviewRequest) (Evaluation, error) {
+	pending := Evaluation{Status: Pending}
 	data, err := json.Marshal(input)
 	if err != nil {
-		return Pending, err
+		return pending, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(data))
 	if err != nil {
-		return Pending, err
+		return pending, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if r.token != "" {
@@ -55,20 +71,18 @@ func (r *HTTPReviewer) Review(ctx context.Context, input ReviewRequest) (int, er
 	}
 	res, err := r.client.Do(req)
 	if err != nil {
-		return Pending, err
+		return pending, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return Pending, errors.New("post audit provider rejected the request")
+		return pending, errors.New("post audit provider rejected the request")
 	}
-	var result struct {
-		Status int `json:"pass_status"`
-	}
+	var result Evaluation
 	if err := json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&result); err != nil {
-		return Pending, err
+		return pending, err
 	}
-	if result.Status < Pending || result.Status > Approved {
-		return Pending, errors.New("invalid post audit provider verdict")
+	if result.Status < Pending || result.Status > Approved || len(result.RequestID) > 256 || len(result.ManualRequestID) > 256 {
+		return pending, errors.New("invalid post audit provider verdict")
 	}
-	return result.Status, nil
+	return result, nil
 }

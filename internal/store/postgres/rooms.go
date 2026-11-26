@@ -152,6 +152,11 @@ func (s *Store) StartWithSettings(ctx context.Context, owner int64, settings liv
 		}
 		room.ApplySettings(settings)
 		result, err = r.writeSettings(room, hash, true, true)
+		if err != nil {
+			return err
+		}
+		_, err = r.tx.Exec(ctx, `INSERT INTO room_broadcast_metrics(live_id,room_id,started_at)
+			VALUES($1,$2,$3)`, result.Session.LiveID, r.id, result.Session.StartedAt)
 		return err
 	})
 	if err != nil {
@@ -260,6 +265,9 @@ func (r *roomChange) close(actor int64) error {
 	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,live_show=false,
 		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+
 		" WHERE id=$1 RETURNING live_ended_at", r.id).Scan(&endedAt); err != nil {
+		return err
+	}
+	if _, err := r.tx.Exec(r.ctx, `UPDATE room_broadcast_metrics SET ended_at=$2 WHERE live_id=$1`, room.Session.LiveID, endedAt); err != nil {
 		return err
 	}
 	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_members WHERE room_id=$1", r.id); err != nil {
@@ -399,6 +407,9 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, la
 		}
 		if joined {
 			r.event = live.Event{Type: "join", UserID: uid}
+			if err := r.updateMaxRoomAudience(); err != nil {
+				return err
+			}
 			if err := r.queueBotWelcome(uid); err != nil {
 				return err
 			}

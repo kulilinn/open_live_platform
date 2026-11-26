@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"open_live_platform/internal/botchat"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestPostgresImportLiveMediaInteractions(t *testing.T) {
 	importRows := func() postgres.InteractionImportCounts {
 		t.Helper()
 		result, err := store.ImportLegacyInteractions(ctx, legacyRows(legacy, postgres.LegacyDMConversation{Type: 2}),
-			legacyRows(message, wrongRecipient), legacyRows(firstNotice, postgres.LegacyNotice{Deleted: true}))
+			legacyRows(message, wrongRecipient), legacyRows(firstNotice, postgres.LegacyNotice{Deleted: true}), legacyRows[botchat.Message]())
 		if err != nil {
 			t.Fatal(err)
 		}

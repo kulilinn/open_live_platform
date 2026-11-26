@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"open_live_platform/internal/admin"
+	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/botchat"
 	"open_live_platform/internal/catalog"
 	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/date"
@@ -19,6 +21,7 @@ import (
 	"open_live_platform/internal/edge"
 	"open_live_platform/internal/feed"
 	"open_live_platform/internal/feedback"
+	"open_live_platform/internal/geo"
 	"open_live_platform/internal/gift"
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
@@ -32,52 +35,65 @@ import (
 	"open_live_platform/internal/stt"
 	"open_live_platform/internal/subscription"
 	"open_live_platform/internal/translate"
+	"open_live_platform/internal/transport/httpx"
 	"open_live_platform/internal/upload"
 )
 
 type Config struct {
-	PostAuditURL           string
-	PostAuditToken         string
-	PostAuditRequired      bool
-	PostReviewToken        string
-	RoomBots               livebot.Config
-	roomBotsConfigError    error
-	FeedbackHook           string
-	PublicCatalog          catalog.Snapshot
-	Collectibles           collectible.Config
-	Google                 auth.GoogleConfig
-	Upload                 upload.Config
-	WalletPasses           upload.PassConfig
-	Kafka                  edge.KafkaConfig
-	DatabaseURL            string
-	Addr                   string
-	GRPCAddr               string
-	AdminToken             string
-	AdminAddr              string
-	MCNAdminAddr           string
-	AdminAccountsFile      string
-	EdgeToken              string
-	RelaySecret            string
-	RelayPublicURL         string
-	RelayRust              relay.RustOptions
-	GiftCatalogFile        string
-	JWTSecret              string
-	MailSMTP               auth.SMTPConfig
-	MailCodeSecret         string
-	MailCodeTTL            time.Duration
-	AgoraAppID             string
-	AgoraCertificate       string
-	AgoraTokenExpire       string
-	TextTranslation        translate.Config
-	Subtitles              stt.Config
-	DMModerationURL        string
-	DMModerator            dm.Moderator
-	PaymentHost            string
-	SubscriptionRenewToken string
-	PaymentAppID           string
-	PaymentBorrowAppID     string
-	PaymentProxyRoutes     string
-	LargeOrders            payment.LargeOrderConfig
+	CORSOrigins                []string
+	RateLimit                  bool
+	RocketLikeSpeedCoefficient float64
+	Geo                        geo.Config
+	TelegramBotToken           string
+	KYC                        anchor.KYCConfig
+	AnchorChannelAccess        string
+	AnchorChannelConversion    string
+	CDNKey                     string
+	PreloginEnd                string
+	WebPush                    httpapi.WebPushConfig
+	PostAuditURL               string
+	PostAuditToken             string
+	PostAuditRequired          bool
+	PostReviewToken            string
+	RoomBots                   livebot.Config
+	roomBotsConfigError        error
+	FeedbackHook               string
+	PublicCatalog              catalog.Snapshot
+	Collectibles               collectible.Config
+	Google                     auth.GoogleConfig
+	Upload                     upload.Config
+	WalletPasses               upload.PassConfig
+	Kafka                      edge.KafkaConfig
+	DatabaseURL                string
+	Addr                       string
+	GRPCAddr                   string
+	AdminToken                 string
+	AdminAddr                  string
+	MCNAdminAddr               string
+	AdminAccountsFile          string
+	EdgeToken                  string
+	RelaySecret                string
+	RelayPublicURL             string
+	RelayRust                  relay.RustOptions
+	GiftCatalogFile            string
+	GiftInteractionFile        string
+	JWTSecret                  string
+	MailSMTP                   auth.SMTPConfig
+	MailCodeSecret             string
+	MailCodeTTL                time.Duration
+	AgoraAppID                 string
+	AgoraCertificate           string
+	AgoraTokenExpire           string
+	TextTranslation            translate.Config
+	Subtitles                  stt.Config
+	DMModerationURL            string
+	DMModerator                dm.Moderator
+	PaymentHost                string
+	SubscriptionRenewToken     string
+	PaymentAppID               string
+	PaymentBorrowAppID         string
+	PaymentProxyRoutes         string
+	LargeOrders                payment.LargeOrderConfig
 
 	AnchorAwayTimeout time.Duration
 	ReadTimeout       time.Duration
@@ -89,57 +105,72 @@ type Config struct {
 func ConfigFromEnv() Config {
 	adminToken := os.Getenv("ADMIN_TOKEN")
 	bots, botConfigErr := livebot.LoadFromEnv()
+	rocketSpeed, _ := strconv.ParseFloat(os.Getenv("ROCKET_LIKE_SPEED_COEFFICIENT"), 64)
 	postAuditRequired, _ := strconv.ParseBool(os.Getenv("POST_AUDIT_REQUIRED"))
+	testMode, _ := strconv.ParseBool(os.Getenv("TEST_MODE"))
 	return Config{
-		PostAuditURL:           os.Getenv("POST_AUDIT_URL"),
-		PostAuditToken:         os.Getenv("POST_AUDIT_TOKEN"),
-		PostAuditRequired:      postAuditRequired,
-		PostReviewToken:        os.Getenv("POST_REVIEW_TOKEN"),
-		RoomBots:               bots,
-		roomBotsConfigError:    botConfigErr,
-		FeedbackHook:           os.Getenv("FEEDBACK_HOOK_URL"),
-		Collectibles:           collectible.ConfigFromEnv(),
-		Google:                 auth.GoogleConfig{ClientID: os.Getenv("GOOGLE_CLIENT_ID")},
-		Upload:                 uploadFromEnv(),
-		WalletPasses:           walletPassesFromEnv(),
-		Kafka:                  kafkaFromEnv(),
-		DatabaseURL:            os.Getenv("DATABASE_URL"),
-		Addr:                   env("PLATFORM_ADDR", ":8080"),
-		GRPCAddr:               os.Getenv("PLATFORM_GRPC_ADDR"),
-		AdminToken:             adminToken,
-		AdminAddr:              os.Getenv("PLATFORM_ADMIN_ADDR"),
-		MCNAdminAddr:           os.Getenv("PLATFORM_MCN_ADMIN_ADDR"),
-		AdminAccountsFile:      os.Getenv("ADMIN_ACCOUNTS_FILE"),
-		EdgeToken:              env("EDGE_TOKEN", adminToken),
-		RelaySecret:            env("RELAY_SECRET", "dev-secret"),
-		RelayPublicURL:         os.Getenv("RELAY_PUBLIC_URL"),
-		RelayRust:              relayRustOptionsFromEnv(),
-		GiftCatalogFile:        os.Getenv("GIFT_CATALOG_FILE"),
-		JWTSecret:              os.Getenv("JWT_SECRET"),
-		MailSMTP:               smtpFromEnv(),
-		MailCodeSecret:         os.Getenv("MAIL_CODE_SECRET"),
-		MailCodeTTL:            mailCodeTTLFromEnv(),
-		AgoraAppID:             os.Getenv("AGORA_APP_ID"),
-		AgoraCertificate:       os.Getenv("AGORA_APP_CERTIFICATE"),
-		AgoraTokenExpire:       os.Getenv("AGORA_TOKEN_EXPIRE"),
-		TextTranslation:        translate.ConfigFromEnv(),
-		Subtitles:              stt.ConfigFromEnv(),
-		DMModerationURL:        os.Getenv("DM_MODERATION_URL"),
-		PaymentHost:            os.Getenv("PAYMENT_HOST"),
-		SubscriptionRenewToken: os.Getenv("SUBSCRIPTION_RENEW_TOKEN"),
-		PaymentAppID:           os.Getenv("PAYMENT_APPID"),
-		PaymentBorrowAppID:     os.Getenv("PAYMENT_BORROW_APPID"),
-		PaymentProxyRoutes:     os.Getenv("PAYMENT_PROXY_ROUTES"),
-		LargeOrders:            largeOrderFromEnv(),
-		AnchorAwayTimeout:      anchorAwayTimeoutFromEnv(),
-		ReadTimeout:            duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
-		ReadHeaderTimeout:      duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
-		WriteTimeout:           duration("PLATFORM_WRITE_TIMEOUT", 15*time.Second),
-		IdleTimeout:            duration("PLATFORM_IDLE_TIMEOUT", 60*time.Second),
+		CORSOrigins:                strings.FieldsFunc(os.Getenv("CORS_ORIGIN"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }),
+		RateLimit:                  !testMode,
+		Geo:                        geo.FromEnv(),
+		TelegramBotToken:           os.Getenv("TELEGRAM_BOT_TOKEN"),
+		KYC:                        anchor.KYCFromEnv(),
+		AnchorChannelAccess:        os.Getenv("ANCHOR_CHANNEL_ACCESS_FILE"),
+		AnchorChannelConversion:    os.Getenv("LP_TO_DOLLAR"),
+		CDNKey:                     os.Getenv("CDN_SECRET"),
+		PreloginEnd:                os.Getenv("PRELOGIN_END"),
+		WebPush:                    httpapi.WebPushConfig{Host: os.Getenv("LOVEROSE_PUSH_HOST"), KeyPath: os.Getenv("LOVEROSE_PUSH_KEY_PATH"), SubPath: os.Getenv("LOVEROSE_PUSH_SUB_PATH")},
+		PostAuditURL:               os.Getenv("POST_AUDIT_URL"),
+		PostAuditToken:             os.Getenv("POST_AUDIT_TOKEN"),
+		PostAuditRequired:          postAuditRequired,
+		PostReviewToken:            os.Getenv("POST_REVIEW_TOKEN"),
+		RoomBots:                   bots,
+		RocketLikeSpeedCoefficient: rocketSpeed,
+		roomBotsConfigError:        botConfigErr,
+		FeedbackHook:               os.Getenv("FEEDBACK_HOOK_URL"),
+		Collectibles:               collectible.ConfigFromEnv(),
+		Google:                     auth.GoogleConfig{ClientID: os.Getenv("GOOGLE_CLIENT_ID")},
+		Upload:                     uploadFromEnv(),
+		WalletPasses:               walletPassesFromEnv(),
+		Kafka:                      kafkaFromEnv(),
+		DatabaseURL:                os.Getenv("DATABASE_URL"),
+		Addr:                       env("PLATFORM_ADDR", ":8080"),
+		GRPCAddr:                   os.Getenv("PLATFORM_GRPC_ADDR"),
+		AdminToken:                 adminToken,
+		AdminAddr:                  os.Getenv("PLATFORM_ADMIN_ADDR"),
+		MCNAdminAddr:               os.Getenv("PLATFORM_MCN_ADMIN_ADDR"),
+		AdminAccountsFile:          os.Getenv("ADMIN_ACCOUNTS_FILE"),
+		EdgeToken:                  env("EDGE_TOKEN", adminToken),
+		RelaySecret:                env("RELAY_SECRET", "dev-secret"),
+		RelayPublicURL:             os.Getenv("RELAY_PUBLIC_URL"),
+		RelayRust:                  relayRustOptionsFromEnv(),
+		GiftCatalogFile:            os.Getenv("GIFT_CATALOG_FILE"),
+		GiftInteractionFile:        os.Getenv("GIFT_INTERACTION_FILE"),
+		JWTSecret:                  os.Getenv("JWT_SECRET"),
+		MailSMTP:                   smtpFromEnv(),
+		MailCodeSecret:             os.Getenv("MAIL_CODE_SECRET"),
+		MailCodeTTL:                mailCodeTTLFromEnv(),
+		AgoraAppID:                 os.Getenv("AGORA_APP_ID"),
+		AgoraCertificate:           os.Getenv("AGORA_APP_CERTIFICATE"),
+		AgoraTokenExpire:           os.Getenv("AGORA_TOKEN_EXPIRE"),
+		TextTranslation:            translate.ConfigFromEnv(),
+		Subtitles:                  stt.ConfigFromEnv(),
+		DMModerationURL:            os.Getenv("DM_MODERATION_URL"),
+		PaymentHost:                os.Getenv("PAYMENT_HOST"),
+		SubscriptionRenewToken:     os.Getenv("SUBSCRIPTION_RENEW_TOKEN"),
+		PaymentAppID:               os.Getenv("PAYMENT_APPID"),
+		PaymentBorrowAppID:         os.Getenv("PAYMENT_BORROW_APPID"),
+		PaymentProxyRoutes:         os.Getenv("PAYMENT_PROXY_ROUTES"),
+		LargeOrders:                largeOrderFromEnv(),
+		AnchorAwayTimeout:          anchorAwayTimeoutFromEnv(),
+		ReadTimeout:                duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
+		ReadHeaderTimeout:          duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
+		WriteTimeout:               duration("PLATFORM_WRITE_TIMEOUT", 15*time.Second),
+		IdleTimeout:                duration("PLATFORM_IDLE_TIMEOUT", 60*time.Second),
 	}
 }
 
 type App struct {
+	geoDB         *geo.DB
 	push          relay.PushPrivate
 	dates         *httpapi.Dates
 	Config        Config
@@ -180,6 +211,10 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
 	}
+	interactions, err := gift.LoadInteractions(config.GiftInteractionFile)
+	if err != nil {
+		return nil, fmt.Errorf("gift interaction catalog: %w", err)
+	}
 	if config.DMModerator == nil && config.DMModerationURL != "" {
 		moderator, err := dm.NewHTTPModerator(config.DMModerationURL)
 		if err != nil {
@@ -192,6 +227,14 @@ func New(ctx context.Context, config Config) (*App, error) {
 		return nil, err
 	}
 	postReviewer, err := posts.NewHTTPReviewer(config.PostAuditURL, config.PostAuditToken)
+	if err != nil {
+		return nil, err
+	}
+	kyc, err := anchor.NewKYC(config.KYC)
+	if err != nil {
+		return nil, err
+	}
+	channelAuth, err := anchor.NewChannelAuth(config.AnchorChannelAccess, config.AnchorChannelConversion)
 	if err != nil {
 		return nil, err
 	}
@@ -225,16 +268,20 @@ func New(ctx context.Context, config Config) (*App, error) {
 	var feedbacks feedback.Store = &feedback.Memory{}
 	var reference catalog.Store = config.PublicCatalog
 	var messages dm.Store
+	var botMessages botchat.Store = &botchat.Memory{}
 	var giftOrders gift.OrderStore
 	var earnings gift.EarningsStore
 	var collectibleStore collectible.Store
 	var payments payment.Store
 	var subscriptions subscription.Store
 	var anchorPosts posts.Store
+	var anchorProfiles anchor.Store
+	var channelReports anchor.ChannelStore
 	var db *postgres.Store
 	if config.DatabaseURL == "" {
 		memoryRooms := live.NewStoreWithAnchorTimeout(config.AnchorAwayTimeout)
-		backend, rooms, giftOrders = auth.NewStore(), memoryRooms, memoryRooms
+		memoryAccounts := auth.NewStore()
+		backend, rooms, giftOrders = memoryAccounts, memoryRooms, memoryRooms
 		earnings = memoryRooms
 		notices = &notice.Memory{}
 		uploads = &upload.Memory{}
@@ -242,7 +289,8 @@ func New(ctx context.Context, config Config) (*App, error) {
 		memoryMessages := &dm.Memory{}
 		messages = memoryMessages
 		subscriptions = subscription.NewMemory(memoryMessages)
-		anchorPosts = posts.NewMemory(subscriptions)
+		anchorProfiles = anchor.NewMemory(memoryAccounts, subscriptions)
+		anchorPosts = posts.NewMemory(subscriptions, posts.MemoryNoticeOptions{Accounts: backend, Notices: notices})
 		payments = &payment.MemoryChecks{}
 		collectibleStore = collectible.NewMemory()
 	} else {
@@ -267,10 +315,13 @@ func New(ctx context.Context, config Config) (*App, error) {
 		feedbacks = db
 		reference = db
 		messages = db
+		botMessages = db
 		giftOrders = db
 		earnings = db
 		subscriptions = db
 		anchorPosts = db
+		anchorProfiles = db
+		channelReports = db
 		payments = db
 		collectibleStore = db
 	}
@@ -300,6 +351,14 @@ func New(ctx context.Context, config Config) (*App, error) {
 		return nil, err
 	}
 	mux := http.NewServeMux()
+	geoDB, err := geo.Open(config.Geo)
+	if err != nil {
+		if db != nil {
+			db.Shutdown()
+		}
+		return nil, err
+	}
+	httpapi.RegisterGeo(mux, config.Geo, geoDB.Country)
 	var taskStore stt.Store
 	var dateStore date.Store
 	if db != nil {
@@ -315,34 +374,44 @@ func New(ctx context.Context, config Config) (*App, error) {
 	dates := &httpapi.Dates{Accounts: accounts, Service: date.New(dateStore, accounts, subscriptions, billing),
 		Signer: signer, Subtitles: dateSubtitles, Push: push}
 	dates.Register(mux)
+	httpapi.RegisterDateGiftOrders(mux, dates, billing, gifts)
+	httpapi.RegisterWheel(mux, accounts, rooms, billing)
+	httpapi.RegisterRoomGiftEffects(mux, accounts, rooms, config.RocketLikeSpeedCoefficient)
 
 	httpapi.RegisterWithEmail(mux, accounts, rooms, signer, emailVerification,
-		httpapi.LiveServices{Subtitles: subtitles, Dates: dates, Collectible: collectibles})
+		httpapi.LiveServices{Subtitles: subtitles, Dates: dates, Collectible: collectibles, PreloginEnd: config.PreloginEnd})
 	httpapi.RegisterSTT(mux, accounts, subtitles, dateSubtitles)
 	httpapi.RegisterTranslate(mux, accounts, translate.New(config.TextTranslation))
 	httpapi.RegisterGoogle(mux, auth.GoogleLogin{Config: config.Google, Accounts: accounts, Backend: backend, Mail: emailVerification})
+	httpapi.RegisterTelegram(mux, accounts, backend, config.TelegramBotToken)
 	httpapi.RegisterGiftCatalog(mux, accounts, gifts)
+	httpapi.RegisterGiftInteractions(mux, dates, gifts, interactions, billing)
 	httpapi.RegisterPoints(mux, accounts, billing)
 	httpapi.RegisterPayment(mux, accounts, payments, paymentProxy, largeOrders)
 	httpapi.RegisterWalletPass(mux, passes)
 	httpapi.RegisterGiftOrders(mux, accounts, rooms, giftOrders, billing, gifts)
 	httpapi.RegisterEarnings(mux, accounts, rooms, earnings, subscriptions, config.EdgeToken)
+	httpapi.RegisterAnchorProfiles(mux, accounts, rooms, anchorProfiles, subscriptions, collectibles, postReviewer, kyc)
+	httpapi.RegisterAnchorChannelReports(mux, channelAuth, channelReports)
 	httpapi.RegisterSubscriptions(mux, accounts, rooms, subscriptions, billing, inbox, config.SubscriptionRenewToken)
 	httpapi.RegisterPosts(mux, accounts, rooms, anchorPosts, subscriptions, billing, httpapi.PostOptions{
-		Reviewer: postReviewer, AuditRequired: config.PostAuditRequired, ReviewToken: config.PostReviewToken,
+		Anchors: anchorProfiles, Reviewer: postReviewer, AuditRequired: config.PostAuditRequired, ReviewToken: config.PostReviewToken,
 	})
 	admin.Register(mux, accounts, rooms, config.AdminToken)
 	httpapi.RegisterNotices(mux, accounts, notices)
 	httpapi.RegisterFeed(mux, accounts, rooms, subscriptions, inbox, messages, config.DMModerator)
 	httpapi.RegisterUploads(mux, accounts, config.Upload, uploads)
 	httpapi.RegisterPublicCatalog(mux, reference)
+	httpapi.RegisterClientServices(mux, accounts, config.CDNKey, config.WebPush)
 	httpapi.RegisterPWA(mux, accounts, rooms, subscriptions, inbox, reference)
 	httpapi.RegisterShares(mux, accounts, inbox, config.Upload)
 	httpapi.RegisterFeedback(mux, accounts, feedbacks, config.Upload, config.FeedbackHook)
 	httpapi.RegisterDirectMessages(mux, accounts, messages, config.DMModerator, push)
+	httpapi.RegisterBotChat(mux, accounts, botMessages, push)
 	edge.Register(mux, rooms, notices, config.EdgeToken)
 
 	return &App{
+		geoDB:         geoDB,
 		push:          push,
 		dates:         dates,
 		db:            db,
@@ -355,7 +424,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		Subtitles:     subtitles,
 		Server: &http.Server{
 			Addr:              config.Addr,
-			Handler:           mux,
+			Handler:           httpx.BrowserHandler(mux, httpx.BrowserConfig{Origins: config.CORSOrigins, RateLimit: config.RateLimit, TrustedProxies: config.Geo.TrustedProxies}),
 			ReadTimeout:       config.ReadTimeout,
 			ReadHeaderTimeout: config.ReadHeaderTimeout,
 			WriteTimeout:      config.WriteTimeout,
@@ -445,6 +514,7 @@ func mailCodeTTLFromEnv() time.Duration {
 }
 
 func (a *App) Close() {
+	a.geoDB.Close()
 	if a.db != nil {
 		a.db.Shutdown()
 	}

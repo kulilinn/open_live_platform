@@ -10,6 +10,12 @@ import (
 // PushPrivate sends a Rust ChannelMessage to the recipient's H5 connections.
 type PushPrivate func(context.Context, int64, string, any) error
 
+// QueuedPayload preserves the sender's H5 queue when the same frame is delivered to both participants.
+type QueuedPayload struct {
+	Queue   int64
+	Payload any
+}
+
 type privateStreams struct {
 	mu    sync.Mutex
 	users map[int64]map[chan json.RawMessage]struct{}
@@ -48,11 +54,15 @@ func (p *privateStreams) deliver(id int64, frame json.RawMessage) {
 }
 
 func (h *deviceHub) pushPrivate(ctx context.Context, id int64, content string, payload any) error {
+	queue := id
+	if msg, ok := payload.(QueuedPayload); ok {
+		queue, payload = msg.Queue, msg.Payload
+	}
 	frame, err := json.Marshal(struct {
 		Content string `json:"content"`
 		Queue   string `json:"queue"`
 		Payload any    `json:"payload"`
-	}{content, strconv.FormatInt(id, 10), payload})
+	}{content, strconv.FormatInt(queue, 10), payload})
 	if err != nil {
 		return err
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/subscription"
 )
@@ -17,7 +18,13 @@ const subscriptionPlanColumns = `p.id,p.anchor_id,p.plan_type,p.published::int,p
 	p.bundles,p.promotion,p.promotion_ends_at`
 
 func (s *Store) EnsureFreePlan(ctx context.Context, anchorID int64) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO subscription_plans(anchor_id,plan_type,price) SELECT $1,2,0
+	return ensureFreePlan(ctx, s.pool, anchorID)
+}
+
+func ensureFreePlan(ctx context.Context, executor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, anchorID int64) error {
+	_, err := executor.Exec(ctx, `INSERT INTO subscription_plans(anchor_id,plan_type,price) SELECT $1,2,0
 		WHERE NOT EXISTS(SELECT 1 FROM subscription_plans WHERE anchor_id=$1 AND plan_type=2) ON CONFLICT DO NOTHING`, anchorID)
 	return err
 }

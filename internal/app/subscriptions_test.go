@@ -178,6 +178,10 @@ func TestPostgresPaidSubscriptionVerifiesProviderBeforeGrant(t *testing.T) {
 		t.Fatalf("provider calls = %d, want decline and one success", got)
 	}
 	subscriptionDMAllowed(t, platform, fan, anchor, true)
+	level := subscriptionGet(t, platform, fan, "/api/sub/level/"+anchorID)["data"].(map[string]any)
+	if level["fans_level"] != float64(2) || level["platform_level"] != float64(13) {
+		t.Fatalf("confirmed points did not advance Rust experience levels: %+v", level)
+	}
 	if _, err := db.Exec(t.Context(), `WITH expired AS (UPDATE subscription_members SET expires_at=now() WHERE fan_id=$1 RETURNING fan_id)
 		UPDATE dm_conversations SET subscription_expires_at=now() WHERE fan_id IN (SELECT fan_id FROM expired)`, fan.User.ID); err != nil {
 		t.Fatal(err)

@@ -30,6 +30,7 @@ type roomSignal struct {
 	ClosedAt   time.Time       `json:"ClosedAt,omitzero"`
 	CreatedAt  time.Time       `json:"CreatedAt,omitzero"`
 	RoomStatus live.RoomStatus `json:"RoomStatus,omitempty"`
+	Likes      int64           `json:"Likes,omitempty"`
 }
 
 func (s *Store) startRoomEvents(ctx context.Context) error {
@@ -87,6 +88,11 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 		signal.RoomStatus = r.event.RoomStatus
 	case "gift":
 		signal.CreatedAt = r.event.CreatedAt
+	case "room_like":
+		signal.CreatedAt = r.event.CreatedAt
+		signal.LiveID, signal.Likes = r.event.LiveID, r.event.Likes
+	case "gift_effect":
+		signal.LiveID = r.event.LiveID
 	}
 	if err := s.notifyRoomSignal(r, signal); err != nil {
 		return err
@@ -218,6 +224,8 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 	case "room_status":
 		event.CreatedAt = signal.CreatedAt
 		event.RoomStatus = signal.RoomStatus
+	case "room_like":
+		event = live.RoomLikeEvent(signal.RoomID, signal.LiveID, signal.UserID, signal.Likes, signal.CreatedAt)
 	case "translate_change":
 		var languages []string
 		var liveID, ownerID int64
@@ -248,6 +256,44 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 			stream.publish(event)
 		}
 		return nil
+	case "wheel":
+		var order gift.WheelOrder
+		err := conn.QueryRow(ctx, `SELECT w.order_data FROM room_wheel_orders w JOIN rooms r ON r.id=w.room_id
+			WHERE w.id=$1 AND w.room_id=$2 AND w.state=1 AND r.online AND r.live_id=w.live_id`, signal.MessageID, signal.RoomID).Scan(&order)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		frames, err := order.Frames()
+		if err != nil {
+			return err
+		}
+		event.Type, event.CreatedAt = "gift", order.Result.Time
+		for _, frame := range frames {
+			event.Payload = string(frame)
+			stream.publish(event)
+		}
+		return nil
+	case "gift_effect":
+		rows, err := conn.Query(ctx, selectRoomEffects+` AND e.order_id=$3 AND EXISTS(
+			SELECT 1 FROM rooms r WHERE r.id=e.room_id AND r.online AND r.live_id=e.live_id)`, signal.RoomID, signal.LiveID, signal.MessageID)
+		if err != nil {
+			return err
+		}
+		effect, err := pgx.CollectOneRow(rows, scanRoomEffect)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		frame, err := effect.HardwareFrame()
+		if err != nil {
+			return err
+		}
+		event.Type, event.Payload, event.CreatedAt = "gift", string(frame), effect.Start
 	}
 	stream.publish(event)
 	return nil

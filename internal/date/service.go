@@ -45,6 +45,7 @@ func (s *Service) Start(ctx context.Context, actor int64) error {
 		}
 		host.Accepting = true
 		host.AcceptUntil = now.Add(AcceptingLease)
+		host.RecommendedAt = now
 		host.Pending = nil
 		return nil
 	})
@@ -282,11 +283,11 @@ func (s *Service) Stop(ctx context.Context, actor int64) (Session, int64, error)
 		if host.Pending.Active(now) {
 			invitee = host.Pending.UID
 		}
+		host.Accepting, host.Pending = false, nil
 		if session.Channel != 0 && session.EndedAt.IsZero() {
 			End(host, session, now)
 			ended = *session
 		}
-		host.Accepting, host.Pending = false, nil
 		return nil
 	})
 	return ended, invitee, err

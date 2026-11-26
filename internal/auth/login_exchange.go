@@ -144,7 +144,7 @@ func (s *Store) ReplaceJWTSession(ctx context.Context, grant LoginGrant, user Us
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	login, ok := s.users[user.Email]
+	login, ok := s.users[user.accountKey()]
 	if !ok || login.user.ID != grant.UserID || login.user.Moderation.Banned() || !time.Now().Before(grant.ExpiresAt) || s.jwtSessions[grant.UserID] != grant.FamilyID {
 		return false, nil
 	}

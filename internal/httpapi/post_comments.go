@@ -107,21 +107,23 @@ func (s postAPI) comment(w http.ResponseWriter, r *http.Request, actor int64) {
 		postError(w, posts.ErrForbidden)
 		return
 	}
+	var manualRequest string
 	if s.options.Reviewer != nil {
-		verdict, err := s.options.Reviewer.Review(ctx, posts.ReviewRequest{Kind: "comment", UserID: actor, PostID: id, Text: input.Content})
-		if verdict == posts.Rejected && err == nil {
+		result, err := s.evaluatePostReview(ctx, posts.ReviewRequest{Kind: "comment", UserID: actor, PostID: id, Text: input.Content})
+		if result.Status == posts.Rejected && err == nil {
 			httpx.JSON(w, http.StatusOK, map[string]string{"status": "4060"})
 			return
 		}
-		if err != nil || verdict != posts.Approved {
+		if err != nil || result.Status != posts.Approved {
 			httpx.Error(w, http.StatusServiceUnavailable, "comment review is unavailable")
 			return
 		}
+		manualRequest = result.ManualRequestID
 	} else if s.options.AuditRequired {
 		httpx.Error(w, http.StatusServiceUnavailable, "comment review is unavailable")
 		return
 	}
-	c := posts.Comment{AuthorID: actor, PostID: id, Content: input.Content}
+	c := posts.Comment{AuthorID: actor, PostID: id, Content: input.Content, ManualAuditRequest: manualRequest}
 	if input.ParentID != nil {
 		parent := int64(*input.ParentID)
 		c.ParentID = &parent

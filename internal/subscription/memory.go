@@ -11,6 +11,7 @@ import (
 )
 
 type Memory struct {
+	memoryDirectory
 	mu     sync.Mutex
 	dm     *dm.Memory
 	nextID int64

@@ -96,7 +96,7 @@ func (s *Store) SignUp(ctx context.Context, email, password, account string) (Se
 	}
 	email = NormalizeEmail(email)
 	account = strings.TrimSpace(account)
-	if email == "" || password == "" || account == "" {
+	if email == "" || strings.ContainsRune(email, 0) || password == "" || account == "" {
 		return Session{}, ErrMissingFields
 	}
 
@@ -160,7 +160,7 @@ func (s *Store) Lookup(ctx context.Context, token string) (User, bool, error) {
 	defer s.mu.RUnlock()
 	user, exists := s.sessions[token]
 	if exists {
-		user.Moderation = s.users[user.Email].user.Moderation
+		user.Moderation = s.users[user.accountKey()].user.Moderation
 	}
 	return user, exists, nil
 }
@@ -186,7 +186,7 @@ func (s *Store) Refresh(ctx context.Context, token string) (Session, bool, error
 	if !ok {
 		return Session{}, false, nil
 	}
-	user = s.users[user.Email].user
+	user = s.users[user.accountKey()].user
 	if user.Moderation.Banned() {
 		return Session{}, false, BannedError{Moderation: user.Moderation}
 	}

@@ -78,7 +78,7 @@ func (s *Store) ReserveGift(ctx context.Context, id int64, order gift.Order) (gi
 			order.Sender, order.Receiver, order.SenderRole, order.Cost, order.Income))
 		if err == nil {
 			created = true
-			return nil
+			return change.reserveGiftEffect(result)
 		}
 		if !errors.Is(err, gift.ErrOrderNotFound) {
 			return err
@@ -130,6 +130,9 @@ func (s *Store) FinishGift(ctx context.Context, roomID int64, order gift.Order, 
 			return err
 		}
 		if online {
+			if err := change.startGiftEffect(result); err != nil {
+				return err
+			}
 			change.event = live.Event{Type: "gift", UserID: result.Input.SenderID, MessageID: result.ID, CreatedAt: result.PaidAt}
 			return change.queueBotGift(result.Input.SenderID, result.Cost, result.Item.GiftType)
 		}

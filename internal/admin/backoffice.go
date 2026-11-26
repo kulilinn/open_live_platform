@@ -185,6 +185,7 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 	} else {
 		b.registerOperations(mux)
 		b.registerCatalogAndFinance(mux, catalog)
+		b.registerAnchorReviews(mux)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)

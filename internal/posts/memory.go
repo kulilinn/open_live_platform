@@ -19,11 +19,13 @@ type Memory struct {
 	comments            map[int64]Comment
 	postLikes           map[int64]map[int64]time.Time
 	commentLikes        map[int64]map[int64]time.Time
+	notifications       memoryPostNotices
 }
 
-func NewMemory(subscriptions subscription.Store) *Memory {
+func NewMemory(subscriptions subscription.Store, notices MemoryNoticeOptions) *Memory {
 	return &Memory{subscriptions: subscriptions, posts: make(map[int64]Post), comments: make(map[int64]Comment),
-		postLikes: make(map[int64]map[int64]time.Time), commentLikes: make(map[int64]map[int64]time.Time)}
+		postLikes: make(map[int64]map[int64]time.Time), commentLikes: make(map[int64]map[int64]time.Time),
+		notifications: memoryPostNotices{MemoryNoticeOptions: notices, lastID: -9000000000000000000}}
 }
 
 func (m *Memory) CreatePost(ctx context.Context, actor int64, input Input, status int) (Post, error) {
@@ -35,11 +37,16 @@ func (m *Memory) CreatePost(ctx context.Context, actor int64, input Input, statu
 	m.nextID++
 	input.Media = slices.Clone(input.Media)
 	p := Post{Input: input, ID: m.nextID, OwnerID: actor, Status: status, CreatedAt: time.Now().UTC(), Full: true}
+	if status == Approved {
+		if err := m.notifyPublished(ctx, p); err != nil {
+			return Post{}, err
+		}
+	}
 	m.posts[p.ID] = p
 	return p, nil
 }
 
-func (m *Memory) ReviewPost(ctx context.Context, id int64, status int) error {
+func (m *Memory) ReviewPost(ctx context.Context, id int64, decision ReviewDecision) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -49,12 +56,59 @@ func (m *Memory) ReviewPost(ctx context.Context, id int64, status int) error {
 	if !ok || p.Deleted {
 		return ErrNotFound
 	}
-	if p.Status != Pending && p.Status != status {
+	if p.Status == decision.Status {
+		return nil
+	}
+	if p.Status != Pending {
 		return ErrReviewConflict
 	}
-	p.Status = status
+	switch decision.Status {
+	case Approved:
+		if err := m.notifyPublished(ctx, p); err != nil {
+			return err
+		}
+	case Rejected:
+		if err := m.notifyRejection(ctx, decision.Notice, p.OwnerID); err != nil {
+			return err
+		}
+	}
+	p.Status = decision.Status
 	m.posts[id] = p
 	return nil
+}
+
+func (m *Memory) BindPostReview(ctx context.Context, id int64, result Evaluation) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	post, found := m.posts[id]
+	if !found || post.Deleted {
+		return ErrNotFound
+	}
+	if post.Status != Pending {
+		return ErrReviewConflict
+	}
+	post.AuditRequest, post.ManualAuditRequest = result.RequestID, result.ManualRequestID
+	m.posts[id] = post
+	return nil
+}
+
+func (m *Memory) MatchPostReview(ctx context.Context, id, owner int64, request string, manual bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	post, found := m.posts[id]
+	if !found || post.Deleted || post.OwnerID != owner || request == "" {
+		return false, nil
+	}
+	if manual {
+		return request == post.ManualAuditRequest, nil
+	}
+	return request == post.AuditRequest, nil
 }
 
 func (m *Memory) GetPost(ctx context.Context, actor, id int64) (Post, error) {

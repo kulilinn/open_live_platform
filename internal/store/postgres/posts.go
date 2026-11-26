@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/posts"
@@ -12,7 +13,8 @@ var _ posts.Store = (*Store)(nil)
 
 const anchorPostFields = `p.id,p.owner_id,p.content,p.visibility,p.price,p.media,p.only_text,p.images,p.videos,p.video_length,p.reference_post,
 	p.status,p.deleted,p.created_at,p.like_count,p.comment_count,p.tip_points`
-const anchorPostBought = `EXISTS(SELECT 1 FROM anchor_post_orders o WHERE o.post_id=p.id AND o.actor_id=$1 AND o.kind=1 AND o.state=1)`
+const anchorPostBought = `EXISTS(SELECT 1 FROM anchor_post_orders o WHERE o.post_id=p.id AND o.actor_id=$1 AND o.kind=1 AND o.state=1
+	UNION ALL SELECT 1 FROM legacy_anchor_post_unlocks l WHERE l.post_id=p.id AND l.actor_id=$1)`
 const anchorPostFull = `(p.owner_id=$1 OR (p.visibility=0 AND (p.price=0 OR ` + anchorPostBought + `)) OR (p.visibility>=2 AND EXISTS (
 	SELECT 1 FROM subscription_members m JOIN subscription_plans plan ON plan.id=m.plan_id
 	WHERE m.anchor_id=p.owner_id AND m.fan_id=$1 AND m.cancelled_at IS NULL AND m.expires_at>now()
@@ -20,7 +22,8 @@ const anchorPostFull = `(p.owner_id=$1 OR (p.visibility=0 AND (p.price=0 OR ` + 
 const visibleAnchorPost = `NOT p.deleted AND (p.owner_id=$1 OR (p.status=3 AND p.visibility<>1))`
 const anchorPostViewerFields = anchorPostFields + `,` + anchorPostFull + `,` + anchorPostBought + `,
 	EXISTS(SELECT 1 FROM anchor_post_likes l WHERE l.post_id=p.id AND l.actor_id=$1),
-	COALESCE((SELECT sum(points) FROM anchor_post_orders o WHERE o.post_id=p.id AND o.actor_id=$1 AND o.kind=2 AND o.state=1),0)::bigint`
+	(COALESCE((SELECT sum(points) FROM anchor_post_orders o WHERE o.post_id=p.id AND o.actor_id=$1 AND o.kind=2 AND o.state=1),0)
+	+COALESCE((SELECT points FROM legacy_anchor_post_tips l WHERE l.post_id=p.id AND l.actor_id=$1),0))::bigint`
 
 func scanAnchorPost(row pgx.Row) (posts.Post, error) {
 	var p posts.Post
@@ -34,24 +37,61 @@ func scanAnchorPost(row pgx.Row) (posts.Post, error) {
 }
 
 func (s *Store) CreatePost(ctx context.Context, actor int64, input posts.Input, status int) (posts.Post, error) {
-	return scanAnchorPost(s.pool.QueryRow(ctx, `INSERT INTO anchor_posts AS p(owner_id,content,visibility,price,media,only_text,images,videos,video_length,reference_post,status)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING `+anchorPostFields+`,TRUE,FALSE,FALSE,0`, actor, input.Content, input.Level, input.Price, input.Media,
-		input.OnlyText, input.Images, input.Videos, input.VideoLength, input.Reference, status))
+	var post posts.Post
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		post, err = scanAnchorPost(tx.QueryRow(ctx, `INSERT INTO anchor_posts AS p(owner_id,content,visibility,price,media,only_text,images,videos,video_length,reference_post,status)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING `+anchorPostFields+`,TRUE,FALSE,FALSE,0`, actor, input.Content, input.Level, input.Price, input.Media,
+			input.OnlyText, input.Images, input.Videos, input.VideoLength, input.Reference, status))
+		if err == nil && status == posts.Approved {
+			err = publishPostNotices(ctx, tx, post.ID, post.OwnerID, post.Level)
+		}
+		return err
+	})
+	return post, err
 }
 
-func (s *Store) ReviewPost(ctx context.Context, id int64, status int) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE anchor_posts SET status=$2,reviewed_at=COALESCE(reviewed_at,now()) WHERE id=$1 AND NOT deleted AND status IN (1,$2)`, id, status)
-	if err != nil || tag.RowsAffected() != 0 {
-		return err
+func (s *Store) ReviewPost(ctx context.Context, id int64, decision posts.ReviewDecision) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var current, level int
+		var owner int64
+		err := tx.QueryRow(ctx, `SELECT status,owner_id,visibility FROM anchor_posts WHERE id=$1 AND NOT deleted FOR UPDATE`, id).Scan(&current, &owner, &level)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return posts.ErrNotFound
+		}
+		if err != nil || current == decision.Status {
+			return err
+		}
+		if current != posts.Pending {
+			return posts.ErrReviewConflict
+		}
+		if _, err := tx.Exec(ctx, `UPDATE anchor_posts SET status=$2,reviewed_at=now() WHERE id=$1`, id, decision.Status); err != nil {
+			return err
+		}
+		switch decision.Status {
+		case posts.Approved:
+			return publishPostNotices(ctx, tx, id, owner, level)
+		case posts.Rejected:
+			return addPostRejectionNotice(ctx, tx, decision.Notice, owner, "post:rejected:"+strconv.FormatInt(id, 10))
+		}
+		return nil
+	})
+}
+
+func (s *Store) BindPostReview(ctx context.Context, id int64, result posts.Evaluation) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE anchor_posts SET audit_request_id=$2,manual_audit_request_id=$3
+		WHERE id=$1 AND NOT deleted AND status=1`, id, result.RequestID, result.ManualRequestID)
+	if err == nil && tag.RowsAffected() == 0 {
+		return posts.ErrReviewConflict
 	}
-	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM anchor_posts WHERE id=$1 AND NOT deleted)`, id).Scan(&exists); err != nil {
-		return err
-	}
-	if !exists {
-		return posts.ErrNotFound
-	}
-	return posts.ErrReviewConflict
+	return err
+}
+
+func (s *Store) MatchPostReview(ctx context.Context, id, owner int64, request string, manual bool) (bool, error) {
+	var matched bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM anchor_posts WHERE id=$1 AND owner_id=$2 AND NOT deleted AND $3<>''
+		AND CASE WHEN $4 THEN manual_audit_request_id=$3 ELSE audit_request_id=$3 END)`, id, owner, request, manual).Scan(&matched)
+	return matched, err
 }
 
 func (s *Store) GetPost(ctx context.Context, actor, id int64) (posts.Post, error) {
@@ -122,6 +162,9 @@ func (s *Store) RecentPostAnchors(ctx context.Context, limit int) ([]int64, erro
 
 func (s *Store) PostBuyerCount(ctx context.Context, id int64) (int64, error) {
 	var total int64
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM anchor_post_orders WHERE post_id=$1 AND kind=1 AND state=1`, id).Scan(&total)
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM (
+		SELECT actor_id FROM anchor_post_orders WHERE post_id=$1 AND kind=1 AND state=1
+		UNION SELECT actor_id FROM legacy_anchor_post_unlocks WHERE post_id=$1
+	) buyers`, id).Scan(&total)
 	return total, err
 }

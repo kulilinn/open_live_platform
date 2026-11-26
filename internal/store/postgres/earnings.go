@@ -16,6 +16,16 @@ const earningsRows = `WITH entries AS (
 	FROM gift_orders g WHERE g.receiver_id=$1 AND g.state=1 AND ($2::smallint IS NULL OR $2=2)
 		AND g.paid_at >= $3 AND g.paid_at <= $4
 	UNION ALL
+	SELECT d.id,d.anchor_id,d.sender_id,COALESCE(d.order_data#>>'{Sender,name}',''),2,
+		(d.order_data->>'Income')::bigint,d.paid_at,COALESCE(d.order_data#>>'{Item,name}','')
+	FROM date_gift_orders d WHERE d.anchor_id=$1 AND d.state=1 AND ($2::smallint IS NULL OR $2=2)
+		AND d.paid_at >= $3 AND d.paid_at <= $4
+	UNION ALL
+	SELECT w.id,w.anchor_id,w.user_id,COALESCE(w.order_data#>>'{Result,user_name}',''),8,
+		(w.order_data->>'Price')::bigint,w.paid_at,'转盘'
+	FROM room_wheel_orders w WHERE w.anchor_id=$1 AND w.state=1 AND ($2::smallint IS NULL OR $2=8)
+		AND w.paid_at >= $3 AND w.paid_at <= $4
+	UNION ALL
 	SELECT o.provider_id,p.owner_id,o.actor_id,COALESCE(u.account,''),o.kind+2,o.points,o.paid_at,
 		CASE o.kind WHEN 1 THEN '解锁帖子' ELSE '打赏帖子' END
 	FROM anchor_post_orders o JOIN anchor_posts p ON p.id=o.post_id LEFT JOIN users u ON u.id=o.actor_id

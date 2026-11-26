@@ -152,6 +152,7 @@ func (p PendingRenewal) Error() string { return ErrPurchaseReview.Error() }
 func (p PendingRenewal) Unwrap() error { return ErrPurchaseReview }
 
 type Store interface {
+	DirectoryStore
 	EnsureFreePlan(ctx context.Context, anchorID int64) error
 	CreatePlan(ctx context.Context, anchorID int64, planType int, input PlanInput) (Plan, error)
 	ChangePlan(ctx context.Context, anchorID, planID int64, change PlanChange) error

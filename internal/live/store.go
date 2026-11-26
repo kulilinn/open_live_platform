@@ -185,6 +185,8 @@ type Event struct {
 	MessageID  int64      `json:"-"`
 	CreatedAt  time.Time  `json:"-"`
 	RoomStatus RoomStatus `json:"-"`
+	LiveID     int64      `json:"live_id,string,omitempty"`
+	Likes      int64      `json:"likes,omitempty"`
 }
 
 const EventStreamCapacity = 33 // 32 pending events and one slot for the final close event.
@@ -253,6 +255,7 @@ type roomSubscriber struct {
 
 type roomState struct {
 	Room
+	metric            *roomMetrics
 	members           map[int64]struct{}
 	anchorJoined      bool
 	anchorLanguage    string
@@ -279,6 +282,8 @@ type Store struct {
 	lastMessageID     int64
 	nextLiveID        int64
 	anchorAwayTimeout time.Duration
+	metrics           map[int64]*roomMetrics
+	reports           []RoomReport
 }
 
 var _ RoomStore = (*Store)(nil)
@@ -291,7 +296,8 @@ func NewStoreWithAnchorTimeout(timeout time.Duration) *Store {
 	if timeout <= 0 {
 		timeout = DefaultAnchorAwayTimeout
 	}
-	return &Store{rooms: make(map[int64]*roomState), nextLiveID: 1 << 32, anchorAwayTimeout: timeout}
+	return &Store{rooms: make(map[int64]*roomState), metrics: make(map[int64]*roomMetrics),
+		nextLiveID: 1 << 32, anchorAwayTimeout: timeout}
 }
 
 // Start opens the creator's room. A new broadcast uses the same room ID.
@@ -346,8 +352,10 @@ func (s *Store) StartWithSettings(ctx context.Context, ownerID int64, settings R
 	info.LiveShow = false
 	info.AnchorAwayUntil = time.Time{}
 	info.Session = LiveSession{LiveID: s.nextLiveID, AnchorNID: DefaultAnchorNID, StartedAt: time.Now().UTC()}
+	metric := &roomMetrics{roomID: info.ID, ownerID: ownerID, started: info.Session.StartedAt}
 	room := &roomState{
 		Room:             info,
+		metric:           metric,
 		members:          make(map[int64]struct{}),
 		viewerLanguages:  make(map[int64]string),
 		viewerNIDs:       make(map[int64]uint32),
@@ -361,6 +369,7 @@ func (s *Store) StartWithSettings(ctx context.Context, ownerID int64, settings R
 	}
 	s.nextLiveID++
 	s.rooms[room.ID] = room
+	s.metrics[info.Session.LiveID] = metric
 	return room.snapshot(), nil
 }
 
@@ -580,6 +589,7 @@ func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password, la
 		} else {
 			if !room.hasMember(userID) {
 				room.members[userID] = struct{}{}
+				room.metric.maxAudience = max(room.metric.maxAudience, int64(len(room.members)))
 				room.publish(Event{Type: "join", UserID: userID})
 			}
 			room.viewerLanguages[userID] = cmp.Or(language, "en")
@@ -951,6 +961,7 @@ func (r *roomState) end() {
 	}
 	r.Online = false
 	r.Session.EndedAt = time.Now().UTC()
+	r.metric.ended = r.Session.EndedAt
 	r.IsLock = false
 	r.passwordHash = nil
 	r.passwordAttempts = nil

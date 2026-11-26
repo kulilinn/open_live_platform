@@ -147,6 +147,9 @@ func (r *roomChange) addRoomBot(entryDelay time.Duration) error {
 	if _, err := r.relation("room_members", botID, true); err != nil {
 		return err
 	}
+	if err := r.updateMaxRoomAudience(); err != nil {
+		return err
+	}
 	r.event = live.Event{Type: "join", UserID: botID}
 	return nil
 }

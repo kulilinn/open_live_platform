@@ -40,6 +40,11 @@ func (s *Store) ReservePostOrder(ctx context.Context, request posts.Order) (post
 			if level != 0 || request.Points < 1 {
 				return posts.ErrForbidden
 			}
+			if full {
+				order = request
+				order.State = posts.OrderPaid
+				return nil
+			}
 		case posts.Tip:
 			if !full {
 				return posts.ErrForbidden
@@ -111,6 +116,9 @@ func (s *Store) CompletePostOrder(ctx context.Context, expected posts.Order, rec
 			WHERE order_no=$1`, order.Number, receipt.OrderID, receipt.OrderNo, receipt.BadDebt)
 		if err == nil && order.Kind == posts.Tip {
 			_, err = tx.Exec(ctx, `UPDATE anchor_posts SET tip_points=tip_points+$2 WHERE id=$1`, order.PostID, order.Points)
+			if err == nil {
+				err = addPostInteractionNotice(ctx, tx, posts.NoticeTip, order.PostID, order.ActorID, order.Points, "post:tip:"+order.Number)
+			}
 		}
 		return err
 	})

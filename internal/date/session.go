@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,15 +35,16 @@ var (
 )
 
 type Host struct {
-	Channel      int64
-	Accepting    bool
-	AcceptUntil  time.Time
-	BaseSettings json.RawMessage
-	Settings     json.RawMessage
-	PricePerMin  int64
-	InitialMins  int64
-	Pending      *Invitation
-	Cooldowns    map[int64]time.Time
+	Channel       int64
+	Accepting     bool
+	AcceptUntil   time.Time
+	RecommendedAt time.Time
+	BaseSettings  json.RawMessage
+	Settings      json.RawMessage
+	PricePerMin   int64
+	InitialMins   int64
+	Pending       *Invitation
+	Cooldowns     map[int64]time.Time
 }
 
 func (h Host) Listening(now time.Time) bool { return h.Accepting && now.Before(h.AcceptUntil) }
@@ -104,6 +106,7 @@ type Store interface {
 	DateHost(context.Context, int64) (Host, Session, error)
 	DateSession(context.Context, int64) (Session, error)
 	ActiveDateHosts(context.Context) ([]int64, error)
+	RecommendedDateHosts(context.Context) ([]int64, error)
 	DateSubtitles() stt.Store
 }
 
@@ -123,6 +126,7 @@ func End(host *Host, s *Session, now time.Time) {
 	}
 	if host.Accepting {
 		host.AcceptUntil = now.Add(AcceptingLease)
+		host.RecommendedAt = now
 	}
 }
 
@@ -131,6 +135,30 @@ type Memory struct {
 	hosts    map[int64]Host
 	sessions map[int64]Session
 	sttLocks [32]sync.Mutex
+}
+
+const RecommendationLimit = 10
+
+func (s *Memory) RecommendedDateHosts(ctx context.Context) ([]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(s.hosts))
+	for id, host := range s.hosts {
+		if !host.RecommendedAt.IsZero() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := s.hosts[ids[i]].RecommendedAt, s.hosts[ids[j]].RecommendedAt
+		if a.Equal(b) {
+			return ids[i] < ids[j]
+		}
+		return a.After(b)
+	})
+	return ids[:min(len(ids), RecommendationLimit)], nil
 }
 
 func NewMemory() *Memory {

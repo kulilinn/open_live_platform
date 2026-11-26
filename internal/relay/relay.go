@@ -57,24 +57,28 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 		rust = newRustTickets(options[0])
 		rust.registerControls(mux, accounts, &devices, publicURL)
 		mux.HandleFunc("POST /api/device/logs", rust.deviceLogs(accounts, options[0].DeviceLogs))
-		mux.HandleFunc("GET /relay/verify/{token}/{sig}", func(w http.ResponseWriter, r *http.Request) {
-			rust.verifyHTTP(accounts, w, r)
-		})
-		mux.HandleFunc("GET /api/device/toyinfo", func(w http.ResponseWriter, r *http.Request) {
-			user, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
-			if err != nil {
-				httpx.Error(w, http.StatusServiceUnavailable, "authentication unavailable")
-				return
-			}
-			if !ok || user.Moderation.Banned() {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
-				return
-			}
-			devices.sync(r.Context(), user.ID)
-			httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
-		})
 	}
+	mux.HandleFunc("GET /relay/verify/{token}/{sig}", func(w http.ResponseWriter, r *http.Request) {
+		if rust == nil {
+			httpx.Error(w, http.StatusForbidden, "invalid relay ticket")
+			return
+		}
+		rust.verifyHTTP(accounts, w, r)
+	})
+	mux.HandleFunc("GET /api/device/toyinfo", func(w http.ResponseWriter, r *http.Request) {
+		user, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
+		if err != nil {
+			httpx.Error(w, http.StatusServiceUnavailable, "authentication unavailable")
+			return
+		}
+		if !ok || user.Moderation.Banned() {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
+			return
+		}
+		devices.sync(r.Context(), user.ID)
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
+	})
 	mux.HandleFunc("GET /api/device/qrcode", func(w http.ResponseWriter, r *http.Request) {
 		session, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		user, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
@@ -538,6 +542,9 @@ func parseDeviceCommand(raw json.RawMessage) (command, bool) {
 
 func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, event live.Event) any {
 	room := strconv.FormatInt(roomID, 10)
+	if event.Type == "room_like" {
+		return h5RoomLike(ctx, accounts, room, event)
+	}
 	if event.Type == "gift" {
 		return h5RoomFrame(room, json.RawMessage(event.Payload))
 	}

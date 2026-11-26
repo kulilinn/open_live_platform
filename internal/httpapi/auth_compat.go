@@ -113,6 +113,34 @@ func rustAuthCompat(r *http.Request) bool {
 		r.URL.Query().Get("compat") == "rust"
 }
 
+func (s server) appToken(w http.ResponseWriter, r *http.Request, _ int64) {
+	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	var session auth.Session
+	var err error
+	if auth.IsJWT(token) {
+		var code string
+		code, err = auth.NewLoginCode(r.Context(), s.accounts, token)
+		if err == nil {
+			session, err = auth.ExchangeLoginCode(r.Context(), s.accounts, code)
+		}
+	} else {
+		var ok bool
+		session, ok, err = s.accounts.Refresh(r.Context(), token)
+		if err == nil && !ok {
+			err = auth.ErrInvalidCredentials
+		}
+	}
+	if writeBanned(w, err, true) {
+		return
+	}
+	if err != nil {
+		httpx.Error(w, 401, "could not issue application token")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.JSON(w, 200, map[string]string{"status": "200", "token": session.Token})
+}
+
 func rustAuthUser(user auth.User) map[string]any {
 	return map[string]any{
 		"id": strconv.FormatInt(user.ID, 10), "email": user.Email,

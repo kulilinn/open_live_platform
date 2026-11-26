@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/collectible"
@@ -33,6 +34,7 @@ func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.
 }
 
 type LiveServices struct {
+	PreloginEnd string
 	Subtitles   *stt.Service
 	Dates       *Dates
 	Collectible *collectible.Service
@@ -46,13 +48,26 @@ func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms liv
 		s.collectibles = services[0].Collectible
 	}
 	s.registerCollectibles(mux)
+	s.registerRoomMetrics(mux)
+	mux.HandleFunc("POST /api/live/anchor/recommends", s.authenticated(s.dateRecommendations))
 
 	mux.HandleFunc("GET /healthchecker", health)
 	mux.HandleFunc("GET /health", health)
-	mux.HandleFunc("GET /status", status)
+	var preloginEnd time.Time
+	if len(services) > 0 {
+		preloginEnd, _ = time.Parse("2006-01-02 15:04:05 -0700", services[0].PreloginEnd)
+	}
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
+		if time.Now().Before(preloginEnd) {
+			httpx.JSON(w, 200, map[string]string{"status": "201", "data": "prelogin"})
+			return
+		}
+		httpx.JSON(w, 200, map[string]string{"status": "200", "data": "active"})
+	})
 	mux.HandleFunc("POST /api/auth/signup", s.signUpCompat)
 	mux.HandleFunc("POST /api/auth/signin", s.signInCompat)
 	mux.HandleFunc("GET /api/auth/session", s.sessionCompat)
+	mux.HandleFunc("GET /api/apptoken/{appid}",s.authenticated(s.appToken))
 	mux.HandleFunc("POST /api/auth/signout", s.authenticated(s.signOut))
 	mux.HandleFunc("POST /api/auth/changepassword", s.authenticated(s.changePassword))
 	mux.HandleFunc("POST /api/auth/code", s.emailCode)
@@ -94,10 +109,6 @@ func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms liv
 
 func health(w http.ResponseWriter, _ *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200", "message": "open_live_platform"})
-}
-
-func status(w http.ResponseWriter, _ *http.Request) {
-	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200", "data": "active"})
 }
 
 type credentials struct {

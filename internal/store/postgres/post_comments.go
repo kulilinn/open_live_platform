@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -63,11 +64,16 @@ func (s *Store) CreatePostComment(ctx context.Context, comment posts.Comment) er
 				return posts.ErrNotFound
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO anchor_post_comments(post_id,author_id,content,parent_id) VALUES($1,$2,$3,$4)`,
-			comment.PostID, comment.AuthorID, comment.Content, comment.ParentID); err != nil {
+		var commentID int64
+		if err := tx.QueryRow(ctx, `INSERT INTO anchor_post_comments(post_id,author_id,content,parent_id,manual_audit_request_id)
+			VALUES($1,$2,$3,$4,$5) RETURNING id`, comment.PostID, comment.AuthorID, comment.Content, comment.ParentID,
+			comment.ManualAuditRequest).Scan(&commentID); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `UPDATE anchor_posts SET comment_count=comment_count+1 WHERE id=$1`, comment.PostID)
+		if err == nil && comment.ParentID == nil {
+			err = addPostCommentNotice(ctx, tx, comment.PostID, comment.AuthorID, commentID)
+		}
 		return err
 	})
 }
@@ -105,6 +111,14 @@ func commentPostID(ctx context.Context, tx pgx.Tx, id int64) (int64, error) {
 }
 
 func (s *Store) DeletePostComment(ctx context.Context, actor, id int64) error {
+	return s.deletePostComment(ctx, actor, id, nil, "")
+}
+
+func (s *Store) RejectPostComment(ctx context.Context, actor, id int64, content, request string) error {
+	return s.deletePostComment(ctx, actor, id, &content, request)
+}
+
+func (s *Store) deletePostComment(ctx context.Context, actor, id int64, expected *string, request string) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		postID, err := commentPostID(ctx, tx, id)
 		if err != nil {
@@ -115,7 +129,9 @@ func (s *Store) DeletePostComment(ctx context.Context, actor, id int64) error {
 			return err
 		}
 		var author int64
-		err = tx.QueryRow(ctx, `SELECT author_id FROM anchor_post_comments WHERE id=$1 AND NOT deleted`, id).Scan(&author)
+		var content, manualRequest string
+		err = tx.QueryRow(ctx, `SELECT author_id,content,manual_audit_request_id FROM anchor_post_comments WHERE id=$1 AND NOT deleted`,
+			id).Scan(&author, &content, &manualRequest)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return posts.ErrNotFound
 		}
@@ -125,6 +141,9 @@ func (s *Store) DeletePostComment(ctx context.Context, actor, id int64) error {
 		if author != actor && owner != actor {
 			return posts.ErrForbidden
 		}
+		if expected != nil && (author != actor || content != *expected || request == "" || manualRequest != request) {
+			return posts.ErrNotFound
+		}
 		tag, err := tx.Exec(ctx, `WITH RECURSIVE branch AS (
 			SELECT id FROM anchor_post_comments WHERE id=$1 AND NOT deleted
 			UNION ALL SELECT c.id FROM anchor_post_comments c JOIN branch b ON c.parent_id=b.id WHERE c.post_id=$2 AND NOT c.deleted
@@ -133,6 +152,9 @@ func (s *Store) DeletePostComment(ctx context.Context, actor, id int64) error {
 			return err
 		}
 		_, err = tx.Exec(ctx, `UPDATE anchor_posts SET comment_count=comment_count-$2 WHERE id=$1`, postID, tag.RowsAffected())
+		if err == nil && expected != nil {
+			err = addPostRejectionNotice(ctx, tx, posts.NoticeCommentRejection, author, "post:comment-rejected:"+strconv.FormatInt(id, 10))
+		}
 		return err
 	})
 }
@@ -154,6 +176,9 @@ func (s *Store) LikePost(ctx context.Context, actor, id int64, liked bool) (int6
 			return err
 		}
 		count, err = updatePostLikeCount(ctx, tx, `anchor_posts`, id, tag.RowsAffected(), liked)
+		if err == nil && liked && tag.RowsAffected() != 0 {
+			err = addPostLikeNotice(ctx, tx, id, actor)
+		}
 		return err
 	})
 	return count, err
@@ -209,8 +234,10 @@ func (s *Store) PostReactions(ctx context.Context, actor, id int64, tips bool, o
 		source := `SELECT actor_id,0::bigint AS points,created_at FROM anchor_post_likes WHERE post_id=$1`
 		order := `created_at DESC,actor_id DESC`
 		if tips {
-			source = `SELECT actor_id,sum(points)::bigint AS points,max(paid_at) AS created_at FROM anchor_post_orders
-				WHERE post_id=$1 AND kind=2 AND state=1 GROUP BY actor_id`
+			source = `SELECT actor_id,sum(points)::bigint AS points,max(paid_at) AS created_at FROM (
+				SELECT actor_id,points,paid_at FROM anchor_post_orders WHERE post_id=$1 AND kind=2 AND state=1
+				UNION ALL SELECT actor_id,points,tipped_at FROM legacy_anchor_post_tips WHERE post_id=$1
+			) tips GROUP BY actor_id`
 			order = `points DESC,created_at DESC,actor_id DESC`
 		}
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM (`+source+`) reactions`, id).Scan(&result.Total); err != nil {

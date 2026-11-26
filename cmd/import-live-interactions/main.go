@@ -10,9 +10,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-sql-driver/mysql"
+	"open_live_platform/internal/botchat"
 	"open_live_platform/internal/store/postgres"
 )
 
@@ -53,11 +56,12 @@ func run(ctx context.Context) error {
 	counts, err := target.ImportLegacyInteractions(ctx,
 		queryRows(ctx, snapshot, conversationsQuery, scanConversation),
 		queryRows(ctx, snapshot, messagesQuery, scanMessage),
-		queryRows(ctx, snapshot, noticesQuery, scanNotice))
+		queryRows(ctx, snapshot, noticesQuery, scanNotice),
+		queryRows(ctx, snapshot, "SELECT id,`from`,`to`,message,translate,language,tts,image,video,time FROM chat_message ORDER BY id", scanBotMessage))
 	if err != nil {
 		return err
 	}
-	fmt.Printf("conversations=%d messages=%d notices=%d existing=%d skipped=%d\n", counts.Conversations, counts.Messages, counts.Notices,
+	fmt.Printf("conversations=%d messages=%d notices=%d bot_messages=%d existing=%d skipped=%d\n", counts.Conversations, counts.Messages, counts.Notices, counts.BotMessages,
 		counts.Existing, counts.Skipped)
 	return nil
 }
@@ -127,6 +131,28 @@ func scanConversation(rows *sql.Rows) (postgres.LegacyDMConversation, error) {
 		return c, fmt.Errorf("conversation %d has an unsupported last message", c.ID)
 	}
 	return c, nil
+}
+
+func scanBotMessage(rows *sql.Rows) (botchat.Message, error) {
+	var m botchat.Message
+	var created time.Time
+	var audio, images, videos []byte
+	if err := rows.Scan(&m.ID, &m.From, &m.To, &m.Message, &m.Translate, &m.Language, &audio, &images, &videos, &created); err != nil {
+		return m, err
+	}
+	m.Time = strconv.FormatInt(created.Unix(), 10)
+	if utf8.Valid(audio) {
+		m.TTS = string(audio)
+	}
+	media := func(raw []byte) []string {
+		var v []string
+		if json.Unmarshal(raw, &v) != nil || v == nil {
+			return []string{}
+		}
+		return v
+	}
+	m.Image, m.Video = media(images), media(videos)
+	return m, nil
 }
 
 func scanMessage(rows *sql.Rows) (postgres.LegacyDMMessage, error) {

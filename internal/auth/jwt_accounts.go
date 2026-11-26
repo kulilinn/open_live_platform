@@ -11,6 +11,7 @@ type JWTBackend interface {
 	AccountStore
 	ResolveGoogleUser(ctx context.Context, subject, email, language string, mayLink bool) (id int64, created bool, err error)
 	IssueVerifiedSession(context.Context, User) (Session, error)
+	ResolveTelegramUser(context.Context, int64, string, string) (User, error)
 	VerifyPassword(ctx context.Context, email, password string) (User, error)
 	SaveJWTSession(ctx context.Context, userID, familyID int64) error
 	JWTUser(ctx context.Context, userID, familyID int64, email string) (User, bool, error)
@@ -130,7 +131,7 @@ func (s *Store) JWTUser(ctx context.Context, userID, familyID int64, email strin
 	if s.jwtSessions[userID] != familyID {
 		return User{}, false, nil
 	}
-	login, ok := s.users[email]
+	login, ok := s.users[(User{ID: userID, Email: email}).accountKey()]
 	if !ok || login.user.ID != userID {
 		return User{}, false, nil
 	}

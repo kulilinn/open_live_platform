@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"open_live_platform/internal/botchat"
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/notice"
 )
@@ -41,13 +42,13 @@ type LegacyNotice struct {
 }
 
 type InteractionImportCounts struct {
-	Conversations, Messages, Notices int
-	Existing, Skipped                int
+	Conversations, Messages, Notices, BotMessages int
+	Existing, Skipped                             int
 }
 
 // ImportLegacyInteractions imports a read-only source snapshot without replacing changed target data.
 func (s *Store) ImportLegacyInteractions(ctx context.Context, conversations iter.Seq2[LegacyDMConversation, error],
-	messages iter.Seq2[LegacyDMMessage, error], notices iter.Seq2[LegacyNotice, error]) (InteractionImportCounts, error) {
+	messages iter.Seq2[LegacyDMMessage, error], notices iter.Seq2[LegacyNotice, error], botMessages iter.Seq2[botchat.Message, error]) (InteractionImportCounts, error) {
 	var counts InteractionImportCounts
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `LOCK TABLE dm_conversations,dm_messages,notices IN SHARE ROW EXCLUSIVE MODE`); err != nil {
@@ -75,6 +76,20 @@ func (s *Store) ImportLegacyInteractions(ctx context.Context, conversations iter
 			}
 			if err := importLegacyNotice(ctx, tx, row, &counts); err != nil {
 				return fmt.Errorf("import notice %d: %w", row.ID, err)
+			}
+		}
+		for m, err := range botMessages {
+			if err != nil {
+				return err
+			}
+			tag, err := tx.Exec(ctx, insertBotChat+" ON CONFLICT(id) DO NOTHING", m.ID, min(m.From, m.To), max(m.From, m.To), m)
+			if err != nil {
+				return fmt.Errorf("import bot message %s: %w", m.ID, err)
+			}
+			if tag.RowsAffected() == 0 {
+				counts.Existing++
+			} else {
+				counts.BotMessages++
 			}
 		}
 		_, err := tx.Exec(ctx, `

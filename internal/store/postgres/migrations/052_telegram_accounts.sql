@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN telegram_identity BOOLEAN NOT NULL DEFAULT false;

@@ -85,7 +85,8 @@ type OrderStore interface {
 }
 
 func (g Gift) Cost(quantity int32, limitID int64) (int64, int64, error) {
-	if limitID != 0 || g.EffectControlType != 0 || quantity <= 0 || g.Price < 0 || g.Price > math.MaxInt64/int64(quantity) {
+	if limitID != 0 || (g.EffectControlType != 0 && !g.QueuesEffect()) || quantity <= 0 ||
+		(g.QueuesEffect() && quantity != 1) || g.Price < 0 || g.Price > math.MaxInt64/int64(quantity) {
 		return 0, 0, ErrUnsupported
 	}
 	cost, income := g.Price*int64(quantity), int64(g.IncomeStream)
@@ -119,7 +120,11 @@ func (o Order) BuildResult() (Result, error) {
 		duration, _ = strconv.ParseInt(*item.ParameterOne, 10, 64)
 	}
 	timestamp := o.PaidAt.Unix()
-	success, err := o.payload(1, o.ID*2, timestamp, map[string]any{
+	successType := 1
+	if item.EffectControlType == RocketEffect {
+		successType = 4
+	}
+	success, err := o.payload(successType, o.ID*2, timestamp, map[string]any{
 		"gift_id": item.ID, "gift_name": item.Name, "gift_icon": item.Icon, "gift_type": item.GiftType,
 		"vibration_intensity": item.VibrationIntensity, "vibration_duration": duration, "effect_control_type": item.EffectControlType,
 		"sender_role": o.SenderRole, "sender_info": o.Sender, "receiver_info": o.Receiver,

@@ -134,6 +134,9 @@ func (a *App) monitorDates(ctx context.Context) {
 		if err := a.dates.Sweep(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("expire 1v1 sessions: %v", err)
 		}
+		if err := a.dates.SweepGiftQueue(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("start queued 1v1 gifts: %v", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -167,6 +170,11 @@ func (a *App) monitorAnchorAway(ctx context.Context) {
 		if len(a.Config.RoomBots.Accounts) > 0 {
 			if err := a.db.SweepRoomBots(ctx); err != nil && ctx.Err() == nil {
 				log.Printf("update live room bots: %v", err)
+			}
+		}
+		if a.db != nil {
+			if err := a.db.SweepRoomGiftEffects(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("start queued hardware gifts: %v", err)
 			}
 		}
 		select {

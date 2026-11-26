@@ -13,11 +13,7 @@ import (
 )
 
 func (s *Store) ChangeDateHost(ctx context.Context, id int64, update func(*date.Host, *date.Session, time.Time) error) error {
-	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
-		// Each participant may belong to at most one date across both roles.
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(733516,30)`); err != nil {
-			return err
-		}
+	return s.dateChange(ctx, func(tx pgx.Tx) error {
 		host, session, err := loadDateHost(ctx, tx, id)
 		if err != nil {
 			return err
@@ -40,8 +36,13 @@ func (s *Store) ChangeDateHost(ctx context.Context, id int64, update func(*date.
 				return date.ErrBusy
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO date_hosts(anchor_id,channel,state) VALUES ($1,$2,$3)
-			ON CONFLICT(anchor_id) DO UPDATE SET channel=EXCLUDED.channel,state=EXCLUDED.state`, id, host.Channel, host); err != nil {
+		var recommended *time.Time
+		if !host.RecommendedAt.IsZero() {
+			recommended = &host.RecommendedAt
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO date_hosts(anchor_id,channel,state,recommended_at) VALUES ($1,$2,$3,$4)
+			ON CONFLICT(anchor_id) DO UPDATE SET channel=EXCLUDED.channel,state=EXCLUDED.state,
+				recommended_at=COALESCE(EXCLUDED.recommended_at,date_hosts.recommended_at)`, id, host.Channel, host, recommended); err != nil {
 			return err
 		}
 		if session.Channel == 0 || session == previous {
@@ -58,6 +59,16 @@ func (s *Store) ChangeDateHost(ctx context.Context, id int64, update func(*date.
 		_, err = tx.Exec(ctx, `INSERT INTO date_sessions(channel,anchor_id,audience_id,ended_at,state)
 			VALUES ($1,$2,$3,$4,$5)`, session.Channel, session.AnchorID, session.AudienceID, end, session)
 		return err
+	})
+}
+
+func (s *Store) dateChange(ctx context.Context, change func(pgx.Tx) error) error {
+	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		// Each participant may belong to at most one date across both roles.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(733516,30)`); err != nil {
+			return err
+		}
+		return change(tx)
 	})
 }
 
@@ -103,6 +114,15 @@ func (s *Store) DateSession(ctx context.Context, channel int64) (date.Session, e
 func (s *Store) ActiveDateHosts(ctx context.Context) ([]int64, error) {
 	rows, err := s.pool.Query(ctx, `SELECT h.anchor_id FROM date_hosts h LEFT JOIN date_sessions s ON s.channel=h.channel
 		WHERE h.state->'Pending'<>'null'::jsonb OR (s.channel IS NOT NULL AND s.ended_at IS NULL)`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[int64])
+}
+
+func (s *Store) RecommendedDateHosts(ctx context.Context) ([]int64, error) {
+	rows, err := s.pool.Query(ctx, `SELECT anchor_id FROM date_hosts WHERE recommended_at IS NOT NULL
+		ORDER BY recommended_at DESC,anchor_id LIMIT $1`, date.RecommendationLimit)
 	if err != nil {
 		return nil, err
 	}

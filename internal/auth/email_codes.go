@@ -120,7 +120,7 @@ func (s *Store) IssueVerifiedSession(ctx context.Context, user User) (Session, e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	login, ok := s.users[user.Email]
+	login, ok := s.users[user.accountKey()]
 	if !ok || login.user.ID != user.ID {
 		return Session{}, ErrInvalidCredentials
 	}

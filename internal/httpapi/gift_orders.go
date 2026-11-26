@@ -23,99 +23,107 @@ func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms li
 	for _, item := range catalog {
 		items[item.ID] = item
 	}
-	const sendRoute = "POST /api/date/1vN/give/gifts"
-	mux.HandleFunc(sendRoute, s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {
-		var input gift.Input
-		if !httpx.Decode(w, r, &input) {
-			return
-		}
-		roomID, parseErr := strconv.ParseInt(input.Room, 10, 64)
-		if parseErr != nil || roomID <= 0 || input.LiveID <= 0 || input.GiftID <= 0 || input.ReceiverID <= 0 || input.Quantity <= 0 {
-			writeGiftError(w, http.StatusBadRequest, "400", "invalid gift purchase")
-			return
-		}
-		if input.SenderID != userID {
-			writeGiftError(w, http.StatusUnauthorized, "401", "Unauthorized request")
-			return
-		}
-		input.Room = strconv.FormatInt(roomID, 10)
-		key := r.Header.Get("Idempotency-Key")
-		if len(key) > 128 || strings.TrimSpace(key) != key || strings.ContainsAny(key, " \t") {
-			writeGiftError(w, http.StatusBadRequest, "400", "invalid Idempotency-Key")
-			return
-		}
-		if key == "" {
-			key = rand.Text()
-		}
-		w.Header().Set("Idempotency-Key", key)
-		order, err := store.FindGiftOrder(r.Context(), userID, key)
-		if err == nil {
-			if order.Input != input {
-				giftOrderResponse(w, gift.Order{}, gift.ErrOrderConflict)
+	_, effectsAvailable := store.(gift.RoomEffectsStore)
+	give := func(rocketOnly bool) http.HandlerFunc {
+		return s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {
+			var input gift.Input
+			if !httpx.Decode(w, r, &input) {
 				return
 			}
-			giftOrderResponse(w, order, nil)
-			return
-		}
-		if !errors.Is(err, gift.ErrOrderNotFound) {
-			giftOrderResponse(w, gift.Order{}, err)
-			return
-		}
-		item, exists := items[input.GiftID]
-		if !exists {
-			writeGiftError(w, http.StatusOK, "4005", "gift:"+strconv.FormatInt(input.GiftID, 10)+" not found")
-			return
-		}
-		cost, income, err := item.Cost(input.Quantity, input.LimitID)
-		if err != nil {
-			giftOrderResponse(w, gift.Order{}, err)
-			return
-		}
-		if cost > 0 && billing == nil {
-			giftOrderResponse(w, gift.Order{}, payment.ErrUnavailable)
-			return
-		}
-		sender, senderOK, err := accounts.Find(r.Context(), userID)
-		if err != nil || !senderOK {
-			writeGiftError(w, http.StatusInternalServerError, "500", "could not read gift sender")
-			return
-		}
-		receiver, receiverOK, err := accounts.Find(r.Context(), input.ReceiverID)
-		if err != nil {
-			giftOrderResponse(w, gift.Order{}, err)
-			return
-		}
-		if !receiverOK {
-			writeGiftError(w, http.StatusOK, "4005", "data not found ")
-			return
-		}
-		order, created, err := store.ReserveGift(r.Context(), roomID, gift.Order{
-			Input: input, Key: key, PaymentOrder: "gift-" + rand.Text(), Item: item, Cost: cost, Income: income,
-			Sender: giftUser(sender), Receiver: giftUser(receiver), SenderRole: 2,
+			roomID, parseErr := strconv.ParseInt(input.Room, 10, 64)
+			if parseErr != nil || roomID <= 0 || input.LiveID <= 0 || input.GiftID <= 0 || input.ReceiverID <= 0 || input.Quantity <= 0 {
+				writeGiftError(w, http.StatusBadRequest, "400", "invalid gift purchase")
+				return
+			}
+			if input.SenderID != userID {
+				writeGiftError(w, http.StatusUnauthorized, "401", "Unauthorized request")
+				return
+			}
+			input.Room = strconv.FormatInt(roomID, 10)
+			key := r.Header.Get("Idempotency-Key")
+			if len(key) > 128 || strings.TrimSpace(key) != key || strings.ContainsAny(key, " \t") {
+				writeGiftError(w, http.StatusBadRequest, "400", "invalid Idempotency-Key")
+				return
+			}
+			if key == "" {
+				key = rand.Text()
+			}
+			w.Header().Set("Idempotency-Key", key)
+			order, err := store.FindGiftOrder(r.Context(), userID, key)
+			if err == nil {
+				if order.Input != input || (rocketOnly && order.Item.EffectControlType != gift.RocketEffect) {
+					giftOrderResponse(w, gift.Order{}, gift.ErrOrderConflict)
+					return
+				}
+				giftOrderResponse(w, order, nil)
+				return
+			}
+			if !errors.Is(err, gift.ErrOrderNotFound) {
+				giftOrderResponse(w, gift.Order{}, err)
+				return
+			}
+			item, exists := items[input.GiftID]
+			if !exists {
+				writeGiftError(w, http.StatusOK, "4005", "gift:"+strconv.FormatInt(input.GiftID, 10)+" not found")
+				return
+			}
+			if (rocketOnly && item.EffectControlType != gift.RocketEffect) || (item.QueuesEffect() && !effectsAvailable) {
+				giftOrderResponse(w, gift.Order{}, gift.ErrUnsupported)
+				return
+			}
+			cost, income, err := item.Cost(input.Quantity, input.LimitID)
+			if err != nil {
+				giftOrderResponse(w, gift.Order{}, err)
+				return
+			}
+			if cost > 0 && billing == nil {
+				giftOrderResponse(w, gift.Order{}, payment.ErrUnavailable)
+				return
+			}
+			sender, senderOK, err := accounts.Find(r.Context(), userID)
+			if err != nil || !senderOK {
+				writeGiftError(w, http.StatusInternalServerError, "500", "could not read gift sender")
+				return
+			}
+			receiver, receiverOK, err := accounts.Find(r.Context(), input.ReceiverID)
+			if err != nil {
+				giftOrderResponse(w, gift.Order{}, err)
+				return
+			}
+			if !receiverOK {
+				writeGiftError(w, http.StatusOK, "4005", "data not found ")
+				return
+			}
+			order, created, err := store.ReserveGift(r.Context(), roomID, gift.Order{
+				Input: input, Key: key, PaymentOrder: "gift-" + rand.Text(), Item: item, Cost: cost, Income: income,
+				Sender: giftUser(sender), Receiver: giftUser(receiver), SenderRole: 2,
+			})
+			if err != nil || !created {
+				giftOrderResponse(w, order, err)
+				return
+			}
+			var receipt payment.Receipt
+			if cost > 0 {
+				receipt, err = billing.Decrease(r.Context(), userID, cost, order.PaymentOrder)
+			}
+			declined := errors.Is(err, payment.ErrInsufficientPoints)
+			if err != nil && !declined {
+				giftOrderResponse(w, order, gift.ErrPending)
+				return
+			}
+			// Once the provider answers, record the decision even if the caller went away.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer cancel()
+			completed, err := store.FinishGift(ctx, roomID, order, receipt, declined)
+			if err != nil && !declined && cost > 0 {
+				giftOrderResponse(w, order, gift.ErrPending)
+				return
+			}
+			giftOrderResponse(w, completed, err)
 		})
-		if err != nil || !created {
-			giftOrderResponse(w, order, err)
-			return
-		}
-		var receipt payment.Receipt
-		if cost > 0 {
-			receipt, err = billing.Decrease(r.Context(), userID, cost, order.PaymentOrder)
-		}
-		declined := errors.Is(err, payment.ErrInsufficientPoints)
-		if err != nil && !declined {
-			giftOrderResponse(w, order, gift.ErrPending)
-			return
-		}
-		// Once the provider answers, record the decision even if the caller went away.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-		defer cancel()
-		completed, err := store.FinishGift(ctx, roomID, order, receipt, declined)
-		if err != nil && !declined && cost > 0 {
-			giftOrderResponse(w, order, gift.ErrPending)
-			return
-		}
-		giftOrderResponse(w, completed, err)
-	}))
+	}
+	mux.HandleFunc("POST /api/date/1vN/give/gifts", give(false))
+	mux.HandleFunc("POST /api/date/1vN/give/rocket", give(true))
 	mux.HandleFunc("GET /api/live/room/rank/{room}", s.authenticated(s.roomGiftRank(store, false)))
 	mux.HandleFunc("POST /api/live/room/rank/{room}", s.authenticated(s.roomGiftRank(store, true)))
 	mux.HandleFunc("GET /api/date/anchor/income/log", s.authenticated(s.giftEarnings(store, false)))
@@ -272,6 +280,8 @@ func giftOrderResponse(w http.ResponseWriter, order gift.Order, err error) {
 	case errors.Is(err, live.ErrRoomClosed):
 		writeGiftError(w, http.StatusConflict, "409", "broadcast is no longer active")
 	case errors.Is(err, gift.ErrOrderConflict):
+		writeGiftError(w, http.StatusConflict, "409", err.Error())
+	case errors.Is(err, gift.ErrEffectBusy):
 		writeGiftError(w, http.StatusConflict, "409", err.Error())
 	case errors.Is(err, gift.ErrUnsupported):
 		writeGiftError(w, http.StatusUnprocessableEntity, "422", err.Error())

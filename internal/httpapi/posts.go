@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/payment"
@@ -21,6 +22,7 @@ import (
 )
 
 type PostOptions struct {
+	Anchors       anchor.Store
 	Reviewer      posts.Reviewer
 	AuditRequired bool
 	ReviewToken   string
@@ -55,12 +57,15 @@ func RegisterPosts(mux *http.ServeMux, accounts auth.AccountStore, rooms live.Ro
 		"GET /anchor/api/get_post_donate_rank":   s.reactions(true),
 		"GET /api/sub/pay_post":                  s.payPost,
 		"POST /anchor/api/donate_post":           s.donatePost,
+		"POST /api/sub/search":                   s.subscriptionSearch,
+		"POST /api/sub/report":                   s.reportSubscription,
 	} {
 		mux.HandleFunc(route, s.authenticated(handler))
 	}
 	if options.ReviewToken != "" {
 		mux.HandleFunc("POST /internal/anchor-post/review", s.reviewPost)
 	}
+	s.registerSMAudit(mux)
 }
 
 func decodePost(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -70,7 +75,7 @@ func decodePost(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func (s postAPI) createPost(w http.ResponseWriter, r *http.Request, actor int64) {
 	ctx := r.Context()
-	if _, err := (subscriptionAPI{server: s.server}).anchor(ctx, actor); err != nil {
+	if err := s.postAuthor(ctx, actor); err != nil {
 		if errors.Is(err, subscription.ErrForbidden) || errors.Is(err, subscription.ErrNotFound) {
 			err = posts.ErrForbidden
 		}
@@ -102,16 +107,44 @@ func (s postAPI) createPost(w http.ResponseWriter, r *http.Request, actor int64)
 		return
 	}
 	if s.options.Reviewer != nil {
-		verdict, err := s.options.Reviewer.Review(ctx, posts.ReviewRequest{Kind: "post", UserID: actor, PostID: p.ID, Text: p.Content, Media: p.Media})
+		result, err := s.evaluatePostReview(ctx, posts.ReviewRequest{Kind: "post", UserID: actor, PostID: p.ID, Text: p.Content, Media: p.Media})
+		if err == nil && (result.RequestID != "" || result.ManualRequestID != "") {
+			err = s.entries.BindPostReview(ctx, p.ID, result)
+		}
 		if err != nil {
 			log.Printf("post %d awaiting audit: %v", p.ID, err)
-		} else if verdict == posts.Approved || verdict == posts.Rejected {
-			if err := s.entries.ReviewPost(ctx, p.ID, verdict); err != nil {
+		} else if result.Status == posts.Approved || result.Status == posts.Rejected {
+			if err := s.entries.ReviewPost(ctx, p.ID, posts.ReviewDecision{Status: result.Status, Notice: posts.NoticeMachineRejection}); err != nil {
 				log.Printf("could not apply post %d audit: %v", p.ID, err)
 			}
 		}
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "result": map[string]int64{"post_id": p.ID}})
+}
+
+func (s postAPI) evaluatePostReview(ctx context.Context, input posts.ReviewRequest) (posts.Evaluation, error) {
+	if reviewer, ok := s.options.Reviewer.(posts.TrackedReviewer); ok {
+		return reviewer.Evaluate(ctx, input)
+	}
+	status, err := s.options.Reviewer.Review(ctx, input)
+	return posts.Evaluation{Status: status}, err
+}
+
+func (s postAPI) postAuthor(ctx context.Context, actor int64) error {
+	if s.options.Anchors != nil {
+		record, err := s.options.Anchors.Anchor(ctx, actor)
+		if err == nil {
+			if record.State != anchor.Approved {
+				return posts.ErrForbidden
+			}
+			return nil
+		}
+		if !errors.Is(err, anchor.ErrNotFound) {
+			return err
+		}
+	}
+	_, err := (subscriptionAPI{server: s.server}).anchor(ctx, actor)
+	return err
 }
 
 func validPost(p posts.Input) bool {
@@ -159,7 +192,7 @@ func (s postAPI) reviewPost(w http.ResponseWriter, r *http.Request) {
 		postError(w, posts.ErrInvalid)
 		return
 	}
-	postStatus(w, s.entries.ReviewPost(r.Context(), int64(input.ID), input.Status))
+	postStatus(w, s.entries.ReviewPost(r.Context(), int64(input.ID), posts.ReviewDecision{Status: input.Status, Notice: posts.NoticeManualRejection}))
 }
 
 type postProfile struct {
@@ -175,6 +208,13 @@ func (s postAPI) profile(ctx context.Context, id int64) (postProfile, error) {
 	result := postProfile{Display: u.Account, Name: u.Account, Search: u.Account}
 	if p := u.Profile; p != nil {
 		result.Name, result.Photo, result.Search, result.Banner, result.Toy = p.Name, p.Photo, p.SearchName, p.Banner, p.ToyInfo
+	}
+	if s.options.Anchors != nil {
+		profile, err := s.options.Anchors.Anchor(ctx, id)
+		if err != nil && !errors.Is(err, anchor.ErrNotFound) {
+			return postProfile{}, err
+		}
+		result.Teacher = profile.Label
 	}
 	if room, err := s.rooms.Info(ctx, id); err == nil {
 		result.Online = room.Online
@@ -408,8 +448,8 @@ func (s postAPI) anchorPage(w http.ResponseWriter, r *http.Request, actor int64)
 		return
 	}
 	owner := int64(input.Owner)
-	if _, err := (subscriptionAPI{server: s.server}).anchor(r.Context(), owner); err != nil {
-		if errors.Is(err, subscription.ErrNotFound) || errors.Is(err, subscription.ErrForbidden) {
+	if err := s.postAuthor(r.Context(), owner); err != nil {
+		if errors.Is(err, subscription.ErrNotFound) || errors.Is(err, subscription.ErrForbidden) || errors.Is(err, posts.ErrForbidden) {
 			postStatus(w, nil)
 		} else {
 			postError(w, err)
@@ -443,13 +483,19 @@ func (s postAPI) anchorPage(w http.ResponseWriter, r *http.Request, actor int64)
 	if profile.Online {
 		state = "Living"
 	}
+	_, points, err := s.subscriptions.SubscriptionExperience(ctx, actor, owner)
+	if err != nil {
+		postError(w, err)
+		return
+	}
+	_, level := subscription.ExperienceLevels(0, points)
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": map[string]any{"img": profile.Photo, "banner": profile.Banner,
-		"rank": 10, "post_num": stats.Posts, "video_num": stats.Videos, "sub_num": len(fans), "img_num": stats.Images, "anchor_state": state, "level": 0}})
+		"rank": 10, "post_num": stats.Posts, "video_num": stats.Videos, "sub_num": len(fans), "img_num": stats.Images, "anchor_state": state, "level": level}})
 }
 
 func (s postAPI) recentPosts(w http.ResponseWriter, r *http.Request, _ int64) {
 	ctx := r.Context()
-	ids, err := s.entries.RecentPostAnchors(ctx, 100)
+	ids, err := s.entries.RecentPostAnchors(ctx, 128)
 	if err != nil {
 		postError(w, err)
 		return
@@ -482,32 +528,94 @@ func (s postAPI) searchPostAnchors(w http.ResponseWriter, r *http.Request, actor
 		postStatus(w, nil)
 		return
 	}
-	ctx := r.Context()
-	subs, err := s.subscriptions.Relationships(ctx, actor, 0)
+	result, err := s.findDirectoryAnchors(r.Context(), actor, *input.Username)
 	if err != nil {
 		postError(w, err)
 		return
 	}
+	writeSubscriptionData(w, result)
+}
+
+func (s postAPI) findDirectoryAnchors(ctx context.Context, actor int64, name string) ([]map[string]any, error) {
+	directory := subscriptionAPI{server: s.server, store: s.subscriptions}
+	rows, err := s.subscriptions.Relationships(ctx, actor, 0)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := directory.activeAnchors(ctx, actor, rows)
+	if err != nil {
+		return nil, err
+	}
+	friends, err := s.subscriptions.SavedSubscriptionUsers(ctx, actor, subscription.Friends)
+	if err != nil {
+		return nil, err
+	}
+	ids = append(ids, friends...)
+	groups, err := s.subscriptions.SubscriptionGroups(ctx, actor, subscription.CustomGroup)
+	if err != nil {
+		return nil, err
+	}
+	for _, group := range groups {
+		ids = append(ids, group.Users...)
+	}
 	result := []map[string]any{}
 	seen := map[int64]struct{}{}
-	now := time.Now()
-	query := strings.ToLower(*input.Username)
-	for _, sub := range subs {
-		if _, known := seen[sub.AnchorID]; known || !sub.Active(now) {
+	query := strings.ToLower(name)
+	for _, id := range ids {
+		if _, known := seen[id]; known {
 			continue
 		}
-		seen[sub.AnchorID] = struct{}{}
-		p, err := s.profile(ctx, sub.AnchorID)
+		seen[id] = struct{}{}
+		p, err := s.profile(ctx, id)
 		if err != nil {
-			postError(w, err)
-			return
+			return nil, err
 		}
-		if strings.Contains(strings.ToLower(p.Display), query) || strings.Contains(strings.ToLower(p.Search), query) {
-			result = append(result, map[string]any{"uid": strconv.FormatInt(sub.AnchorID, 10), "img": p.Photo, "name": p.Display, "state": 0})
+		if p.Display != "" && (strings.Contains(strings.ToLower(p.Display), query) || strings.Contains(strings.ToLower(p.Search), query)) {
+			result = append(result, map[string]any{"uid": strconv.FormatInt(id, 10), "img": p.Photo, "name": p.Display, "state": 0})
 			if len(result) == 100 {
 				break
 			}
 		}
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": result})
+	return result, nil
+}
+
+func (s postAPI) subscriptionSearch(w http.ResponseWriter, r *http.Request, actor int64) {
+	var input struct {
+		Name    string `json:"user_name"`
+		Content string `json:"post_content"`
+	}
+	if !decodePost(w, r, &input) {
+		return
+	}
+	if input.Name == "" && input.Content == "" {
+		postStatus(w, nil)
+		return
+	}
+	ctx := r.Context()
+	users, result := []map[string]any{}, []map[string]any{}
+	if input.Name != "" {
+		var err error
+		users, err = s.findDirectoryAnchors(ctx, actor, input.Name)
+		if err != nil {
+			postError(w, err)
+			return
+		}
+	}
+	if input.Content != "" {
+		page, err := s.entries.ListPosts(ctx, posts.Filter{Viewer: actor, Search: input.Content, Size: 100})
+		if err != nil {
+			postError(w, err)
+			return
+		}
+		for _, post := range page.Rows {
+			view, err := s.viewPost(ctx, post, false)
+			if err != nil {
+				postError(w, err)
+				return
+			}
+			result = append(result, view)
+		}
+	}
+	writeSubscriptionData(w, map[string]any{"users": users, "posts": result})
 }

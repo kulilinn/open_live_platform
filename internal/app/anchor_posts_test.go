@@ -27,10 +27,13 @@ func testAnchorPosts(t *testing.T, config app.Config) {
 	t.Helper()
 	var audits atomic.Int32
 	audit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var review struct{ Kind, Text string }
+		var review struct {
+			Kind, Text string
+			PostID     string `json:"post_id"`
+		}
 		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer external-audit" ||
 			json.NewDecoder(r.Body).Decode(&review) != nil ||
-			(review.Kind != "post" && review.Kind != "comment") {
+			(review.Kind != "post" && review.Kind != "comment" && review.Kind != "public_chat") {
 			t.Error("unexpected moderation request")
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -46,7 +49,8 @@ func testAnchorPosts(t *testing.T, config app.Config) {
 		case "reject":
 			status = 2
 		}
-		fmt.Fprintf(w, `{"pass_status":%d}`, status)
+		fmt.Fprintf(w, `{"pass_status":%d,"request_id":%q,"manual_request_id":%q}`, status,
+			"machine-"+review.PostID, "manual-"+review.PostID)
 	}))
 	defer audit.Close()
 	config.PostAuditURL, config.PostAuditToken = audit.URL, "external-audit"
@@ -185,6 +189,69 @@ func testAnchorPosts(t *testing.T, config app.Config) {
 	if page["post_num"] != float64(4) || page["sub_num"] != float64(1) || len(recent) != 1 || len(search) != 1 {
 		t.Fatalf("anchor discovery page=%+v recent=%+v search=%+v", page, recent, search)
 	}
+	published := create(owner, "queued", 2, false, http.StatusOK)
+	create(owner, "unlicensed for free subscribers", 3, false, http.StatusOK)
+	create(owner, "for author only", 1, false, http.StatusOK)
+	reviewMedia := func(route, token, actor, risk, requestID string, expected int) map[string]any {
+		t.Helper()
+		return anchorPostRequest(t, platform, "POST", route, token, "", map[string]any{
+			"requestId": requestID, "riskLevel": risk, "passThrough": map[string]string{"userId": actor, "dataId": published},
+		}, expected)
+	}
+	reviewMedia("/sm/media/callback", fan.Token, anchor, "PASS", "machine-"+published, http.StatusUnauthorized)
+	reviewMedia("/sm/media/callback", config.PostReviewToken, strconv.FormatInt(fan.User.ID, 10), "PASS", "machine-"+published, http.StatusNotFound)
+	reviewMedia("/sm/media/callback", config.PostReviewToken, anchor, "PASS", "another-"+published, http.StatusNotFound)
+	if result := reviewMedia("/sm/media/callback", config.PostReviewToken, anchor, "REVIEW", "machine-"+published, http.StatusOK); result["code"] != float64(1100) ||
+		detail(fan, published) != nil {
+		t.Fatalf("machine review unexpectedly published the post: %+v", result)
+	}
+	for range 2 {
+		reviewMedia("/sm/media_manual/callback", config.PostReviewToken, anchor, "PASS", "manual-"+published, http.StatusOK)
+	}
+	noticeRows := func(account auth.Session) []any {
+		t.Helper()
+		return request("GET", "/api/notice/page_notice?page=1&pageSize=20", account, nil, http.StatusOK)["data"].(map[string]any)["list"].([]any)
+	}
+	if rows := noticeRows(fan); len(rows) != 1 || rows[0].(map[string]any)["noticeType"] != float64(2) ||
+		rows[0].(map[string]any)["objectId"] != published {
+		t.Fatalf("subscriber notices = %+v", rows)
+	}
+	if rows := noticeRows(owner); len(rows) != 3 || rows[0].(map[string]any)["noticeType"] != float64(7) ||
+		rows[1].(map[string]any)["noticeType"] != float64(8) || rows[2].(map[string]any)["noticeType"] != float64(17) {
+		t.Fatalf("post interaction notices = %+v", rows)
+	}
+	if rows := noticeRows(outsider); len(rows) != 0 {
+		t.Fatalf("outsider received notices: %+v", rows)
+	}
+	if result := request("POST", "/sm/public_chat/audit", fan, map[string]string{"content": "reject"}, http.StatusOK); result["status"] != "4068" {
+		t.Fatalf("public chat review = %+v", result)
+	}
+	comment(fan, limited, "manual review target", nil, http.StatusOK)
+	commentID := comments()[0].(map[string]any)["id"].(string)
+	static := func(content string) {
+		t.Helper()
+		callback := map[string]any{"requestId": "manual-" + limited, "result": map[string]int{"operation": 2}, "data": map[string]any{"passThrough": map[string]any{
+			"id": commentID, "userId": strconv.FormatInt(fan.User.ID, 10), "contentType": 12, "content": content}}}
+		anchorPostRequest(t, platform, "POST", "/sm/static/callback", config.PostReviewToken, "", callback, http.StatusOK)
+	}
+	static("stale content")
+	if len(comments()) != 1 {
+		t.Fatal("static audit removed a different comment")
+	}
+	for range 2 {
+		static("manual review target")
+	}
+	if len(comments()) != 0 {
+		t.Fatal("manual rejection kept the comment visible")
+	}
+	if rows := noticeRows(fan); len(rows) != 2 || rows[0].(map[string]any)["noticeType"] != float64(30) {
+		t.Fatalf("manual review notices = %+v", rows)
+	}
+	request("POST", "/api/sub/add_group", fan, map[string]any{"uid": anchor, "ty": 3}, http.StatusOK)
+	create(owner, "blocked anchor", 0, false, http.StatusOK)
+	if rows := noticeRows(fan); len(rows) != 2 {
+		t.Fatalf("blocked anchor sent unexpected notices: %+v", rows)
+	}
 	request("GET", "/api/sub/cancel_sub?anchor_id="+anchor+"&plan_id="+free+"&reason=1", fan, nil, http.StatusOK)
 	if detail(fan, limited)["privilege"] != float64(0) {
 		t.Fatal("cancelled subscription retained content access")
@@ -227,8 +294,8 @@ func TestPostgresAnchorPostPayment(t *testing.T) {
 	var calls, mode atomic.Int64
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payment struct {
-			User int64 `json:"user_id"`
-			Points int64 `json:"point"`
+			User    int64  `json:"user_id"`
+			Points  int64  `json:"point"`
 			OrderNo string `json:"order_no"`
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/payment/point/decrease" || r.Header.Get("APPID") != "post-app" ||
@@ -323,6 +390,14 @@ func TestPostgresAnchorPostPayment(t *testing.T) {
 	if len(rank) != 1 || rank[0].(map[string]any)["amount"] != float64(18) || view(fan)["my_tip_amount"] != float64(18) ||
 		calls.Load() != 4 {
 		t.Fatalf("tip was not counted exactly once: rank=%+v calls=%d", rank, calls.Load())
+	}
+	ownerNotices := subscriptionGet(t, second, owner, "/api/notice/page_notice?page=1&pageSize=20")["data"].(map[string]any)["list"].([]any)
+	if len(ownerNotices) != 1 || ownerNotices[0].(map[string]any)["noticeType"] != float64(9) {
+		t.Fatalf("confirmed tip notices = %+v", ownerNotices)
+	}
+	level := subscriptionGet(t, second, fan, "/api/sub/level/"+strconv.FormatInt(owner.User.ID, 10))["data"].(map[string]any)
+	if level["platform_level"] != float64(14) || level["fans_level"] != float64(0) {
+		t.Fatalf("post debits counted under the wrong experience level: %+v", level)
 	}
 	var confirmed int
 	if err := db.QueryRow(t.Context(), `SELECT count(*) FROM anchor_post_orders WHERE state=1 AND provider_id IS NOT NULL`).Scan(&confirmed); err != nil || confirmed != 2 {

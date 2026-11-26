@@ -62,6 +62,8 @@ go run .\cmd\platform
 
 配置 `GIFT_CATALOG_FILE`、`PAYMENT_HOST` 和 `PAYMENT_APPID` 后，普通直播礼物按服务端目录价格向原积分服务扣款。发送者必须已进入该直播场次，收件人必须是主播。扣款确认后保存订单和收益，向 H5 连接发送礼物消息。活动折扣、火箭、设备控制和私聊礼物依赖各自的配置或队列，当前普通礼物入口不处理这些购买。
 
+一对一约会的主播可用 `/api/gift/block` 屏蔽本场礼物，或通过 `/api/gift/recommend/{channel}` 向同场观众发送 H5 推荐。小游戏通过双方实名会话确认，只有同意后才走原积分服务的礼物扣款。划拳和猜题根据服务端保存的双方选择结算，猜题每题一分。使用 `GIFT_INTERACTION_FILE` 加载题库、活动和礼盒，或以 `LIVEMEDIA_MYSQL_DSN` 运行 `go run ./cmd/export-live-gift-interactions` 输出原 MySQL 目录。盒项有上限时，从可信快照提供相应的 `usedByUser` 或 `usedPlatform` 计数。只有具备所需计数且仍有额度的限量盒项会显示。
+
 需要可重试时，客户端给每次有意购买发送一个唯一的 `Idempotency-Key`，重试沿用同一键和请求。省略该头会按每次请求生成新订单。响应包含订单键及 `X-Payment-Order`，扣款结果未能确认时保留待核对订单，并返回 HTTP 409。对照积分服务确认该订单后再决定后续处理。生产扣款使用 PostgreSQL，内存模式仅用于单进程开发，其订单和重试记录在重启后失效。
 
 ## 钱包、订单与支付确认
@@ -78,7 +80,11 @@ go run .\cmd\platform
 
 旧绑定可在导入账号后用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL`、`WEB3_HTTP`、`WEB3_CONTRACT_ADDRESS` 运行 `go run ./cmd/import-live-nft`。导入会核验原钱包仍持有对应卡片、保留有效装备，并尊重新库已经发生的解绑或转移。配置库存钱包地址 `WEB3_ACCOUNT` 和 `NFT_SYNC_TOKEN` 后，部署调度器可用该 Bearer 凭证调用 `/api/nft/creation_card/schedule_refresh`。只有在同一最终确认区块上同时确认卡片离开库存钱包并核实新所有者，服务才更新出售状态。可信目录另可包含 `inventory` 元数据数组，`/api/nft/creation_card/init_data_20250523` 从中加入链上已持有但尚未列出的卡片。两个入口均只读取区块链。
 
-主播收益以已确认的普通直播礼物和导入的原 `settle_orders` 为来源。使用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL` 运行 `go run ./cmd/import-live-settlements` 可读取原 MySQL 的结算记录，多次导入同一记录不会重复计入。新增的订阅、付费帖子等交易要在有实际结算记录后才能计入。收益接口仅允许登录用户读取自己的账目。内部 `GET /api/earning/living_anchor_list` 要求 `EDGE_TOKEN` 的 Bearer 凭证，以及 `admin`、`mcn` 或 `innow` 的 `X-Inner-Service`。
+主播收益包含已确认的普通直播礼物、帖子解锁和打赏，以及导入的原 `settle_orders`。使用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL` 运行 `go run ./cmd/import-live-settlements` 可读取原 MySQL 的结算记录，多次导入同一记录不会重复计入。收益接口仅允许登录用户读取自己的账目。内部 `GET /api/earning/living_anchor_list` 要求 `EDGE_TOKEN` 的 Bearer 凭证，以及 `admin`、`mcn` 或 `innow` 的 `X-Inner-Service`。
+
+主播申请在 `/anchor/api/become_anchor` 提交。运营后台通过 `/api/operation/business/anchorreview/page` 查看申请，按权限调用 `pass` 或 `reject`，状态由 `/anchor/api/is_anchor` 返回。通过审核后同步主播标记、房间 ID 和原默认订阅计划。公开的主播资料隐藏住址和姓氏；资料审核沿用 `POST_AUDIT_URL`，审核服务无法确认时拒绝相关资料的修改。配置 `SUMSUB_URL`、`SUMSUB_APP_TOKEN`、`SUMSUB_SECRET_KEY`、`SUMSUB_LEVEL` 后可申请身份核验令牌，服务只采纳 Sumsub 返回的同一申请人核验结果。身份材料由核验服务保管。
+
+推广渠道报表沿用 `/anchor/api/stat/day`、`stat/total`、`game/income`。设置 `ANCHOR_CHANNEL_ACCESS_FILE`，文件为包含 `channel`、`keyHash`（Bearer 密钥的 SHA-256 十六进制摘要）和 `expiresAt`（RFC 3339 时间）的 JSON 数组。使用 `go run ./cmd/import-live-anchor-channels` 从 `LIVEMEDIA_MYSQL_DSN` 的渠道账号、积分消费及推广分成表导入 PostgreSQL，报表读取最近一次完整导入。金额换算沿用 `LP_TO_DOLLAR`，默认 10 积分。硬件收益及结算沿用旧服务固定为零的响应。旧的测试入口及无需授权的主播删除入口未启用。
 
 ## 管理后台
 
@@ -152,6 +158,22 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 
 设置 `SUBSCRIPTION_RENEW_TOKEN` 后，调度服务可持该 Bearer 令牌调用 `POST /api/sub/renew_sub`。每次检查最多 100 笔将在 UTC 后天零点前到期的有效订阅。续期要求先前已有验证通过的付费订单，且当前点数价格和最近一次实际扣款相同。点数不足时记录续费失败并取消续期。上游结果不明确时保留订单号供核对，并在结果确定前返回待核对状态。
 
+粉丝可通过 `get_groups`、`create_group`、`rename_group`、`clear_group`、`del_group`、`add_group` 和 `remove_group` 管理自己的分组，通过 `friend_list`、`blacklist` 和 `anchor_list` 查看各列表。加入黑名单会从列表和分组移除对应联系人，订阅与已付款权益按原订阅记录生效。粉丝和订阅统计按档位返回。等级使用原 Rust 点数经验表和 Go 服务确认的扣款，历史等级需单独导入。
+
+`report` 保存举报类别、证据链接和可选用户或帖子。与原 Rust 接口一致，`upgrade` 和 `downgrade` 返回成功，无升降级或收费动作。实际付费订阅仍使用 `pay_sub`。
+
+## 主播帖子
+
+`/anchor/api` 保留 Rust 的发帖、列表、详情、主播主页、最近更新、搜索、删帖、评论、点赞和打赏接口。主播可发布公开、仅自己可见、免费订阅及付费订阅内容。有效订阅达到帖子指定档位才可读取正文和原始媒体，作者可选择公开文字和模糊预览。帖子详情沿用 JSON 字符串形式的媒体列表。
+
+设置 `POST_AUDIT_URL` 会将帖子和评论提交审核，可用 `POST_AUDIT_TOKEN` 传入 Bearer 凭证。审核服务接受 `kind`、`user_id`、`post_id`、`text` 和可选 `media`，以 HTTP 200 返回 `pass_status`，其中 1 为待审、2 为拒绝、3 为通过。设置 `POST_AUDIT_REQUIRED=true` 可让未接入审核服务的新帖子待审。配置 `POST_REVIEW_TOKEN` 后，审核服务可持该 Bearer 凭证调用 `POST /internal/anchor-post/review`，传入 `post_id` 和最终 `pass_status`。待审和拒绝的帖子只对作者可见。未开启审核时新帖子直接发布。
+
+审核适配服务可返回 `request_id` 和 `manual_request_id`，用于原 `/sm/media/callback`、`/sm/media_manual/callback` 和针对帖子评论的 `/sm/static/callback`。这些回调要求 `POST_REVIEW_TOKEN`，且请求 ID 与审核对象要和提交时一致。公共聊天审核仍用用户自己的令牌调用 `POST /sm/public_chat/audit`。数美实时音视频审核需要另接生产环境的场次管理。
+
+已发布的帖子会在符合可见条件的有效订阅者的站内列表中生成通知。顶层评论、有效点赞和确认后的打赏会通知作者，审核拒绝通知对应内容的作者。相同审核回调、点赞和订单重试沿用已保存的通知。部署可通过原站内通知列表查看，外部 Web Push 仍需另接。
+
+单帖解锁和打赏需要 PostgreSQL 及点数服务配置 `PAYMENT_HOST`、`PAYMENT_APPID`。通过付款确认后才开放单帖权限、刷新打赏榜单及计入主播收益。上游结果不明时返回订单号供核对，相同解锁重试不会重复扣款。打赏可用 `Idempotency-Key` 标记同一笔请求。
+
 ## 从 LiveMedia 导入账号
 
 `go run ./cmd/import-live-accounts` 从 `LIVEMEDIA_MYSQL_DSN` 读取 Rust 的 `user`、`email_login` 和 `user_violation_records`，写入 `DATABASE_URL` 指向的 PostgreSQL。源端使用只读账号，在停止旧服务写入后执行导入，再迁移 Redis 登录会话。
@@ -161,6 +183,8 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 账号数据导入后，`go run ./cmd/import-live-interactions` 使用相同连接配置导入私信和通知。命令保留原有 ID、时间、每个会话成员的隐藏状态及已读状态。若旧会话允许发送且源 `subscription_user_sub` 中有对应的未取消、未过期权益，则保留发送权限直至该权益到期。输出统计成功导入、已存在和跳过的记录。跳过群聊、逻辑删除或缺少目标账号的记录。相同 ID 或成员对的本地数据冲突时回滚该次导入。
 
 `go run ./cmd/import-live-subscriptions` 使用同一连接配置导入历史订阅计划、套餐展示、订阅期限、取消状态及历史结算记录。只有旧 `settle_orders` 与 `point_transactions` 能通过买家、主播、点数、交易引用和计划 ID 逐一对应时，才关联结算记录的 `verified_plan_id`。其余记录保留为可核对的历史数据。导入的历史订阅保留已有期限，后续由新 Go 订单验证付款后才具备自动续期资格。旧 Redis 促销的历史配置保留，重新开放限时体验需由该计划主播发布。
+
+`go run ./cmd/import-live-publishing` 同样读取 `LIVEMEDIA_MYSQL_DSN` 和 `DATABASE_URL`。在切换新服务写流量之前，导入旧帖子、评论树、有效点赞、历史打赏榜、分享记录、分组、好友和黑名单。旧单帖购买按源买家完整 ID 恢复访问，历史打赏和访问授权无需再次扣款。分享图片和帖子多媒体沿用已有对象地址，文件由原对象存储继续提供。导入会报告原样本中缺失账号、无有效父评论或重复默认分组等被跳过的记录。
 
 ## 站内通知
 
@@ -277,6 +301,13 @@ PostgreSQL 模式可通过 `USE_LIVEROOM_BOT` 与 `LIVEROOM_BOT_FILE` 开启陪�
 
 文件可设置 `room_population`（加机器人前的观众上限，默认 20），以及 `entry_seconds`、`stay_seconds`、`welcome_delay_seconds`、`gift_delay_seconds`（分别默认 30、600、180、1 秒）。关播、踢出机器人或机器人离房会清理该账号的待发消息。Go 读取本地账号和脚本配置，自动点赞、日常闲聊和原 etcd/Redis 加权配置仍需迁移。
 
+## 直播点赞、结算和举报
+
+- 登录后可向 `POST /api/live/room/live/like` 提交字符串 `roomId`、`liveId` 和正整数 `likeCount`。接口返回本场累计点赞量，并通过 H5 WebSocket 发出 `Z` 通知。每次开播拥有独立计数。
+- `GET /api/live/room/anchor/{room}` 返回主播账号和 RTC NID。主播可通过 `GET /api/live/room/settle/{live_id}` 查看本场时长、观众峰值、礼物收益和独立送礼人数。PostgreSQL 模式同时统计本场新增订阅者。已有数据库升级时可回填仍保存在房间数据中的一场，升级后会保留各场记录。
+- `DELETE /api/live/room/report/{room}` 以登录账号保存举报，内容为 `subject` 与 `description`。原 Rust `POST /api/live/room/sync_watch_time` 仅返回成功，Go 沿用该行为。
+- `POST /api/live/anchor/recommends` 返回最近开启 1v1 接听的至多十位主播和查询时的接听状态。
+
 ## 礼物目录
 
 将 `GIFT_CATALOG_FILE` 设为礼物 JSON 文件的路径，例如内容为 `[{"id":"101","name":"花束","price":20,"giftSort":1}]`。服务在启动时加载目录。登录后请求 `GET /api/gift/list` 会得到 `status/data`，礼物按 `giftSort` 升序排列。没有配置目录或请求带有 `?all=false` 时，`data` 为空数组。
@@ -315,6 +346,12 @@ PG 模式下，账号、登录会话、房间、成员、管理员、禁言、�
 旧应用目录、版本、国家、帮助分类/问答、跑马灯及 PWA 主播清单通过 `go run ./cmd/import-live-catalog` 迁入 PostgreSQL。命令读取 `LIVEMEDIA_MYSQL_DSN` 和 `DATABASE_URL`，每次成功导入会在同一事务中替换整套公开资料。导入只选用公开列，应用密钥留在源库。
 
 ## 检查
+
+机器人私聊沿用 `POST /api/chatbot/{botid}` 和 `GET /api/chatbot/{botid}/{token}`。双方的 H5 连接都收到同一条 `botchat` 消息。首次拉取传 `latest`，之后传上次响应中的 `more`。旧 MySQL 的 `chat_message` 随 `cmd/import-live-interactions` 导入。
+
+Telegram Mini App 通过 `TELEGRAM_BOT_TOKEN` 校验登录签名。Web Push 订阅沿用 `LOVEROSE_PUSH_HOST`、`LOVEROSE_PUSH_KEY_PATH` 和 `LOVEROSE_PUSH_SUB_PATH`。CDN 回源校验使用 `CDN_SECRET`。国家识别支持 `IPLOCATE`、`IP2GEO_DBV4` 和 `IP2GEO_DBV6`。若服务位于反向代理后，将可信代理网段列入 `TRUSTED_PROXY_CIDRS`。
+
+浏览器来源沿用 `CORS_ORIGIN`，多个域名以分号分隔。公开服务按 Rust 的登录、机器人聊天等入口执行进程内每 IP 和路径限流。连续 601 次请求后，客户端待最后一次获准请求经过 6 秒即可重试。`TEST_MODE=true` 可在本地关闭该限制。
 
 ```powershell
 go test ./...

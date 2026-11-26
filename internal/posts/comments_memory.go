@@ -31,6 +31,11 @@ func (m *Memory) CreatePostComment(ctx context.Context, comment Comment) error {
 	m.nextComment++
 	comment.ID = m.nextComment
 	comment.CreatedAt = time.Now().UTC()
+	if comment.ParentID == nil {
+		if err := m.notify(ctx, NoticeComment, p.ID, comment.AuthorID, p.OwnerID); err != nil {
+			return err
+		}
+	}
 	m.comments[comment.ID] = comment
 	p.CommentCount++
 	m.posts[p.ID] = p
@@ -60,6 +65,14 @@ func (m *Memory) PostComments(ctx context.Context, actor, id int64) ([]Comment, 
 }
 
 func (m *Memory) DeletePostComment(ctx context.Context, actor, id int64) error {
+	return m.deletePostComment(ctx, actor, id, nil, "")
+}
+
+func (m *Memory) RejectPostComment(ctx context.Context, actor, id int64, content, request string) error {
+	return m.deletePostComment(ctx, actor, id, &content, request)
+}
+
+func (m *Memory) deletePostComment(ctx context.Context, actor, id int64, expected *string, request string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	root, ok := m.comments[id]
@@ -72,6 +85,14 @@ func (m *Memory) DeletePostComment(ctx context.Context, actor, id int64) error {
 	}
 	if root.AuthorID != actor && p.OwnerID != actor {
 		return ErrForbidden
+	}
+	if expected != nil {
+		if root.AuthorID != actor || root.Content != *expected || request == "" || root.ManualAuditRequest != request {
+			return ErrNotFound
+		}
+		if err := m.notifyRejection(ctx, NoticeCommentRejection, root.AuthorID); err != nil {
+			return err
+		}
 	}
 	children := make(map[int64][]int64)
 	for _, item := range m.comments {
@@ -112,6 +133,12 @@ func (m *Memory) LikePost(ctx context.Context, actor, id int64, liked bool) (int
 	p, err := m.interactive(ctx, actor, id)
 	if err != nil {
 		return 0, err
+	}
+	_, alreadyLiked := m.postLikes[id][actor]
+	if liked && !alreadyLiked {
+		if err := m.notifyLike(ctx, p, actor); err != nil {
+			return 0, err
+		}
 	}
 	p.LikeCount = setMemoryLike(m.postLikes, actor, id, liked)
 	m.posts[id] = p
