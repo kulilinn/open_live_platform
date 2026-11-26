@@ -37,22 +37,27 @@ func (s server) signInCompat(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, &input) {
 		return
 	}
-	session, err := s.accounts.SignIn(r.Context(), input.Email, input.Password)
+	signIn := s.accounts.SignIn
+	if accounts, ok := s.accounts.(*auth.JWTAccounts); ok {
+		signIn = accounts.SignInJWT
+	}
+	session, err := signIn(r.Context(), input.Email, input.Password)
 	if err != nil {
 		sessionResponse(w, http.StatusOK, session, err)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200", "token": session.Token, "user": rustAuthUser(session.User),
 	})
 }
 
 func (s server) sessionCompat(w http.ResponseWriter, r *http.Request) {
-	if !rustAuthCompat(r) {
+	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !rustAuthCompat(r) && !auth.IsJWT(token) {
 		s.authenticated(s.session)(w, r)
 		return
 	}
-	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !found {
 		httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
 		return
@@ -66,6 +71,7 @@ func (s server) sessionCompat(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200", "token": session.Token,
 	})

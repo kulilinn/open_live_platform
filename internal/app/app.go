@@ -26,6 +26,7 @@ type Config struct {
 	RelaySecret     string
 	RelayPublicURL  string
 	GiftCatalogFile string
+	JWTSecret       string
 
 	ReadTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
@@ -43,6 +44,7 @@ func ConfigFromEnv() Config {
 		RelaySecret:       env("RELAY_SECRET", "dev-secret"),
 		RelayPublicURL:    os.Getenv("RELAY_PUBLIC_URL"),
 		GiftCatalogFile:   os.Getenv("GIFT_CATALOG_FILE"),
+		JWTSecret:         os.Getenv("JWT_SECRET"),
 		ReadTimeout:       duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
 		ReadHeaderTimeout: duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
 		WriteTimeout:      duration("PLATFORM_WRITE_TIMEOUT", 15*time.Second),
@@ -63,19 +65,20 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
 	}
-	var accounts auth.AccountStore
+	var backend auth.JWTBackend
 	var rooms live.RoomStore
 	var db *postgres.Store
 	if config.DatabaseURL == "" {
-		accounts, rooms = auth.NewStore(), live.NewStore()
+		backend, rooms = auth.NewStore(), live.NewStore()
 	} else {
 		var err error
 		db, err = postgres.Open(ctx, config.DatabaseURL)
 		if err != nil {
 			return nil, err
 		}
-		accounts, rooms = db, db
+		backend, rooms = db, db
 	}
+	accounts := auth.WithJWT(backend, config.JWTSecret)
 	mux := http.NewServeMux()
 
 	httpapi.Register(mux, accounts, rooms)

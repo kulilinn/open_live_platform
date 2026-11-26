@@ -51,20 +51,22 @@ type credentials struct {
 }
 
 type Store struct {
-	mu       sync.RWMutex
-	nextID   int64
-	users    map[string]credentials
-	names    map[int64]string
-	sessions map[string]User
+	mu          sync.RWMutex
+	nextID      int64
+	users       map[string]credentials
+	names       map[int64]string
+	sessions    map[string]User
+	jwtSessions map[int64]int64
 }
 
 var _ AccountStore = (*Store)(nil)
 
 func NewStore() *Store {
 	return &Store{
-		users:    make(map[string]credentials),
-		names:    make(map[int64]string),
-		sessions: make(map[string]User),
+		users:       make(map[string]credentials),
+		names:       make(map[int64]string),
+		sessions:    make(map[string]User),
+		jwtSessions: make(map[int64]int64),
 	}
 }
 
@@ -98,26 +100,33 @@ func (s *Store) SignUp(ctx context.Context, email, password, account string) (Se
 }
 
 func (s *Store) SignIn(ctx context.Context, email, password string) (Session, error) {
-	if err := ctx.Err(); err != nil {
+	user, err := s.VerifyPassword(ctx, email, password)
+	if err != nil {
 		return Session{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.newSession(s.users[user.Email].user), nil
+}
+
+func (s *Store) VerifyPassword(ctx context.Context, email, password string) (User, error) {
+	if err := ctx.Err(); err != nil {
+		return User{}, err
 	}
 	s.mu.RLock()
 	login, exists := s.users[NormalizeEmail(email)]
 	s.mu.RUnlock()
 	if !exists {
-		return Session{}, ErrInvalidCredentials
+		return User{}, ErrInvalidCredentials
 	}
 	key, err := PasswordKey(password, login.salt[:])
 	if err != nil {
-		return Session{}, err
+		return User{}, err
 	}
 	if subtle.ConstantTimeCompare(key, login.key) != 1 {
-		return Session{}, ErrInvalidCredentials
+		return User{}, ErrInvalidCredentials
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.newSession(login.user), nil
+	return login.user, nil
 }
 
 func (s *Store) Lookup(ctx context.Context, token string) (User, bool, error) {

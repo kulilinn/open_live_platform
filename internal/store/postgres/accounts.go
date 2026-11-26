@@ -54,24 +54,9 @@ func (s *Store) SignUp(ctx context.Context, email, password, account string) (au
 }
 
 func (s *Store) SignIn(ctx context.Context, email, password string) (auth.Session, error) {
-	var user auth.User
-	var salt, storedKey []byte
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, email, account, language, password_salt, password_hash
-		FROM users WHERE email = $1`, auth.NormalizeEmail(email)).
-		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &salt, &storedKey)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return auth.Session{}, auth.ErrInvalidCredentials
-	}
+	user, err := s.VerifyPassword(ctx, email, password)
 	if err != nil {
 		return auth.Session{}, err
-	}
-	key, err := auth.PasswordKey(password, salt)
-	if err != nil {
-		return auth.Session{}, err
-	}
-	if subtle.ConstantTimeCompare(key, storedKey) != 1 {
-		return auth.Session{}, auth.ErrInvalidCredentials
 	}
 
 	token := rand.Text()
@@ -79,6 +64,29 @@ func (s *Store) SignIn(ctx context.Context, email, password string) (auth.Sessio
 		return auth.Session{}, err
 	}
 	return auth.Session{Token: token, User: user}, nil
+}
+
+func (s *Store) VerifyPassword(ctx context.Context, email, password string) (auth.User, error) {
+	var user auth.User
+	var salt, storedKey []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, email, account, language, password_salt, password_hash
+		FROM users WHERE email = $1`, auth.NormalizeEmail(email)).
+		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &salt, &storedKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.User{}, auth.ErrInvalidCredentials
+	}
+	if err != nil {
+		return auth.User{}, err
+	}
+	key, err := auth.PasswordKey(password, salt)
+	if err != nil {
+		return auth.User{}, err
+	}
+	if subtle.ConstantTimeCompare(key, storedKey) != 1 {
+		return auth.User{}, auth.ErrInvalidCredentials
+	}
+	return user, nil
 }
 
 func (s *Store) Lookup(ctx context.Context, token string) (auth.User, bool, error) {

@@ -41,14 +41,13 @@ func Signature(token, secret string) string {
 func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, secret, publicURL string) {
 	type ticket struct {
 		session string
-		user    auth.User
 		expires time.Time
 	}
 	const lifetime = time.Minute
 	var tickets sync.Map
 	mux.HandleFunc("GET /api/device/qrcode", func(w http.ResponseWriter, r *http.Request) {
 		session, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		user, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
+		_, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
 		if err != nil || secret == "" {
 			httpx.Error(w, http.StatusInternalServerError, "could not issue relay ticket")
 			return
@@ -59,7 +58,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			return
 		}
 		id := "ws-" + rand.Text()
-		tickets.Store(id, ticket{session, user, time.Now().Add(lifetime)})
+		tickets.Store(id, ticket{session, time.Now().Add(lifetime)})
 		time.AfterFunc(lifetime, func() { tickets.Delete(id) })
 		base := strings.TrimRight(publicURL, "/")
 		if base == "" {
@@ -85,29 +84,22 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			http.Error(w, "invalid token or signature", http.StatusForbidden)
 			return
 		}
-		var user auth.User
 		if strings.HasPrefix(token, "ws-") {
 			value, found := tickets.LoadAndDelete(token)
 			if !found || !time.Now().Before(value.(ticket).expires) {
 				http.Error(w, "invalid or expired relay ticket", http.StatusForbidden)
 				return
 			}
-			ticketValue := value.(ticket)
-			token = ticketValue.session
-			user = ticketValue.user
+			token = value.(ticket).session
 		}
-		if user.ID == 0 {
-			var ok bool
-			var err error
-			user, ok, err = accounts.Lookup(r.Context(), token)
-			if err != nil {
-				http.Error(w, "authentication failed", http.StatusInternalServerError)
-				return
-			}
-			if !ok {
-				http.Error(w, "invalid token or signature", http.StatusForbidden)
-				return
-			}
+		user, ok, err := accounts.Lookup(r.Context(), token)
+		if err != nil {
+			http.Error(w, "authentication failed", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "invalid token or signature", http.StatusForbidden)
+			return
 		}
 
 		query := r.URL.Query()

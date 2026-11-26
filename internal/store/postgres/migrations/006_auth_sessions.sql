@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS jwt_sessions (
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    family_id BIGINT NOT NULL
+);
