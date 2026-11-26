@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
@@ -14,13 +15,13 @@ import (
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/relay"
-	"open_live_platform/internal/rpc"
 	"open_live_platform/internal/store/postgres"
 )
 
 type Config struct {
 	DatabaseURL     string
 	Addr            string
+	GRPCAddr        string
 	AdminToken      string
 	EdgeToken       string
 	RelaySecret     string
@@ -39,6 +40,7 @@ func ConfigFromEnv() Config {
 	return Config{
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		Addr:              env("PLATFORM_ADDR", ":8080"),
+		GRPCAddr:          os.Getenv("PLATFORM_GRPC_ADDR"),
 		AdminToken:        adminToken,
 		EdgeToken:         env("EDGE_TOKEN", adminToken),
 		RelaySecret:       env("RELAY_SECRET", "dev-secret"),
@@ -61,6 +63,7 @@ type App struct {
 }
 
 func New(ctx context.Context, config Config) (*App, error) {
+	config.GRPCAddr = cmp.Or(config.GRPCAddr, "127.0.0.1:9090")
 	gifts, err := gift.Load(config.GiftCatalogFile)
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
@@ -87,20 +90,6 @@ func New(ctx context.Context, config Config) (*App, error) {
 	edge.Register(mux, rooms, config.EdgeToken)
 	relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL)
 
-	rpcServer := rpc.NewServer()
-	rpc.Handle[struct{}, map[string]any](rpcServer, "platform.stats", func(ctx context.Context, _ struct{}) (map[string]any, error) {
-		users, err := accounts.Users(ctx)
-		if err != nil {
-			return nil, err
-		}
-		roomList, err := rooms.Rooms(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"users": len(users), "rooms": roomList}, nil
-	})
-	mux.Handle("/internal/rpc/", rpcServer)
-
 	return &App{
 		db:       db,
 		Config:   config,
@@ -120,25 +109,6 @@ func New(ctx context.Context, config Config) (*App, error) {
 func (a *App) Close() {
 	if a.db != nil {
 		a.db.Shutdown()
-	}
-}
-
-func (a *App) Run(ctx context.Context) error {
-	errors := make(chan error, 1)
-	go func() {
-		errors <- a.Server.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errors:
-		if err == http.ErrServerClosed {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return a.Server.Shutdown(shutdownContext)
 	}
 }
 

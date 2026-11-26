@@ -1,6 +1,6 @@
 # open_live_platform
 
-这是 `D:\my\LiveMedia` 的 Go 核心运行链路移植。项目用一个进程提供公开 API、直播房间、管理接口、边缘事件入口、WebSocket relay 和内部 JSON RPC。
+这是 `D:\my\LiveMedia` 的 Go 核心运行链路移植。项目用一个进程提供公开 API、直播房间、管理接口、边缘事件入口、WebSocket relay 和内部 gRPC。
 
 需要 Go 1.24 或更高版本。
 
@@ -13,12 +13,13 @@
 - `internal/httpapi`、`internal/admin`、`internal/edge` 只负责 HTTP 适配。
 - `internal/transport/httpx` 提供共享 JSON、错误、认证和路径工具。
 - `internal/relay` 提供 WebSocket 适配。
-- `internal/rpc` 提供内部 JSON RPC。
+- `api/platform/v1/platform.proto` 定义内部 gRPC 接口。
 
 ## 运行
 
 ```powershell
 $env:PLATFORM_ADDR=':8080'
+$env:PLATFORM_GRPC_ADDR='127.0.0.1:9090'
 $env:ADMIN_TOKEN='admin'
 $env:EDGE_TOKEN='edge'
 $env:RELAY_SECRET='dev-secret'
@@ -42,7 +43,24 @@ go run .\cmd\platform
 - `GET /api/gift/list` 读取已配置的礼物目录
 - `GET /api/admin/rooms`、`GET /api/admin/users`
 - `POST /api/edge/events`
-- `POST /internal/rpc/platform.stats`
+
+## 内部 gRPC
+
+`platform.v1.PlatformService/GetStats` 替代原有的 `/internal/rpc/platform.stats`，接收空请求，返回账号总数 `users` 和完整房间列表 `rooms`。gRPC 独立监听，默认地址为 `127.0.0.1:9090`，可通过 `PLATFORM_GRPC_ADDR` 配置。前端继续使用 `PLATFORM_ADDR` 上的 HTTP 和 WebSocket 接口。
+
+服务未启用反射。在仓库根目录使用 `grpcurl` 时，直接指定接口定义文件。
+
+```powershell
+grpcurl -plaintext -import-path . -proto api/platform/v1/platform.proto -d '{}' 127.0.0.1:9090 platform.v1.PlatformService/GetStats
+```
+
+Go 客户端和服务端绑定已随仓库提交。修改协议后，在仓库根目录用 `protoc`、`protoc-gen-go` 和 `protoc-gen-go-grpc` 重新生成。
+
+```powershell
+protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative api/platform/v1/platform.proto
+```
+
+监听端口使用明文且没有内置鉴权。跨机器访问时，绑定到受限的内网地址，并通过防火墙或带 TLS 和鉴权的代理限制访问。
 
 ## 观众查找房间
 

@@ -57,7 +57,8 @@
 
 - [ ] Redis 缓存和跨进程会话
 - [x] 同一 PostgreSQL 数据库与 schema 的房间事件广播
-- [ ] Zenoh/RPC 服务发现和 Rust 服务间的互操作
+- [x] Go 内部统计切换到独立 gRPC 监听端口，公开 HTTP 和 WebSocket 接口沿用原路径
+- [ ] 与 Rust Zenoh 服务发现及旧 RPC 的互操作
 - [ ] Kafka edge 消费链路
 - [ ] etcd 配置和服务发现
 - [ ] S3、邮件、推送和第三方服务适配
@@ -67,7 +68,7 @@
 
 ## 约束
 
-- 继续保留旧 Go 客户端可用的请求和响应路径。
+- 继续兼容旧 Go 客户端使用的公开 HTTP 和 WebSocket 请求与响应。
 - 需要改变 HTTP 状态或响应形状时，使用明确的协议选择方式。
 - 不把用户、房间、消息 ID 转成 32 位。
 - 不修改 CMake 或 prcmake。

@@ -26,17 +26,19 @@ LiveMedia is a Rust workspace with these runtime surfaces:
 
 The Go implementation keeps the primary runtime path small and explicit:
 
-- `cmd/platform`: one process that serves the public API, live-room endpoints, admin endpoints, edge event endpoint, and WebSocket relay.
+- `cmd/platform`: one process that serves the public API, live-room endpoints, admin endpoints, edge event endpoint, WebSocket relay, and a separate internal gRPC listener.
 - `internal/auth`: in-memory users and bearer sessions with a simple token format.
 - `internal/live`: in-memory room state with start, close, join, leave, info, members, admin, mute, kick, and chat operations.
 - `internal/store/postgres`: durable accounts, sessions, room state, moderation, and chat messages. The app selects this backend when `DATABASE_URL` is set. WebSocket subscriptions remain process-local.
-- `internal/rpc`: small HTTP JSON RPC client/server and round-robin service registry.
+- `api/platform/v1/platform.proto`: `platform.v1.PlatformService/GetStats` accepts an empty request and returns the account count (`users`) and full room list (`rooms`).
 - `internal/relay`: WebSocket authentication and room message forwarding.
 - `internal/admin`: compact management handlers backed by the same live/auth state.
 - `internal/edge`: event ingestion and dispatch hooks.
 
-The Go service uses a PostgreSQL schema for its core tables. The Rust application's MySQL data and migration history require a separate import. The Redis, Zenoh, etcd, S3, Kafka, Agora and payment integrations are outside this port.
+The Go migration replaces `/internal/rpc/platform.stats` and the custom JSON RPC client and registry with gRPC. `PLATFORM_GRPC_ADDR` configures the listener, which defaults to `127.0.0.1:9090`. Frontend clients continue to use HTTP and WebSocket. The Go service has no interoperability with the Rust Zenoh service layer.
+
+The Go service uses a PostgreSQL schema for its core tables. The Rust application's MySQL data and migration history require a separate import. The Redis, etcd, S3, Kafka, Agora and payment integrations are outside this port.
 
 ## 4. Deliberate implementation style
 
-The port uses direct handlers, concrete structs, standard library plus a small WebSocket dependency, and minimal branching. It does not recreate Rust's error taxonomy, middleware stack, generated entities, or every legacy route. Unsupported legacy areas return a compact JSON response from a single fallback route.
+The port uses direct handlers, concrete structs, and minimal branching. The internal stats service uses generated gRPC bindings. The port does not recreate Rust's error taxonomy, middleware stack, generated entities, or every legacy route. Unsupported legacy areas return a compact JSON response from a single fallback route.

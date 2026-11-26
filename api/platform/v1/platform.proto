@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package platform.v1;
+
+option go_package = "open_live_platform/api/platform/v1;platformv1";
+
+service PlatformService {
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}
+
+message GetStatsRequest {}
+
+message GetStatsResponse {
+  int64 users = 1;
+  repeated Room rooms = 2;
+}
+
+message Room {
+  int64 id = 1;
+  int64 owner_id = 2;
+  string title = 3;
+  bool online = 4;
+  int64 member_count = 5;
+  bool is_lock = 6;
+}

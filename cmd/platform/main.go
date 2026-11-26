@@ -18,7 +18,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("open_live_platform listening on %s", platform.Server.Addr)
+	log.Printf("starting HTTP on %s and internal gRPC on %s", platform.Server.Addr, platform.Config.GRPCAddr)
 	err = platform.Run(ctx)
 	platform.Close()
 	if err != nil {
