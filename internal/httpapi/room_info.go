@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"open_live_platform/internal/live"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -58,10 +59,25 @@ func (s server) infoRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 	if !ok {
 		return
 	}
+	room, err := s.rooms.Info(r.Context(), roomID)
+	if err != nil {
+		httpx.LiveError(w, err)
+		return
+	}
 	info, err := s.roomInfo(r.Context(), userID, roomID)
 	if err != nil {
 		httpx.LiveError(w, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, info)
+	response := legacyRoomJSON(room)
+	response["status"] = "200"
+	response["data"] = info
+	httpx.JSON(w, http.StatusOK, response)
+}
+
+func legacyRoomJSON(room live.Room) map[string]any {
+	return map[string]any{
+		"id": room.ID, "owner_id": room.OwnerID, "title": room.Title,
+		"online": room.Online, "member_count": room.MemberCount, "isLock": room.IsLock,
+	}
 }

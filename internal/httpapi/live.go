@@ -38,7 +38,10 @@ func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) 
 			httpx.Error(w, http.StatusInternalServerError, "could not build room response")
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": info})
+		response := legacyRoomJSON(room)
+		response["status"] = "200"
+		response["data"] = info
+		httpx.JSON(w, http.StatusOK, response)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, room)

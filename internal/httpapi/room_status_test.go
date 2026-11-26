@@ -112,8 +112,9 @@ func TestRustRoomInfoShape(t *testing.T) {
 	}
 
 	info := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/live/room/info/"+itoa(owner.User.ID), owner.Token, nil)
-	if info.Code != http.StatusOK || info.Body["room"] != itoa(owner.User.ID) ||
-		info.Body["anchor"] != itoa(owner.User.ID) {
+	infoData := info.Body["data"].(map[string]any)
+	if info.Code != http.StatusOK || infoData["room"] != itoa(owner.User.ID) ||
+		infoData["anchor"] != itoa(owner.User.ID) {
 		t.Fatalf("Rust info = %d %+v", info.Code, info.Body)
 	}
 	updated := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/setting", owner.Token, map[string]any{
