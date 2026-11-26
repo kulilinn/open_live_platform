@@ -44,4 +44,24 @@ func TestRustAuthCompatibility(t *testing.T) {
 	if signin["status"] != "200" || signin["token"] == "" {
 		t.Fatalf("signin response = %+v", signin)
 	}
+	refresh := signin["token"].(string)
+	sessionRequest := httptest.NewRequest(http.MethodGet, "/api/auth/session?compat=rust", nil)
+	sessionRequest.Header.Set("Accept", "application/vnd.livemedia+json")
+	sessionRequest.Header.Set("Authorization", "Bearer "+refresh)
+	sessionRecorder := httptest.NewRecorder()
+	s.sessionCompat(sessionRecorder, sessionRequest)
+	if sessionRecorder.Code != http.StatusOK {
+		t.Fatalf("session status = %d", sessionRecorder.Code)
+	}
+	var access map[string]any
+	if err := json.Unmarshal(sessionRecorder.Body.Bytes(), &access); err != nil {
+		t.Fatal(err)
+	}
+	if access["status"] != "200" || access["token"] == "" || access["token"] == refresh {
+		t.Fatalf("session response = %+v", access)
+	}
+	foundUser, ok, err := s.accounts.Bearer(t.Context(), "Bearer "+access["token"].(string))
+	if err != nil || !ok || foundUser.ID != 1 {
+		t.Fatalf("access token lookup = %+v, %v, %v", foundUser, ok, err)
+	}
 }

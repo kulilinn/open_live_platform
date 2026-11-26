@@ -101,6 +101,26 @@ func (s *Store) Bearer(ctx context.Context, authorization string) (auth.User, bo
 	return s.Lookup(ctx, token)
 }
 
+func (s *Store) Refresh(ctx context.Context, token string) (auth.Session, bool, error) {
+	var user auth.User
+	err := s.pool.QueryRow(ctx, `
+		SELECT u.id, u.email, u.account, u.language
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.token = $1`, token,
+	).Scan(&user.ID, &user.Email, &user.Account, &user.Language)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.Session{}, false, nil
+	}
+	if err != nil {
+		return auth.Session{}, false, err
+	}
+	newToken := rand.Text()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO sessions (token, user_id) VALUES ($1, $2)`, newToken, user.ID); err != nil {
+		return auth.Session{}, false, err
+	}
+	return auth.Session{Token: newToken, User: user}, true, nil
+}
+
 func (s *Store) Revoke(ctx context.Context, token string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token)
 	return err

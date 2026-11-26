@@ -35,6 +35,7 @@ type AccountStore interface {
 	SignIn(ctx context.Context, email, password string) (Session, error)
 	Lookup(ctx context.Context, token string) (User, bool, error)
 	Bearer(ctx context.Context, authorization string) (User, bool, error)
+	Refresh(ctx context.Context, token string) (Session, bool, error)
 	Revoke(ctx context.Context, token string) error
 	Find(ctx context.Context, id int64) (User, bool, error)
 	SetLanguage(ctx context.Context, id int64, language string) error
@@ -137,6 +138,19 @@ func (s *Store) Bearer(ctx context.Context, authorization string) (User, bool, e
 		return User{}, false, nil
 	}
 	return s.Lookup(ctx, token)
+}
+
+func (s *Store) Refresh(ctx context.Context, token string) (Session, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Session{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.sessions[token]
+	if !ok {
+		return Session{}, false, nil
+	}
+	return s.newSession(user), true, nil
 }
 
 func (s *Store) Revoke(ctx context.Context, token string) error {

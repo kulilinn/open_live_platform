@@ -47,6 +47,30 @@ func (s server) signInCompat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s server) sessionCompat(w http.ResponseWriter, r *http.Request) {
+	if !rustAuthCompat(r) {
+		s.authenticated(s.session)(w, r)
+		return
+	}
+	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !found {
+		httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
+	session, ok, err := s.accounts.Refresh(r.Context(), token)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not refresh session")
+		return
+	}
+	if !ok {
+		httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"status": "200", "token": session.Token,
+	})
+}
+
 func rustAuthCompat(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "application/vnd.livemedia+json") ||
 		r.URL.Query().Get("compat") == "rust"
