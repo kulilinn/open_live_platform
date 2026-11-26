@@ -55,6 +55,6 @@ func rustAuthCompat(r *http.Request) bool {
 func rustAuthUser(user auth.User) map[string]any {
 	return map[string]any{
 		"id": strconv.FormatInt(user.ID, 10), "email": user.Email,
-		"language": "ja", "x_user_tag": "",
+		"language": user.Language, "x_user_tag": "",
 	}
 }

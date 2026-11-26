@@ -7,6 +7,19 @@ import (
 	"open_live_platform/internal/transport/httpx"
 )
 
+func (s server) setLanguage(w http.ResponseWriter, r *http.Request, userID int64) {
+	language := r.Header.Get("x-loverose-lang")
+	if language == "" {
+		httpx.Error(w, http.StatusBadRequest, "x-loverose-lang is required")
+		return
+	}
+	if err := s.accounts.SetLanguage(r.Context(), userID, language); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not update language")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
+}
+
 func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID int64) {
 	targetID := currentID
 	if value := r.PathValue("user_id"); value != "" && value != "me" {
@@ -39,7 +52,7 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 			"trans": false, "transLang": "", "limitTy": 0, "limitAllow": true,
 			"limitTotal": 0, "limitTime": 0, "limitReason": []string{},
 			"fansTotal": 0, "teacherLabel": "", "email": user.Email,
-			"language": "ja", "search_name": user.Account, "token_id": nil,
+			"language": user.Language, "search_name": user.Account, "token_id": nil,
 			"equipped_adorn": map[string]any{},
 		},
 	})

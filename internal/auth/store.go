@@ -19,9 +19,10 @@ var (
 )
 
 type User struct {
-	ID      int64  `json:"id"`
-	Email   string `json:"email"`
-	Account string `json:"account"`
+	ID       int64  `json:"id"`
+	Email    string `json:"email"`
+	Account  string `json:"account"`
+	Language string `json:"language,omitempty"`
 }
 
 type Session struct {
@@ -36,6 +37,7 @@ type AccountStore interface {
 	Bearer(ctx context.Context, authorization string) (User, bool, error)
 	Revoke(ctx context.Context, token string) error
 	Find(ctx context.Context, id int64) (User, bool, error)
+	SetLanguage(ctx context.Context, id int64, language string) error
 	Users(ctx context.Context) ([]User, error)
 	Names(ctx context.Context, ids []int64) (map[int64]string, error)
 }
@@ -87,7 +89,7 @@ func (s *Store) SignUp(ctx context.Context, email, password, account string) (Se
 		return Session{}, ErrEmailInUse
 	}
 	s.nextID++
-	user := User{ID: s.nextID, Email: email, Account: account}
+	user := User{ID: s.nextID, Email: email, Account: account, Language: "ja"}
 	s.users[email] = credentials{user: user, salt: salt, key: key}
 	s.names[user.ID] = user.Account
 	return s.newSession(user), nil
@@ -159,6 +161,29 @@ func (s *Store) Find(ctx context.Context, id int64) (User, bool, error) {
 		}
 	}
 	return User{}, false, nil
+}
+
+func (s *Store) SetLanguage(ctx context.Context, id int64, language string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for email, login := range s.users {
+		if login.user.ID != id {
+			continue
+		}
+		login.user.Language = language
+		s.users[email] = login
+		for token, user := range s.sessions {
+			if user.ID == id {
+				user.Language = language
+				s.sessions[token] = user
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 func (s *Store) Users(ctx context.Context) ([]User, error) {

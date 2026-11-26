@@ -27,6 +27,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	mux.HandleFunc("GET /api/auth/session", s.authenticated(s.session))
 	mux.HandleFunc("POST /api/auth/signout", s.authenticated(s.signOut))
 	mux.HandleFunc("GET /api/user/{user_id}", s.authenticated(s.userProfile))
+	mux.HandleFunc("POST /api/user/set_language", s.authenticated(s.setLanguage))
 
 	mux.HandleFunc("POST /api/live/room/start", s.authenticated(s.startRoom))
 	mux.HandleFunc("POST /api/live/room/setting", s.authenticated(s.updateRoomSettings))

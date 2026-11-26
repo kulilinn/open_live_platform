@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,5 +37,27 @@ func TestUserProfileHTTP(t *testing.T) {
 	if other.Code != http.StatusOK || otherData["id"] != itoa(viewer.User.ID) ||
 		otherData["displayName"] != "Profile Viewer" {
 		t.Fatalf("other = %d %+v", other.Code, other.Body)
+	}
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/user/set_language", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+owner.Token)
+	req.Header.Set("x-loverose-lang", "en")
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var language map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&language); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK || language["status"] != "200" {
+		t.Fatalf("set language = %d %+v", res.StatusCode, language)
+	}
+	me = requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/user/me", owner.Token, nil)
+	if me.Body["data"].(map[string]any)["language"] != "en" {
+		t.Fatalf("language profile = %+v", me.Body)
 	}
 }

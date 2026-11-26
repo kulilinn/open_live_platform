@@ -36,8 +36,8 @@ func (s *Store) SignUp(ctx context.Context, email, password, account string) (au
 	err = tx.QueryRow(ctx, `
 		INSERT INTO users (email, account, password_salt, password_hash)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, email, account`, email, account, salt, key).
-		Scan(&user.ID, &user.Email, &user.Account)
+		RETURNING id, email, account, language`, email, account, salt, key).
+		Scan(&user.ID, &user.Email, &user.Account, &user.Language)
 	if isUniqueViolation(err) {
 		return auth.Session{}, auth.ErrEmailInUse
 	}
@@ -57,9 +57,9 @@ func (s *Store) SignIn(ctx context.Context, email, password string) (auth.Sessio
 	var user auth.User
 	var salt, storedKey []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, email, account, password_salt, password_hash
+		SELECT id, email, account, language, password_salt, password_hash
 		FROM users WHERE email = $1`, auth.NormalizeEmail(email)).
-		Scan(&user.ID, &user.Email, &user.Account, &salt, &storedKey)
+		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &salt, &storedKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.Session{}, auth.ErrInvalidCredentials
 	}
@@ -84,9 +84,9 @@ func (s *Store) SignIn(ctx context.Context, email, password string) (auth.Sessio
 func (s *Store) Lookup(ctx context.Context, token string) (auth.User, bool, error) {
 	var user auth.User
 	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.email, u.account
+		SELECT u.id, u.email, u.account, u.language
 		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token = $1`, token).Scan(&user.ID, &user.Email, &user.Account)
+		WHERE s.token = $1`, token).Scan(&user.ID, &user.Email, &user.Account, &user.Language)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
@@ -109,16 +109,21 @@ func (s *Store) Revoke(ctx context.Context, token string) error {
 func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
 	var user auth.User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, account FROM users WHERE id = $1`, id,
-	).Scan(&user.ID, &user.Email, &user.Account)
+		`SELECT id, email, account, language FROM users WHERE id = $1`, id,
+	).Scan(&user.ID, &user.Email, &user.Account, &user.Language)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
 	return user, err == nil, err
 }
 
+func (s *Store) SetLanguage(ctx context.Context, id int64, language string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET language = $2 WHERE id = $1`, id, language)
+	return err
+}
+
 func (s *Store) Users(ctx context.Context) ([]auth.User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, email, account FROM users ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT id, email, account, language FROM users ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}

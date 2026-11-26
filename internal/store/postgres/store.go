@@ -20,6 +20,9 @@ var roomPasswordsSchema string
 //go:embed migrations/003_room_chat_history.sql
 var roomChatHistorySchema string
 
+//go:embed migrations/004_user_language.sql
+var userLanguageSchema string
+
 type Store struct {
 	pool *pgxpool.Pool
 	// Independent rooms can publish in parallel. Each shard orders local
@@ -45,7 +48,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(733516, 1)"); err != nil {
 			return err
 		}
-		for _, migration := range []string{schema, roomPasswordsSchema, roomChatHistorySchema} {
+		for _, migration := range []string{schema, roomPasswordsSchema, roomChatHistorySchema, userLanguageSchema} {
 			if _, err := tx.Exec(ctx, migration); err != nil {
 				return err
 			}
