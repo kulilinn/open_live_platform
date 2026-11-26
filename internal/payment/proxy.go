@@ -23,10 +23,19 @@ type Proxy struct {
 	billing     *Client
 	borrowAppID string
 	routes      map[string]struct{}
+	finance     bool
 }
 
 func NewProxy(billing *Client, borrowAppID, routes string) (Proxy, error) {
-	proxy := Proxy{billing: billing, borrowAppID: borrowAppID, routes: make(map[string]struct{})}
+	return newProxy(billing, borrowAppID, routes, false)
+}
+
+func NewAdminProxy(billing *Client, routes string) (Proxy, error) {
+	return newProxy(billing, "", routes, true)
+}
+
+func newProxy(billing *Client, borrowAppID, routes string, finance bool) (Proxy, error) {
+	proxy := Proxy{billing: billing, borrowAppID: borrowAppID, routes: make(map[string]struct{}), finance: finance}
 	for _, entry := range strings.Split(routes, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -44,7 +53,7 @@ func NewProxy(billing *Client, borrowAppID, routes string) (Proxy, error) {
 
 func protectedPaymentPath(endpoint string) bool {
 	switch endpoint {
-	case "/api/payment/point/decrease", "/api/payment/point/list", "/api/payment/large_order/create",
+	case "/api/payment/point/add", "/api/payment/point/decrease", "/api/payment/point/list", "/api/payment/large_order/create",
 		"/api/payment/large_order/update", "/api/payment/order/set_bad_debt", "/api/payment/check/edit",
 		"/api/payment/check/get", "/api/payment/large_order/apply", "/api/payment/points/get":
 		return true
@@ -55,7 +64,7 @@ func protectedPaymentPath(endpoint string) bool {
 
 func (p Proxy) Forward(inbound *http.Request, userID int64) (*http.Response, error) {
 	endpoint := inbound.URL.Path
-	if _, allowed := p.routes[inbound.Method+" "+endpoint]; !allowed || inbound.URL.EscapedPath() != endpoint {
+	if !p.Allows(inbound) {
 		return nil, ErrProxyRoute
 	}
 	if p.billing == nil {
@@ -63,7 +72,7 @@ func (p Proxy) Forward(inbound *http.Request, userID int64) (*http.Response, err
 	}
 	uid := strconv.FormatInt(userID, 10)
 	params, err := url.ParseQuery(inbound.URL.RawQuery)
-	if err != nil || claimedOtherUser(params, uid) {
+	if err != nil || (!p.finance && claimedOtherUser(params, uid)) {
 		return nil, ErrProxyInput
 	}
 	upstream := p.billing.host + endpoint
@@ -75,7 +84,7 @@ func (p Proxy) Forward(inbound *http.Request, userID int64) (*http.Response, err
 	if inbound.Method == http.MethodPost {
 		const maxBody = 1 << 20
 		data, err := io.ReadAll(io.LimitReader(inbound.Body, maxBody+1))
-		if err != nil || len(data) > maxBody || !paymentBodyMatchesUser(data, inbound.Header.Get("Content-Type"), uid) {
+		if err != nil || len(data) > maxBody || (!p.finance && !paymentBodyMatchesUser(data, inbound.Header.Get("Content-Type"), uid)) {
 			return nil, ErrProxyInput
 		}
 		// A streamed body prevents the transport from replaying a write.
@@ -93,12 +102,20 @@ func (p Proxy) Forward(inbound *http.Request, userID int64) (*http.Response, err
 	}
 	request.Header.Set("APPID", p.billing.appID)
 	request.Header.Set("USER_ID", uid)
-	request.Header.Set("BORROW_APPID", p.borrowAppID)
+	if !p.finance {
+		request.Header.Set("BORROW_APPID", p.borrowAppID)
+	}
 	response, err := p.billing.client.Do(request)
 	if err != nil {
 		return nil, ErrUnavailable
 	}
 	return response, nil
+}
+
+func (p Proxy) Allows(inbound *http.Request) bool {
+	endpoint := inbound.URL.Path
+	_, allowed := p.routes[inbound.Method+" "+endpoint]
+	return allowed && inbound.URL.EscapedPath() == endpoint
 }
 
 func claimedOtherUser(params url.Values, uid string) bool {

@@ -42,12 +42,13 @@ func (p PageRequest) Window() (page, size, offset int64) {
 
 type UserQuery struct {
 	PageRequest
-	ID         *int64  `json:"id,string"`
-	Nickname   *string `json:"nickName"`
-	Email      *string `json:"email"`
-	Status     *int    `json:"status"`
-	LoginStart *string `json:"loginStartTime"`
-	LoginEnd   *string `json:"loginEndTime"`
+	ID         *int64     `json:"id,string"`
+	Nickname   *string    `json:"nickName"`
+	Email      *string    `json:"email"`
+	Status     *int       `json:"status"`
+	LoginStart *string    `json:"loginStartTime"`
+	LoginEnd   *string    `json:"loginEndTime"`
+	Start, End *time.Time `json:"-"`
 }
 
 type UserRow struct {
@@ -169,8 +170,10 @@ func (b backoffice) registerOperations(mux *http.ServeMux) {
 		if !httpx.Decode(w, r, &query) {
 			return
 		}
-		if query.LoginStart != nil || query.LoginEnd != nil {
-			backofficeError(w, http.StatusUnprocessableEntity, "422", "login history filter unavailable")
+		var ok bool
+		query.Start, query.End, ok = backofficeDateRange(query.LoginStart, query.LoginEnd)
+		if !ok {
+			backofficeError(w, http.StatusBadRequest, "400", "Invalid login time range")
 			return
 		}
 		list, total, err := b.store.BackofficeUsers(r.Context(), query)

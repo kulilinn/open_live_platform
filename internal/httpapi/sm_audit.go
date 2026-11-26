@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -98,6 +99,14 @@ type smPassThrough struct {
 	DataID subscriptionID `json:"dataId"`
 }
 
+type postMediaReviewStore interface {
+	ApplyPostMediaReview(context.Context, int64, int64, string, bool, posts.ReviewDecision, func(context.Context, posts.Post) (string, error)) error
+}
+
+type smMediaRisk struct {
+	Description string `json:"riskDescription"`
+}
+
 func (s postAPI) reviewSMMedia(manual bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpx.RequireToken(w, r, s.options.ReviewToken) {
@@ -107,6 +116,14 @@ func (s postAPI) reviewSMMedia(manual bool) http.HandlerFunc {
 			RequestID string        `json:"requestId"`
 			Risk      string        `json:"riskLevel"`
 			Post      smPassThrough `json:"passThrough"`
+			Details   struct {
+				Texts  []smMediaRisk `json:"texts"`
+				Images []smMediaRisk `json:"images"`
+				Videos []struct {
+					Frames []smMediaRisk `json:"frameDetail"`
+					Audio  []smMediaRisk `json:"audioDetail"`
+				} `json:"videos"`
+			} `json:"details"`
 		}
 		if !decodePost(w, r, &input) {
 			return
@@ -132,6 +149,29 @@ func (s postAPI) reviewSMMedia(manual bool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 		id, owner := int64(input.Post.DataID), int64(input.Post.UserID)
+		if history, ok := s.entries.(postMediaReviewStore); ok {
+			var submit func(context.Context, posts.Post) (string, error)
+			if !manual && decision.Status == posts.Pending && s.options.MediaReviewer.ManualEnabled() {
+				risk := map[string]string{"riskLevel": input.Risk, "riskTextDesc": smMediaDescription(input.Details.Texts),
+					"riskImageDesc": smMediaDescription(input.Details.Images), "riskAudioDesc": "", "riskFrameDesc": ""}
+				if len(input.Details.Videos) > 0 {
+					risk["riskAudioDesc"] = smMediaDescription(input.Details.Videos[0].Audio)
+					risk["riskFrameDesc"] = smMediaDescription(input.Details.Videos[0].Frames)
+				}
+				submit = func(ctx context.Context, post posts.Post) (string, error) {
+					return s.options.MediaReviewer.SubmitManual(ctx, post, risk)
+				}
+			}
+			if err := history.ApplyPostMediaReview(ctx, id, owner, input.RequestID, manual, decision, submit); errors.Is(err, posts.ErrNotFound) {
+				httpx.Error(w, http.StatusNotFound, "post review target not found")
+				return
+			} else if err != nil {
+				postError(w, err)
+				return
+			}
+			smAuditAcknowledged(w)
+			return
+		}
 		matched, err := s.entries.MatchPostReview(ctx, id, owner, input.RequestID, manual)
 		if err != nil {
 			postError(w, err)
@@ -149,6 +189,13 @@ func (s postAPI) reviewSMMedia(manual bool) http.HandlerFunc {
 		}
 		smAuditAcknowledged(w)
 	}
+}
+
+func smMediaDescription(items []smMediaRisk) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return items[0].Description
 }
 
 func smAuditAcknowledged(w http.ResponseWriter) {

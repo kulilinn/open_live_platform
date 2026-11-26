@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/subscription"
 )
 
 const rocketDue = `e.effect=6 AND e.final_result IS NULL AND e.start_at IS NOT NULL
@@ -60,7 +61,7 @@ func (r *roomChange) finishRocket() error {
 	}
 	end = maxTime(effect.Start, end)
 	_, distance, _ := effect.Motion(end)
-	participants, rank, err := readRocketFlightSummary(r.ctx, r.tx, effect.Order.ID)
+	participants, rank, err := readRocketFlightSummary(r.ctx, r.tx, effect.Order.ID, effect.Order.Input.ReceiverID)
 	if err != nil {
 		return err
 	}
@@ -101,7 +102,7 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 
-func readRocketFlightSummary(ctx context.Context, tx pgx.Tx, orderID int64) (int64, []map[string]any, error) {
+func readRocketFlightSummary(ctx context.Context, tx pgx.Tx, orderID, anchorID int64) (int64, []map[string]any, error) {
 	var count int64
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM room_rocket_contributions WHERE order_id=$1`, orderID).Scan(&count); err != nil {
 		return 0, nil, err
@@ -112,12 +113,28 @@ func readRocketFlightSummary(ctx context.Context, tx pgx.Tx, orderID int64) (int
 	if err != nil {
 		return 0, nil, err
 	}
-	rank, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (map[string]any, error) {
-		var actor, score, combo, critical int64
-		var name, photo string
-		err := row.Scan(&actor, &name, &photo, &score, &combo, &critical)
-		return map[string]any{"id": strconv.FormatInt(actor, 10), "name": name, "photo": photo, "contribute": score,
-			"max_combo": combo, "max_critical_strike": critical, "platform_level": 0, "fan_level": 0}, err
+	type contribution struct {
+		actor                  int64
+		name, photo            string
+		score, combo, critical int64
+	}
+	ranked, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (contribution, error) {
+		var c contribution
+		err := row.Scan(&c.actor, &c.name, &c.photo, &c.score, &c.combo, &c.critical)
+		return c, err
 	})
-	return count, rank, err
+	if err != nil {
+		return 0, nil, err
+	}
+	rank := make([]map[string]any, 0, len(ranked))
+	for _, c := range ranked {
+		platform, fan, err := subscriptionExperience(ctx, tx, c.actor, anchorID)
+		if err != nil {
+			return 0, nil, err
+		}
+		platformLevel, fanLevel := subscription.ExperienceLevels(platform, fan)
+		rank = append(rank, map[string]any{"id": strconv.FormatInt(c.actor, 10), "name": c.name, "photo": c.photo, "contribute": c.score,
+			"max_combo": c.combo, "max_critical_strike": c.critical, "platform_level": platformLevel, "fan_level": fanLevel})
+	}
+	return count, rank, nil
 }

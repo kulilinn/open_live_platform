@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"open_live_platform/internal/admin"
 )
@@ -77,6 +78,21 @@ func TestPostgresPlatformAccessAndWithdrawalSettings(t *testing.T) {
 	}
 	if got := get(); got != 200 {
 		t.Fatal(got)
+	}
+	now := time.Now().UTC()
+	period := object{"startTimeToday": now.Add(-time.Hour).Format(time.RFC3339), "endTimeToday": now.Add(time.Hour).Format(time.RFC3339)}
+	var stats admin.PlatformStats
+	api.call(t, "/api/operation/platform/statistic/index", period, 200, &stats)
+	if stats.Users != 1 || stats.NewUsers != 1 || stats.Logins != 1 || stats.Online != 1 {
+		t.Fatalf("platform stats: %+v", stats)
+	}
+	var list struct {
+		Total int
+		List  []struct{ LastLoginTime *time.Time }
+	}
+	api.call(t, "/api/operation/usermanage/user/page", object{"loginStartTime": period["startTimeToday"], "loginEndTime": period["endTimeToday"]}, 200, &list)
+	if list.Total != 1 || list.List[0].LastLoginTime == nil {
+		t.Fatalf("login activity: %+v", list)
 	}
 	api.call(t, black+"setips", object{"content": "192.0.2.1"}, 200, nil)
 	if got := get(); got != 401 {

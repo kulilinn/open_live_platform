@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_DB: open_live_platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "platform", "-d", "open_live_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  platform:
+    build: .
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with hostname postgres}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      RELAY_SECRET: ${RELAY_SECRET:?Set RELAY_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthchecker"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 20s
+
+volumes:
+  postgres:

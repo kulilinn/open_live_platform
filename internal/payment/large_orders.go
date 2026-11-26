@@ -16,14 +16,22 @@ import (
 type LargeOrderConfig struct {
 	Region, NotificationURL, FromAddress, FromName string
 	TemplateCN, TemplateTW, TemplateJP, TemplateEN string
+	ConfirmationTemplate                           string
 }
 
 type LargeOrderService struct {
-	billing                        *Client
-	region, notification, template string
-	from                           orderEmailAddress
-	client                         *http.Client
+	billing *Client
+	region  string
+	orderNotification
 }
+
+type orderNotification struct {
+	notification, template string
+	from                   orderEmailAddress
+	client                 *http.Client
+}
+
+type LargeOrderConfirmation struct{ orderNotification }
 
 type LargeOrderStore interface {
 	ReserveLargeOrder(ctx context.Context, userID int64, key string) (newAttempt, complete bool, err error)
@@ -53,13 +61,32 @@ func NewLargeOrderService(billing *Client, config LargeOrderConfig) (*LargeOrder
 	case "JP":
 		template = config.TemplateJP
 	}
+	notification, err := newOrderNotification(config, template)
+	if err != nil || billing == nil {
+		return nil, errors.New("large-order configuration requires payment, notification, sender, and the region's template")
+	}
+	return &LargeOrderService{billing: billing, region: region, orderNotification: notification}, nil
+}
+
+func NewLargeOrderConfirmation(config LargeOrderConfig) (*LargeOrderConfirmation, error) {
+	if config.ConfirmationTemplate == "" {
+		return nil, nil
+	}
+	notification, err := newOrderNotification(config, config.ConfirmationTemplate)
+	if err != nil {
+		return nil, err
+	}
+	return &LargeOrderConfirmation{notification}, nil
+}
+
+func newOrderNotification(config LargeOrderConfig, template string) (orderNotification, error) {
 	parsed, err := url.Parse(config.NotificationURL)
 	address, mailErr := mail.ParseAddress(config.FromAddress)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil ||
-		mailErr != nil || template == "" || billing == nil {
-		return nil, errors.New("large-order configuration requires payment, notification, sender, and the region's template")
+		mailErr != nil || template == "" {
+		return orderNotification{}, errors.New("invalid large-order notification configuration")
 	}
-	return &LargeOrderService{billing: billing, region: region, notification: config.NotificationURL, template: template,
+	return orderNotification{notification: config.NotificationURL, template: template,
 		from: orderEmailAddress{Address: address.Address, Name: config.FromName}, client: &http.Client{
 			Timeout:       5 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -84,6 +111,14 @@ type orderEmailAddress struct {
 }
 
 func (s *LargeOrderService) Notify(ctx context.Context, email, displayName, searchName string) error {
+	return s.send(ctx, email, displayName, map[string]string{"nick_name": displayName, "search_name": searchName, "email": email})
+}
+
+func (s *LargeOrderConfirmation) Notify(ctx context.Context, email, displayName, searchName, order string) error {
+	return s.send(ctx, email, displayName, map[string]string{"nick_name": displayName, "search_name": searchName, "description": order})
+}
+
+func (s orderNotification) send(ctx context.Context, email, displayName string, fields map[string]string) error {
 	address, err := mail.ParseAddress(email)
 	if err != nil || address.Address != email {
 		return errors.New("invalid large-order receipt email")
@@ -91,7 +126,7 @@ func (s *LargeOrderService) Notify(ctx context.Context, email, displayName, sear
 	inner, err := json.Marshal(map[string]any{
 		"template_key": s.template, "track_clicks": true, "track_opens": true, "from": s.from,
 		"to":         []map[string]orderEmailAddress{{"email_address": {Address: email, Name: displayName}}},
-		"merge_info": map[string]string{"nick_name": displayName, "search_name": searchName, "email": email},
+		"merge_info": fields,
 	})
 	if err != nil {
 		return err
@@ -100,11 +135,12 @@ func (s *LargeOrderService) Notify(ctx context.Context, email, displayName, sear
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.notification, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.notification, io.NopCloser(bytes.NewReader(body)))
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.ContentLength = int64(len(body))
 	response, err := s.client.Do(request)
 	if err != nil {
 		return err

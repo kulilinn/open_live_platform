@@ -71,7 +71,7 @@ func (s *Service) initializeCards(ctx context.Context, existing map[uint32]Card,
 func (s *Service) refreshCards(ctx context.Context, existing map[uint32]Card, available map[uint32]struct{}, block string) error {
 	candidates := make([]Card, 0)
 	for _, card := range existing {
-		if _, found := available[card.ID]; !found && card.Status != 1 {
+		if _, found := available[card.ID]; !found && (card.Status != 1 || card.Address == "") {
 			candidates = append(candidates, card)
 		}
 	}

@@ -12,16 +12,17 @@ import (
 )
 
 type LegacyAccount struct {
-	ID                  int64
-	Email, LoginEmail   string
-	Account, Language   string
-	TranslationLanguage string
-	TranslationEnabled  bool
-	Password            string
-	Status              int
-	LimitUntil          int64
-	ViolationID         int64
-	Profile             auth.Profile
+	ID                   int64
+	Email, LoginEmail    string
+	Account, Language    string
+	TranslationLanguage  string
+	TranslationEnabled   bool
+	Password             string
+	Status               int
+	LimitUntil           int64
+	ViolationID          int64
+	Profile              auth.Profile
+	CreatedAt, LastLogin *time.Time
 }
 
 type LegacyViolationRecord struct {
@@ -85,21 +86,26 @@ func (s *Store) ImportLegacyAccountSnapshot(ctx context.Context, rows iter.Seq2[
 			}
 			tag, err := tx.Exec(ctx, `
 				INSERT INTO users(id,email,account,language,trans_lang,trans_enabled,password_salt,password_hash,livemedia_imported,profile,
-					account_status,account_limit_until,account_violation_id,legacy_profile_email)
-				VALUES ($1,NULLIF($2,''),$3,$4,$5,$6,''::bytea,$7,true,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING`,
+					account_status,account_limit_until,account_violation_id,legacy_profile_email,created_at)
+				VALUES ($1,NULLIF($2,''),$3,$4,$5,$6,''::bytea,$7,true,$8,$9,$10,$11,$12,coalesce($13,now())) ON CONFLICT DO NOTHING`,
 				row.ID, email, row.Account, row.Language, row.TranslationLanguage, row.TranslationEnabled, []byte(row.Password), row.Profile,
-				row.Status, row.LimitUntil, row.ViolationID, row.Email)
+				row.Status, row.LimitUntil, row.ViolationID, row.Email, row.CreatedAt)
 			if err != nil {
 				return fmt.Errorf("import user %d: %w", row.ID, err)
+			}
+			if row.LastLogin != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO user_login_activity(user_id,last_login_at) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET last_login_at=greatest(user_login_activity.last_login_at,excluded.last_login_at)`, row.ID, row.LastLogin); err != nil {
+					return err
+				}
 			}
 			if tag.RowsAffected() == 1 {
 				counts.Imported++
 				continue
 			}
 			var imported bool
-			err = tx.QueryRow(ctx, `UPDATE users SET account_status=$3,account_limit_until=$4,account_violation_id=$5,legacy_profile_email=$6
+			err = tx.QueryRow(ctx, `UPDATE users SET account_status=$3,account_limit_until=$4,account_violation_id=$5,legacy_profile_email=$6,created_at=coalesce($7,created_at)
 				WHERE id=$1 AND email IS NOT DISTINCT FROM NULLIF($2,'') AND livemedia_imported RETURNING livemedia_imported`,
-				row.ID, email, row.Status, row.LimitUntil, row.ViolationID, row.Email).Scan(&imported)
+				row.ID, email, row.Status, row.LimitUntil, row.ViolationID, row.Email, row.CreatedAt).Scan(&imported)
 			if errors.Is(err, pgx.ErrNoRows) || (err == nil && !imported) {
 				return fmt.Errorf("target account conflicts with source user %d", row.ID)
 			}

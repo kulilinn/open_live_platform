@@ -6,11 +6,11 @@
 
 ## 当前架构
 
-- `cmd/platform` 只负责信号处理和启动。
+- `cmd/platform` 启动服务、处理退出信号，也提供 Wallet 签发命令 `create_pass`。
 - `internal/app` 负责配置、状态组装、路由注册和优雅停机。
 - `internal/auth` 和 `internal/live` 定义账号与房间接口，并提供本地开发用的内存实现。
 - `internal/store/postgres` 用 pgx 连接 PostgreSQL，保存账号、会话、房间状态和聊天记录。
-- `internal/httpapi`、`internal/admin`、`internal/edge` 只负责 HTTP 适配。
+- `internal/httpapi` 处理公开接口，`internal/admin` 处理独立运营和 MCN 后台，`internal/edge` 负责边缘入口和 Kafka 通知消费。
 - `internal/transport/httpx` 提供共享 JSON、错误、认证和路径工具。
 - `internal/relay` 提供 WebSocket 适配。
 - `api/platform/v1/platform.proto` 定义内部 gRPC 接口。
@@ -25,6 +25,20 @@ $env:EDGE_TOKEN='edge'
 $env:RELAY_SECRET='dev-secret'
 go run .\cmd\platform
 ```
+
+### 容器部署
+
+`docker build -t open-live-platform .` 构建 Linux 镜像，默认构建工具链为 Go 1.24.13。可用 `--build-arg GO_VERSION=<版本>` 选择其他工具链。镜像以非 root 用户运行一个 `platform` 进程，启动时连接 PostgreSQL 并应用内置迁移。通过部署系统注入 `DATABASE_URL`、`JWT_SECRET` 和 `RELAY_SECRET`。已有会话迁移使用旧服务的签名密钥。部署配置和凭据文件可在运行时只读挂载，容器内用户 `65532` 需要对应的读取权限。
+
+```sh
+docker run --rm --name open-live-platform --stop-timeout 20 \
+  --env DATABASE_URL --env JWT_SECRET --env RELAY_SECRET \
+  --publish 127.0.0.1:8080:8080 open-live-platform
+```
+
+默认只发布 `8080` 上的 HTTP 和 WebSocket。gRPC 默认在容器内回环地址监听，切换到 `PLATFORM_GRPC_ADDR` 指定的私网地址后，访问范围由部署网络控制。运营、MCN 和指标端口按需在私网启用。运营和 MCN 启用时还要设置 `ADMIN_ACCOUNTS_FILE`。健康检查使用 `GET /healthchecker`，`SIGTERM` 触发服务和后台任务的退出流程。
+
+本地验证可配置 `POSTGRES_PASSWORD`、`DATABASE_URL`、`JWT_SECRET` 和 `RELAY_SECRET` 后运行 `docker compose up --build`。`DATABASE_URL` 使用 Compose 服务名 `postgres`、账号 `platform` 和数据库 `open_live_platform`。连接串中的密码需要按 URL 规则编码。本地 Compose 数据保存在命名卷中。生产部署使用自己的 PostgreSQL 连接、证书和备份配置。
 
 ## 核心接口
 
@@ -84,11 +98,13 @@ go run .\cmd\platform
 
 配置 `NFT_CATALOG_FILE` 指向包含 `cards`、`privileges`、`adorns` 数组的可信 JSON 目录。各项使用相应 API 的驼峰字段名，装扮目录另可配置 `effectTime` 和 `floatingScreenTime`。公共卡目录按状态筛选并隐藏大部分购买钱包地址。设置 `WEB3_HTTP` 和 `WEB3_CONTRACT_ADDRESS` 后，绑定核验以太坊签名及链上所有者。挑战绑定当前登录账号，五分钟有效，成功后只能使用一次。绑定状态和装扮保存到配置的 PostgreSQL，用户自查资料返回自己的绑定和装备。未上传头像的用户沿用 `USER_PHOTO_DEFAULT` 或 `USER_NFT_PHOTO_DEFAULT`。查询个人绑定或尝试装备时复核链上转移。
 
-旧绑定可在导入账号后用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL`、`WEB3_HTTP`、`WEB3_CONTRACT_ADDRESS` 运行 `go run ./cmd/import-live-nft`。导入会核验原钱包仍持有对应卡片、保留有效装备，并尊重新库已经发生的解绑或转移。配置库存钱包地址 `WEB3_ACCOUNT` 和 `NFT_SYNC_TOKEN` 后，部署调度器可用该 Bearer 凭证调用 `/api/nft/creation_card/schedule_refresh`。只有在同一最终确认区块上同时确认卡片离开库存钱包并核实新所有者，服务才更新出售状态。可信目录另可包含 `inventory` 元数据数组，`/api/nft/creation_card/init_data_20250523` 从中加入链上已持有但尚未列出的卡片。两个入口均只读取区块链。
+旧绑定可在导入账号后用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL`、`WEB3_HTTP`、`WEB3_CONTRACT_ADDRESS` 运行 `go run ./cmd/import-live-nft`。导入会核验原钱包仍持有对应卡片、保留有效装备，并尊重新库已经发生的解绑或转移。源库存在 `nft_creation_cards` 时，同一命令还会导入创世卡库存、销售状态、预订与历史时间，保留目标库已有的编辑。配置库存钱包地址 `WEB3_ACCOUNT` 和 `NFT_SYNC_TOKEN` 后，部署调度器可用该 Bearer 凭证调用 `/api/nft/creation_card/schedule_refresh`。只有在同一最终确认区块上同时确认卡片离开库存钱包并核实新所有者，服务才更新出售状态。可信目录另可包含 `inventory` 元数据数组，`/api/nft/creation_card/init_data_20250523` 从中加入链上已持有但尚未列出的卡片。两个入口均只读取区块链。
 
 主播收益包含已确认的普通直播礼物、帖子解锁和打赏，以及导入的原 `settle_orders`。使用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL` 运行 `go run ./cmd/import-live-settlements` 可读取原 MySQL 的结算记录，多次导入同一记录不会重复计入。收益接口仅允许登录用户读取自己的账目。内部 `GET /api/earning/living_anchor_list` 要求 `EDGE_TOKEN` 的 Bearer 凭证，以及 `admin`、`mcn` 或 `innow` 的 `X-Inner-Service`。
 
-主播申请在 `/anchor/api/become_anchor` 提交。运营后台通过 `/api/operation/business/anchorreview/page` 查看申请，按权限调用 `pass` 或 `reject`，状态由 `/anchor/api/is_anchor` 返回。通过审核后同步主播标记、房间 ID 和原默认订阅计划。公开的主播资料隐藏住址和姓氏；资料审核沿用 `POST_AUDIT_URL`，审核服务无法确认时拒绝相关资料的修改。配置 `SUMSUB_URL`、`SUMSUB_APP_TOKEN`、`SUMSUB_SECRET_KEY`、`SUMSUB_LEVEL` 后可申请身份核验令牌，服务只采纳 Sumsub 返回的同一申请人核验结果。身份材料由核验服务保管。
+主播通过 `/anchor/api/become_anchor` 提交申请。运营后台按权限查看申请及身份资料，批准、拒绝或取消主播资格。通过审核后同步主播标记、房间 ID 及默认订阅计划。取消会关闭直播、撤销订阅权益、隐藏主播帖子并清除身份资料，已确认的财务凭证保留对账。用户可重新申请。新账号也可以从运营后台的 `/api/test/batch_signup` 按原请求批量创建，此入口要求运营权限。
+
+公开主播资料隐藏身份证件和住址。运营专用的 `anchorreview/detail`、`kyc_detail` 和 `kyc_page` 从 PostgreSQL 读取用户提交的身份表单。配置 `SUMSUB_URL`、`SUMSUB_APP_TOKEN`、`SUMSUB_SECRET_KEY` 和 `SUMSUB_LEVEL` 后，服务向 Sumsub 申请核验令牌，只有供应商确认同一申请人通过时才更新核验状态。公开资料的内容审核使用 `POST_AUDIT_URL`。旧库的 `anchor_users` 和 `anchor_users_kyc` 在账号导入后由 `go run ./cmd/import-live-history` 读取，复跑保留新库内的审核修改和取消决定。
 
 推广渠道报表沿用 `/anchor/api/stat/day`、`stat/total`、`game/income`。设置 `ANCHOR_CHANNEL_ACCESS_FILE`，文件为包含 `channel`、`keyHash`（Bearer 密钥的 SHA-256 十六进制摘要）和 `expiresAt`（RFC 3339 时间）的 JSON 数组。使用 `go run ./cmd/import-live-anchor-channels` 从 `LIVEMEDIA_MYSQL_DSN` 的渠道账号、积分消费及推广分成表导入 PostgreSQL，报表读取最近一次完整导入。金额换算沿用 `LP_TO_DOLLAR`，默认 10 积分。硬件收益及结算沿用旧服务固定为零的响应。旧的测试入口及无需授权的主播删除入口未启用。
 
@@ -102,7 +118,13 @@ go run .\cmd\platform
 
 设置只读 `LIVEMEDIA_MYSQL_DSN`、目标 `DATABASE_URL` 与 `ADMIN_ACCOUNTS_FILE`，首次切换时执行 `go run ./cmd/import-live-backoffice`。原运营和 MCN 表分属不同数据库时，分别使用 `-area admin` 和 `-area mcn`。导入按租户或机构保留账号 ID、可识别的 Argon2id 凭据、停用与删除状态、角色、菜单与授权关系，输出跳过条目和无法使用的旧散列数量。同一区域的成功导入有持久记录，重复执行返回已有条目数，线上权限撤销持续有效。
 
-运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。运营可编辑主播房间的标签，业务侧房间和主播资料立即读取新标签。礼物列表、详情、新增、编辑及下架共用 PostgreSQL 目录覆盖，公开目录和后续礼物购买读取已保存的版本，已保留订单继续按原报价处理。`finance-admin` 租户可分页查询已确认的普通直播礼物流水。登录历史筛选、主播警告投递、其他结算类别和财务写操作仍依赖原后台服务。
+运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。运营可编辑主播房间的标签，业务侧房间和主播资料立即读取新标签。礼物列表、详情、新增、编辑及下架共用 PostgreSQL 目录覆盖，公开目录和后续礼物购买读取已保存的版本，已保留订单继续按原报价处理。`finance-admin` 租户可分页查询已确认的普通直播礼物流水。
+
+财务加减点、大额订单入账和坏账登记使用 `PAYMENT_HOST` 上的支付服务。Go 在发送前保存操作编号，在收到上游确认后记录凭证。使用相同 `Idempotency-Key` 重试会读取已保存的结果。大额入账和坏账登记还按支付订单号去重。若返回 `202`，请保留 `X-Finance-Attempt` 编号用于对账。同一操作在结果未知时保持待核对状态。坏账记录保留原始扣款凭证，并按上游回传的交易编号、交易金额和用户核对后供财务与解约清算使用。日充值报表读取导入的原 `order_statistic_data`，点数历史包含导入的 `admin_modify_point_log` 和新确认的财务操作。二次确认邮件需要配置 `PAYMENT_LARGE_ORDER_CONFIRM_TEMPLATE` 和支付通知服务。
+
+私有后台 `/api/payment/{path}` 支持原有 GET 和 POST。通过 `PAYMENT_ADMIN_PROXY_ROUTES` 配置可用的上游方法和路径，格式与 `PAYMENT_PROXY_ROUTES` 相同。财务租户和权限验证在转发之前完成，服务向支付提供方传递当前财务操作员的 `USER_ID`。预留的加减点、大额入账和坏账请求使用各自的财务入口。
+
+运营的 `/api/operation/nft/creation_card` 支持库存分页、编辑、批量开售时间，以及绑卡与解绑。绑卡通过配置的区块链 RPC 核验钱包仍持有该卡片，变更归属、装备和历史记录在同一事务提交。四个写入接口可传 `Idempotency-Key`，跨副本重试使用相同的键和请求内容。
 
 MCN 的主播申请、编辑、审核与开通按机构隔离，经纪人只能修改自己负责的申请。配置 `MCN_STREAMER_JOIN_URL` 为 MCN 监听或网关上的 `/api/mcn/streamer/join` 链接前缀后，审核通过会向主播发站内邀请。配置 `MAIL_SMTP_*` 后，由服务通过 SMTP 发送同一邀请链接。主播使用七天内的一次性链接同意后，机构管理员可开通账号。开通保存机构归属和审计记录。
 
@@ -114,7 +136,7 @@ MCN 后台的机构概览、入驻状态、消息和直播统计按机构隔离�
 
 机构管理员可刷新日、月统计。日统计以已结束直播的账目和观众记录计算，月统计汇总保留的日报与历史分成比例。财务刷新会保存报表快照。实际扣款、坏账、解约清算和提现各按原有账目与凭证处理。登录、邀请同意和开通事件在 Go 中写入 MCN 消息，旧消息没有可靠机构归属时留在原库。
 
-可用 `python scripts/audit_rust_backoffice_routes.py <LiveMedia目录> --verbose` 核对 Rust 后台路由。原源码的两个独立服务在 `/api` 下分别注册 143 个运营路径及 60 个 MCN 路径。支付和财务后台仍存在依赖独立供应商的业务，需逐条按实际挂载和服务依赖核对。
+可用 `python scripts/audit_rust_backoffice_routes.py <LiveMedia目录> --verbose` 展开原路由，加 `--fixtures internal/app/testdata` 更新 Go 测试清单。原客户端及回调共 281 组方法和路径，受信用户服务及调度共 9 组，独立运营和 MCN 服务分别有 146 和 61 组。运营支付通配入口同时接受 GET 与 POST。回归测试验证每个请求匹配预期路由，业务结果由各模块另行验证。
 
 ## 内部 gRPC
 
@@ -213,7 +235,11 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 
 设置 `POST_AUDIT_URL` 会将帖子和评论提交审核，可用 `POST_AUDIT_TOKEN` 传入 Bearer 凭证。审核服务接受 `kind`、`user_id`、`post_id`、`text` 和可选 `media`，以 HTTP 200 返回 `pass_status`，其中 1 为待审、2 为拒绝、3 为通过。设置 `POST_AUDIT_REQUIRED=true` 可让未接入审核服务的新帖子待审。配置 `POST_REVIEW_TOKEN` 后，审核服务可持该 Bearer 凭证调用 `POST /internal/anchor-post/review`，传入 `post_id` 和最终 `pass_status`。待审和拒绝的帖子只对作者可见。未开启审核时新帖子直接发布。
 
-审核适配服务可返回 `request_id` 和 `manual_request_id`，用于原 `/sm/media/callback`、`/sm/media_manual/callback` 和针对帖子评论的 `/sm/static/callback`。这些回调要求 `POST_REVIEW_TOKEN`，且请求 ID 与审核对象要和提交时一致。公共聊天审核仍用用户自己的令牌调用 `POST /sm/public_chat/audit`。数美实时音视频审核需要另接生产环境的场次管理。
+审核适配服务可返回 `request_id` 和 `manual_request_id`，用于原 `/sm/media/callback`、`/sm/media_manual/callback` 和针对帖子评论的 `/sm/static/callback`。这些回调要求 `POST_REVIEW_TOKEN`，且请求 ID 与审核对象要和提交时一致。公共聊天审核仍用用户自己的令牌调用 `POST /sm/public_chat/audit`。
+
+配置 `SM_MEDIA_URL`、`SM_ACCESS_KEY`、`SM_APPID` 和 `SM_CALLBACK_URL` 可将新帖子中的文本、图片和视频直接提交数美融媒体审核。配置 `SM_MANUAL_MEDIA_URL` 后，匹配的 `REVIEW` 回调会按原协议转人工审核并保存人工请求 ID。只有与对应阶段及帖子作者匹配的回调才会修改状态，审核结果保存在 PostgreSQL。其他内容仍使用各自的审核服务配置。
+
+直播实时审核可配置 `SM_AUDIT_SWITCH=true`、`SM_ACCESS_KEY`、`SM_APPID`、`SM_VIDEO_STREAM_EVENT_ID`、`SM_VIDEO_STREAM_URL`、`SM_CLOSE_VIDEO_STREAM_URL` 和 `SM_CALLBACK_URL`。服务使用已有 Agora 配置创建订阅者令牌，按直播场次向数美开启和停止检测。可信回调网关需要为 `/sm/video_stream/callback` 和 `/sm/live/callback` 加上 `SM_LIVE_REVIEW_TOKEN` 的 Bearer 凭证。人工回调需要在 `data.streamId` 或 `requestId` 中关联该场的数美请求 ID。可用 `SM_LIVE_RULES_FILE` 将运营规则存为以 `groupchat:风险一级:风险二级:风险三级` 为键的对象，对象值包含 `status`、`intercept` 和 `subject`。被启用且拦截的 `REJECT` 规则会限制当前场次。审核任务、已识别回调和违规记录保存在 PostgreSQL。已用本机 HTTP 模拟回归数美协议，生产回调网关和 Agora 媒体链路仍需使用批准的环境验证。
 
 已发布的帖子会在符合可见条件的有效订阅者的站内列表中生成通知。顶层评论、有效点赞和确认后的打赏会通知作者，审核拒绝通知对应内容的作者。相同审核回调、点赞和订单重试沿用已保存的通知。部署可通过原站内通知列表查看，外部 Web Push 仍需另接。
 
@@ -344,13 +370,15 @@ PostgreSQL 模式可通过 `USE_LIVEROOM_BOT` 与 `LIVEROOM_BOT_FILE` 开启陪�
 ```json
 {
   "accounts": [{"id":"200001","locale":"ja"}],
-  "scripts": {"ja":{"welcome":["ようこそ"],"gifts":{"1":["プレゼントありがとう"]}}}
+  "scripts": {"ja":{"welcome":["ようこそ"],"daily":["こんばんは"],"gifts":{"1":["プレゼントありがとう"]}}}
 }
 ```
 
 机器人在公开房间开播后加入，每房间最多一个，账号一次只在一个房间中。持有已绑定创世神卡的观众进房时触发欢迎语。本场礼物成功结算且总点数达到 `BOT_GIFT_PRICE`（默认 100）时按礼物类型触发回复。机器人用自己的账号发送普通房间聊天，消息进入直播推送和历史。
 
-本地文件可设置 `room_population`（加机器人前的观众上限，默认 20），以及 `entry_seconds`、`stay_seconds`、`welcome_delay_seconds`、`gift_delay_seconds`（分别默认 30、600、180、1 秒）。关播、踢出机器人或机器人离房会清理该账号的待发消息。Go 可读取本地文件或 etcd 的 Luban 权重表。自动点赞、日常闲聊和原 Redis 账号池仍待迁移。
+本地文件可设置 `room_population`（加机器人前的观众上限，默认 20），以及 `entry_seconds`、`stay_seconds`、`welcome_delay_seconds`、`gift_delay_seconds`（分别默认 30、600、180、1 秒）。机器人在本次停留内到达 `like_delay_seconds` 时点赞一次，通过 H5 发送 `Z` 通知。省略该项时按 Rust 的 600–1199 秒范围选择，停留时间短于点赞延时的机器人会先离场。设置 `DAILY_CHAT_OPEN=1` 后，机器人进房约 5 秒开始发闲聊语句，之后按 `daily_delay_seconds` 或旧版延时规则继续。etcd 模式沿用 `robot_like_time`、`robot_daily_time` 和按语言选词的 `robot_daily_text`。关播、踢出机器人或离房会同时释放账号和清理待发动作。
+
+迁移 Redis 账号池前先导入对应的用户并停用旧 Rust 聊天机器人调度器。用分片 0 的只读 `REDIS_URL` 运行 `uv run --script scripts/export_legacy_room_bots.py` 保存 JSONL，再把该文件通过标准输入交给配置了 `DATABASE_URL` 的 `go run ./cmd/import-live-room-bots`。导出读取 `robot:{0}:idle` 和 `robot:{0}:inuse`，导入保留两组现有用户，报告目标库缺失的账号。旧版的占用时间和房间成员关系在切换时结束，Go 用 PostgreSQL 建立新租约。所有 Go 副本设置 `USE_LIVEROOM_BOT` 与 `LIVEROOM_BOT_DB_POOL=1` 后使用同一个数据库账号池。Luban 或本地文件的账号定义提供对应语言，缺失时使用 `ja`。
 
 ## 直播点赞、结算和举报
 
@@ -387,7 +415,13 @@ PostgreSQL 模式支持旧的 `POST /api/date/give/gifts`。只有当前约会�
 
 基础商品的 `effectControlType` 为 6 时发送火箭，为 7 时购买加油。支付请求使用目录单价，服务在发起扣款前按奖池余额与运营权重为本次加油预留全部奖品。支付确认后一次写入奖池变动、平台收益、按实际奖品结算的主播收益、贡献排行和延长后的飞行时间。支付拒绝释放预留。上游支付超时时，订单和预留保持待核对状态，同一个 `Idempotency-Key` 可查询结果或待核对状态。最后可读取已持久化的火箭结算数据。
 
-`ROCKET_REFUEL_DURATION_CONFIG` 控制距离结束至少多少秒才可购买加油，默认 3 秒。根据点赞增加火箭速度的系数取 `ROCKET_LIKE_SPEED_COEFFICIENT`。当前付费加油使用目录基础价。活动折扣配额、额外公告和经验等级联动待接入。
+`ROCKET_REFUEL_DURATION_CONFIG` 控制距离结束至少多少秒才可购买加油，默认 3 秒。根据点赞增加火箭速度的系数取 `ROCKET_LIKE_SPEED_COEFFICIENT`。抽中的 `platform_exp` 计入送礼人的平台经验，与确认的扣款一同影响等级。运营可在 `ROCKET_CONFIG_FILE` 的 `notices` 中填入原 `rocket_notice_config` 的 `notice_type`、`config_condition`、`live_room_flag`、`horse_race_lamp_flag`、`content` 和字符串 `broadcast_config_id`。暴击帧 5 使用高于抽中倍数的最近阈值，直播间连击帧 18 要求累计连击命中阈值且 `live_room_flag=0`。启用跑马灯的连击使用运营后台已存在的广播配置，推送给同应用的 H5 连接。
+
+### 限量礼物与主播直播收益
+
+在运营后台 `/api/operation/gifts/` 管理 `activity`、`product` 限购模板、`gift_box`、`gift_shortcut`。1vN 送礼使用启用且在有效期内的 `limit_id` 按 `discountPrice × quantity` 扣款，`discountIncome` 按订单计入主播收益。和 Rust 一样，数量不能超过配置的单次限值，每笔确认成功的订单在配置窗口内计入一份用户和平台用量。待确认支付占用额度，明确被拒绝后可再次购买。导入已有受限促销时，需要 `usedByUser`、`usedPlatform` 中适用的历史计数以及 `discountIncome`，否则该促销无法结算。上线时从旧 Redis 保存实际配额，初始 JSON 用 `GIFT_INTERACTION_FILE` 导入，之后后台更新由 PostgreSQL 统一生效。
+
+为调度端配置单独的 `LIVE_INCOME_SCHEDULE_TOKEN`，每天使用 Bearer 凭证请求 `GET /schedule/statistic/streamer_live_income`。任务汇总上一完整 UTC 日内已结算的直播直送礼物、火箭奖品及转盘收益，扣除已确认坏账。财务后台 `POST /api/finance/purchase/streamer_live_income` 可按主播、机构和开播时间查询日报。已导入的原 `anchor_live_income_statistic` 也可查询。Go 订阅账没有直播场次标识，无法把这部分订阅收入计入某场直播日报。
 
 ## PostgreSQL
 

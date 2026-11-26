@@ -3,6 +3,7 @@ package app
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"open_live_platform/internal/gift"
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/liveaudit"
 	"open_live_platform/internal/livebot"
 	"open_live_platform/internal/notice"
 	"open_live_platform/internal/observability"
@@ -65,6 +67,7 @@ type Config struct {
 	PostAuditToken             string
 	PostAuditRequired          bool
 	PostReviewToken            string
+	LiveAudit                  liveaudit.Config
 	RoomBots                   livebot.Config
 	roomBotsConfigError        error
 	FeedbackHook               string
@@ -78,6 +81,7 @@ type Config struct {
 	Addr                       string
 	GRPCAddr                   string
 	AdminToken                 string
+	LiveIncomeScheduleToken    string
 	AdminAddr                  string
 	MCNAdminAddr               string
 	MCNJoinURL                 string
@@ -108,6 +112,7 @@ type Config struct {
 	PaymentAppID               string
 	PaymentBorrowAppID         string
 	PaymentProxyRoutes         string
+	PaymentAdminProxyRoutes    string
 	LargeOrders                payment.LargeOrderConfig
 
 	AnchorAwayTimeout time.Duration
@@ -146,6 +151,7 @@ func ConfigFromEnv() Config {
 		PostAuditToken:             os.Getenv("POST_AUDIT_TOKEN"),
 		PostAuditRequired:          postAuditRequired,
 		PostReviewToken:            os.Getenv("POST_REVIEW_TOKEN"),
+		LiveAudit:                  liveAuditFromEnv(),
 		RoomBots:                   bots,
 		RocketLikeSpeedCoefficient: rocketSpeed,
 		RocketConfigFile:           os.Getenv("ROCKET_CONFIG_FILE"),
@@ -160,6 +166,7 @@ func ConfigFromEnv() Config {
 		Addr:                       env("PLATFORM_ADDR", ":8080"),
 		GRPCAddr:                   os.Getenv("PLATFORM_GRPC_ADDR"),
 		AdminToken:                 adminToken,
+		LiveIncomeScheduleToken:    os.Getenv("LIVE_INCOME_SCHEDULE_TOKEN"),
 		AdminAddr:                  os.Getenv("PLATFORM_ADMIN_ADDR"),
 		MCNAdminAddr:               os.Getenv("PLATFORM_MCN_ADMIN_ADDR"),
 		MCNJoinURL:                 os.Getenv("MCN_STREAMER_JOIN_URL"),
@@ -189,6 +196,7 @@ func ConfigFromEnv() Config {
 		PaymentAppID:               os.Getenv("PAYMENT_APPID"),
 		PaymentBorrowAppID:         os.Getenv("PAYMENT_BORROW_APPID"),
 		PaymentProxyRoutes:         os.Getenv("PAYMENT_PROXY_ROUTES"),
+		PaymentAdminProxyRoutes:    os.Getenv("PAYMENT_ADMIN_PROXY_ROUTES"),
 		LargeOrders:                largeOrderFromEnv(),
 		AnchorAwayTimeout:          anchorAwayTimeoutFromEnv(),
 		ReadTimeout:                duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
@@ -202,6 +210,7 @@ type App struct {
 	collectibleConfig *collectible.Service
 	cluster           *appCluster
 	metrics           *observability.Metrics
+	liveAudit         *liveaudit.Provider
 	geoDB             *geo.DB
 	push              relay.PushPrivate
 	dates             *httpapi.Dates
@@ -218,6 +227,10 @@ type App struct {
 }
 
 func New(ctx context.Context, config Config) (*App, error) {
+	diagnostics, err := newConfigDiagnostics(config.DemoItemsFile)
+	if err != nil {
+		return nil, err
+	}
 	trustedClients, err := auth.ReadTrustedClients(config.TrustedOAuthClientsFile)
 	if err != nil {
 		return nil, err
@@ -225,7 +238,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if config.roomBotsConfigError != nil {
 		return nil, fmt.Errorf("live room bots: %w", config.roomBotsConfigError)
 	}
-	if (len(config.RoomBots.Accounts) > 0 || config.LubanRoomBots) && config.DatabaseURL == "" {
+	if (config.RoomBots.Enabled() || config.LubanRoomBots) && config.DatabaseURL == "" {
 		return nil, fmt.Errorf("live room bots require DATABASE_URL")
 	}
 	cluster, err := initCluster(ctx, &config)
@@ -245,6 +258,20 @@ func New(ctx context.Context, config Config) (*App, error) {
 	signer, err := rtc.NewSigner(config.AgoraAppID, config.AgoraCertificate, config.AgoraTokenExpire)
 	if err != nil {
 		return nil, err
+	}
+	if config.LiveAudit.Enabled && config.DatabaseURL == "" {
+		return nil, errors.New("live media auditing requires DATABASE_URL")
+	}
+	liveAudit, err := liveaudit.New(config.LiveAudit, signer)
+	if err != nil {
+		return nil, err
+	}
+	mediaReviewer, err := liveaudit.NewMediaReviewer(config.LiveAudit)
+	if err != nil {
+		return nil, err
+	}
+	if mediaReviewer != nil && (config.DatabaseURL == "" || config.PostReviewToken == "") {
+		return nil, errors.New("Shumei mixed-media auditing requires DATABASE_URL and POST_REVIEW_TOKEN")
 	}
 	config.Subtitles.AppID = config.AgoraAppID
 	if config.Subtitles.Version != "" && config.Subtitles.Version != stt.Legacy && config.Subtitles.Version != stt.Agent {
@@ -297,6 +324,17 @@ func New(ctx context.Context, config Config) (*App, error) {
 	largeOrders, err := payment.NewLargeOrderService(billing, config.LargeOrders)
 	if err != nil {
 		return nil, err
+	}
+	finance := admin.FinancePayments{Billing: billing}
+	if config.AdminAddr != "" {
+		finance.Proxy, err = payment.NewAdminProxy(billing, config.PaymentAdminProxyRoutes)
+		if err != nil {
+			return nil, err
+		}
+		finance.Confirmation, err = payment.NewLargeOrderConfirmation(config.LargeOrders)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var principals admin.Principals
 	if config.AdminAddr != "" || config.MCNAdminAddr != "" {
@@ -352,11 +390,12 @@ func New(ctx context.Context, config Config) (*App, error) {
 			db.Shutdown()
 			return nil, err
 		}
+		db.ConfigureRocketBroadcastScope(config.RelayRust.AppKey)
 		if err := db.ImportGiftPromotionContent(ctx, interactions); err != nil {
 			db.Shutdown()
 			return nil, err
 		}
-		if len(config.RoomBots.Accounts) > 0 {
+		if config.RoomBots.Enabled() {
 			if err := db.ConfigureRoomBots(config.RoomBots); err != nil {
 				db.Shutdown()
 				return nil, err
@@ -416,12 +455,12 @@ func New(ctx context.Context, config Config) (*App, error) {
 		giftOverrides = db
 	}
 	giftCatalog := gift.NewCatalog(gifts, giftOverrides)
-	backoffice, err := managementServer(config, db, principals, config.AdminAddr, admin.OperationArea, giftCatalog)
+	backoffice, err := managementServer(config, db, principals, config.AdminAddr, admin.OperationArea, giftCatalog, collectibles, finance, diagnostics)
 	if err != nil {
 		db.Shutdown()
 		return nil, err
 	}
-	mcnBackoffice, err := managementServer(config, db, principals, config.MCNAdminAddr, admin.MCNArea, nil)
+	mcnBackoffice, err := managementServer(config, db, principals, config.MCNAdminAddr, admin.MCNArea, nil, nil, admin.FinancePayments{}, nil)
 	if err != nil {
 		db.Shutdown()
 		return nil, err
@@ -452,6 +491,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		config.RelayRust.Metrics = metrics
 	}
 	push := relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL, config.RelayRust)
+	httpapi.RegisterLiveAudit(mux, liveAudit, db, push, config.AgoraAppID)
 	dates := &httpapi.Dates{Accounts: accounts, Service: date.New(dateStore, accounts, subscriptions, billing),
 		Signer: signer, Subtitles: dateSubtitles, Push: push}
 	dates.Register(mux)
@@ -479,9 +519,14 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterAnchorChannelReports(mux, channelAuth, channelReports)
 	httpapi.RegisterSubscriptions(mux, accounts, rooms, subscriptions, billing, inbox, config.SubscriptionRenewToken)
 	httpapi.RegisterPosts(mux, accounts, rooms, anchorPosts, subscriptions, billing, httpapi.PostOptions{
-		Anchors: anchorProfiles, Reviewer: postReviewer, AuditRequired: config.PostAuditRequired, ReviewToken: config.PostReviewToken,
+		Anchors: anchorProfiles, Reviewer: postReviewer, MediaReviewer: mediaReviewer, AuditRequired: config.PostAuditRequired, ReviewToken: config.PostReviewToken,
 	})
 	admin.Register(mux, accounts, rooms, config.AdminToken)
+	var incomeCollector httpapi.LiveIncomeCollector
+	if db != nil {
+		incomeCollector = db
+	}
+	httpapi.RegisterLiveIncomeSchedule(mux, config.LiveIncomeScheduleToken, incomeCollector)
 	httpapi.RegisterNotices(mux, accounts, notices)
 	httpapi.RegisterFeed(mux, accounts, rooms, subscriptions, inbox, messages, config.DMModerator)
 	httpapi.RegisterUploads(mux, accounts, config.Upload, uploads)
@@ -492,13 +537,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterFeedback(mux, accounts, feedbacks, config.Upload, config.FeedbackHook)
 	httpapi.RegisterDirectMessages(mux, accounts, messages, config.DMModerator, push)
 	httpapi.RegisterBotChat(mux, accounts, botMessages, push)
-	if err := registerMaintenance(mux, config, db, rooms, signer); err != nil {
-		if db != nil {
-			db.Shutdown()
-		}
-		geoDB.Close()
-		return nil, err
-	}
+	registerMaintenance(mux, config, db, rooms, signer, diagnostics)
 	edge.Register(mux, rooms, notices, config.EdgeToken)
 
 	handler := httpx.BrowserHandler(mux, httpx.BrowserConfig{Origins: config.CORSOrigins, RateLimit: config.RateLimit, TrustedProxies: config.Geo.TrustedProxies})
@@ -513,6 +552,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		collectibleConfig: collectibles,
 		cluster:           cluster,
 		metrics:           metrics,
+		liveAudit:         liveAudit,
 		geoDB:             geoDB,
 		push:              push,
 		dates:             dates,
@@ -536,13 +576,16 @@ func New(ctx context.Context, config Config) (*App, error) {
 	}, nil
 }
 
-func managementServer(config Config, db *postgres.Store, principals admin.Principals, address, area string, catalog *gift.Catalog) (*http.Server, error) {
+func managementServer(config Config, db *postgres.Store, principals admin.Principals, address, area string, catalog *gift.Catalog,
+	collectibles *collectible.Service, finance admin.FinancePayments, diagnostics http.HandlerFunc) (*http.Server, error) {
 	if address == "" {
 		return nil, nil
 	}
 	handler, err := admin.BackofficeHandler(area, principals, db, catalog, admin.BackofficeOptions{
 		MCNJoinURL: config.MCNJoinURL, MCNInternalToken: config.MCNInternalToken,
+		Finance: finance, ConfigDiagnostics: diagnostics,
 		Images: config.Upload, ImagePrefix: config.AdminImagePrefix,
+		Collectibles: collectibles,
 	})
 	if err != nil {
 		return nil, err
@@ -560,6 +603,7 @@ func largeOrderFromEnv() payment.LargeOrderConfig {
 		FromAddress: strings.TrimSpace(fromAddress), FromName: strings.TrimSpace(fromName),
 		TemplateCN: os.Getenv("PAYMENT_LARGE_ORDER_TEMPLATE_ZH_CN"), TemplateTW: os.Getenv("PAYMENT_LARGE_ORDER_TEMPLATE_ZH_TW"),
 		TemplateJP: os.Getenv("PAYMENT_LARGE_ORDER_TEMPLATE_JA_JP"), TemplateEN: os.Getenv("PAYMENT_LARGE_ORDER_TEMPLATE_EN_US"),
+		ConfirmationTemplate: os.Getenv("PAYMENT_LARGE_ORDER_CONFIRM_TEMPLATE"),
 	}
 }
 

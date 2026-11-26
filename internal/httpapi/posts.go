@@ -15,6 +15,7 @@ import (
 	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/liveaudit"
 	"open_live_platform/internal/payment"
 	"open_live_platform/internal/posts"
 	"open_live_platform/internal/subscription"
@@ -24,6 +25,7 @@ import (
 type PostOptions struct {
 	Anchors       anchor.Store
 	Reviewer      posts.Reviewer
+	MediaReviewer *liveaudit.MediaReviewer
 	AuditRequired bool
 	ReviewToken   string
 }
@@ -98,7 +100,7 @@ func (s postAPI) createPost(w http.ResponseWriter, r *http.Request, actor int64)
 		input.Media = []posts.Media{}
 	}
 	status := posts.Approved
-	if s.options.AuditRequired || s.options.Reviewer != nil {
+	if s.options.AuditRequired || s.options.Reviewer != nil || s.options.MediaReviewer != nil {
 		status = posts.Pending
 	}
 	p, err := s.entries.CreatePost(ctx, actor, input, status)
@@ -106,7 +108,7 @@ func (s postAPI) createPost(w http.ResponseWriter, r *http.Request, actor int64)
 		postError(w, err)
 		return
 	}
-	if s.options.Reviewer != nil {
+	if s.options.Reviewer != nil || s.options.MediaReviewer != nil {
 		result, err := s.evaluatePostReview(ctx, posts.ReviewRequest{Kind: "post", UserID: actor, PostID: p.ID, Text: p.Content, Media: p.Media})
 		if err == nil && (result.RequestID != "" || result.ManualRequestID != "") {
 			err = s.entries.BindPostReview(ctx, p.ID, result)
@@ -123,6 +125,9 @@ func (s postAPI) createPost(w http.ResponseWriter, r *http.Request, actor int64)
 }
 
 func (s postAPI) evaluatePostReview(ctx context.Context, input posts.ReviewRequest) (posts.Evaluation, error) {
+	if input.Kind == "post" && s.options.MediaReviewer != nil {
+		return s.options.MediaReviewer.Evaluate(ctx, input)
+	}
 	if reviewer, ok := s.options.Reviewer.(posts.TrackedReviewer); ok {
 		return reviewer.Evaluate(ctx, input)
 	}

@@ -14,24 +14,25 @@ import (
 	"open_live_platform/internal/store/postgres"
 	"open_live_platform/internal/transport/httpx"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
 
-func registerMaintenance(mux *http.ServeMux, cfg Config, db *postgres.Store, rooms live.RoomStore, signer rtc.Signer) error {
+func newConfigDiagnostics(file string) (http.HandlerFunc, error) {
 	var items []struct {
 		ID         int32
 		Name, Desc string
 		Count      int32
 		Key        string
 	}
-	if cfg.DemoItemsFile != "" {
-		data, err := os.ReadFile(cfg.DemoItemsFile)
+	if file != "" {
+		data, err := os.ReadFile(file)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := json.Unmarshal(data, &items); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	info := map[string]any{"len": len(items)}
@@ -46,9 +47,13 @@ func registerMaintenance(mux *http.ServeMux, cfg Config, db *postgres.Store, roo
 		info["list"] = "[" + strings.Join(order, ", ") + "]"
 		info["map"] = "{" + strings.Join(pairs, ", ") + "}"
 	}
-	mux.HandleFunc("GET /testconfig", func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, 200, map[string]any{"status": "200", "data": info})
-	})
+	}, nil
+}
+
+func registerMaintenance(mux *http.ServeMux, cfg Config, db *postgres.Store, rooms live.RoomStore, signer rtc.Signer, diagnostics http.HandlerFunc) {
+	mux.HandleFunc("GET /testconfig", diagnostics)
 	operator := func(fn http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -73,7 +78,7 @@ func registerMaintenance(mux *http.ServeMux, cfg Config, db *postgres.Store, roo
 		if !httpx.Decode(w, r, &request) {
 			return
 		}
-		if err := db.BatchRegister(r.Context(), request.Users, admin.DefaultPayPrice()); errors.Is(err, auth.ErrMissingFields) {
+		if err := db.RegisterAccounts(r.Context(), slices.Values(request.Users), admin.DefaultPayPrice()); errors.Is(err, auth.ErrMissingFields) {
 			httpx.Error(w, 400, err.Error())
 			return
 		} else if err != nil {
@@ -141,5 +146,4 @@ func registerMaintenance(mux *http.ServeMux, cfg Config, db *postgres.Store, roo
 		}
 		httpx.JSON(w, 200, map[string]any{"status": "200", "data": v})
 	}))
-	return nil
 }

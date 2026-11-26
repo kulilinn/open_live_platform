@@ -310,11 +310,7 @@ func (s *Service) Bind(ctx context.Context, userID, challengeID int64, tokenID u
 	if err != nil {
 		return err
 	}
-	var slots map[int8]int32
-	if adorns := s.availableAdorns(); len(adorns) > 0 && adorns[0].Unlock == 1 {
-		slots = adorns[0].slots()
-	}
-	return s.store.BindNFT(ctx, challenge, binding, slots)
+	return s.store.BindNFT(ctx, challenge, binding, s.defaultNFTSlots())
 }
 
 // VerifyOwnership confirms a wallet against ERC-721 ownerOf. Legacy imports

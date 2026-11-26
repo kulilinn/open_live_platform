@@ -33,7 +33,7 @@ func readAnchor(row pgx.Row) (anchor.Record, error) {
 
 func (s *Store) AnchorApplicant(ctx context.Context, id int64) (string, error) {
 	var applicant string
-	err := s.pool.QueryRow(ctx, `SELECT applicant_id FROM anchor_kyc_applicants WHERE user_id=$1`, id).Scan(&applicant)
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(applicant_id,'') FROM anchor_kyc_applicants WHERE user_id=$1`, id).Scan(&applicant)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = nil
 	}
@@ -43,16 +43,21 @@ func (s *Store) AnchorApplicant(ctx context.Context, id int64) (string, error) {
 func (s *Store) SaveAnchorApplicant(ctx context.Context, id int64, applicant string) error {
 	tag, err := s.pool.Exec(ctx, `INSERT INTO anchor_kyc_applicants(user_id,applicant_id) VALUES($1,$2)
 		ON CONFLICT(user_id) DO UPDATE SET applicant_id=EXCLUDED.applicant_id
-		WHERE anchor_kyc_applicants.applicant_id=EXCLUDED.applicant_id`, id, applicant)
+		WHERE anchor_kyc_applicants.applicant_id IS NULL OR anchor_kyc_applicants.applicant_id=EXCLUDED.applicant_id`, id, applicant)
 	if err == nil && tag.RowsAffected() != 1 {
 		err = anchor.ErrKYC
 	}
 	return err
 }
 
-func (s *Store) ConfirmAnchorKYC(ctx context.Context, id int64, applicant string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `UPDATE anchor_profiles a SET kyc_status=1 FROM anchor_kyc_applicants k
-		WHERE a.user_id=$1 AND k.user_id=a.user_id AND k.applicant_id=$2`, id, applicant)
+func (s *Store) ConfirmAnchorKYC(ctx context.Context, id int64, applicant string, info anchor.IdentityUpdate) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `WITH verified AS (
+		UPDATE anchor_profiles a SET kyc_status=1 FROM anchor_kyc_applicants k
+		WHERE a.user_id=$1 AND k.user_id=a.user_id AND k.applicant_id=$2 RETURNING a.user_id)
+		UPDATE anchor_kyc_applicants SET status=2,submitted=submitted||jsonb_build_object(
+		'name',$3::text,'birth',$4::text,'country',$5::text,'area',$6::text,'code',$7::text,'address',$8::text,
+		'extra',$9::text,'gender',$10::smallint,'id_card',$11::text,'phone_number',$12::text)
+		WHERE user_id IN (SELECT user_id FROM verified)`, id, applicant, info.Name, info.Birth, info.Country, info.Area, info.Code, info.Address, info.Extra, info.Gender, info.IDCard, info.PhoneNumber)
 	return err == nil && tag.RowsAffected() == 1, err
 }
 
@@ -108,6 +113,10 @@ func (s *Store) ApplyAnchor(ctx context.Context, user auth.User, apply anchor.Ap
 			return err
 		}
 		record.Apply(apply)
+		if _, err := tx.Exec(ctx, `INSERT INTO anchor_kyc_applicants(user_id,submitted)
+			VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING`, user.ID, apply.IdentityForm); err != nil {
+			return err
+		}
 		if err := ensureFreePlan(ctx, tx, user.ID); err != nil {
 			return err
 		}

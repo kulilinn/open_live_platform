@@ -30,6 +30,15 @@ func (s *Store) ImportLegacyHistory(ctx context.Context, rows iter.Seq2[HistoryR
 			if err != nil {
 				return err
 			}
+			if row.Source == "anchor_users" || row.Source == "anchor_users_kyc" {
+				n, err := restoreAnchorReview(ctx, tx, row)
+				if err != nil {
+					return fmt.Errorf("%s %s: %w", row.Source, row.ID, err)
+				}
+				c.Read++
+				c.Changed += n
+				continue
+			}
 			tag, err := tx.Exec(ctx, `INSERT INTO legacy_business_history AS h(source_table,source_id,owner_id,record) VALUES ($1,$2,$3,$4)
     ON CONFLICT (source_table,source_id) DO UPDATE SET owner_id=excluded.owner_id,record=excluded.record
     WHERE (h.owner_id,h.record) IS DISTINCT FROM (excluded.owner_id,excluded.record)`, row.Source, row.ID, row.Owner, row.Record)

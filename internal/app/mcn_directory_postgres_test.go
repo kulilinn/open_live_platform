@@ -36,10 +36,29 @@ func TestPostgresMCNDirectory(t *testing.T) {
 	config.MCNInternalToken = "local-test-only-finance-service"
 	config.AdminAccountsFile = filepath.Join(t.TempDir(), "accounts.json")
 	check(os.WriteFile(config.AdminAccountsFile, accounts, 0600))
+	config.DemoItemsFile = filepath.Join(t.TempDir(), "items.json")
+	check(os.WriteFile(config.DemoItemsFile, []byte(`[{"id":1,"name":"sample"}]`), 0600))
 	a, err := app.New(ctx, config)
 	check(err)
 	t.Cleanup(a.Close)
 	fin, mcn := a.Backoffice.Handler, a.MCNBackoffice.Handler
+	for _, h := range []http.Handler{fin, mcn} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequestWithContext(ctx, "GET", "/healthchecker", nil))
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"message":"Loverose Server"`) {
+			t.Fatalf("Rust health response = %d %s", w.Code, w.Body.String())
+		}
+	}
+	for _, checkSource := range []struct {
+		handler http.Handler
+		code    int
+	}{{fin, 200}, {mcn, 404}} {
+		w := httptest.NewRecorder()
+		checkSource.handler.ServeHTTP(w, httptest.NewRequestWithContext(ctx, "GET", "/testconfig", nil))
+		if w.Code != checkSource.code || (w.Code == 200 && !strings.Contains(w.Body.String(), `"len":1`)) {
+			t.Fatalf("Rust config response = %d %s", w.Code, w.Body.String())
+		}
+	}
 	request := func(handler http.Handler, path, token, tenant, service, body string, code int, status string) json.RawMessage {
 		t.Helper()
 		r := httptest.NewRequestWithContext(ctx, "POST", path, strings.NewReader(body))
@@ -75,6 +94,28 @@ func TestPostgresMCNDirectory(t *testing.T) {
 	request(mcn, "/api/agency/organize/page", finance, "", "admin", `{}`, 401, "401")
 	request(mcn, "/api/agency/organize/page", config.MCNInternalToken, "", "mcn", `{}`, 401, "401")
 	request(mcn, "/api/agency/organize/page", config.MCNInternalToken, "", "admin", `{}`, 200, "200")
+	internalTemplate := func(path, body string) json.RawMessage {
+		t.Helper()
+		return request(mcn, "/api/agency/template/"+path, config.MCNInternalToken, "", "admin", body, 200, "200")
+	}
+	request(mcn, "/api/agency/template/add_edit", finance, "", "admin", `{"mcnId":"53","name":"Private","data":[[0,800,11]]}`, 401, "401")
+	internalTemplate("add_edit", `{"mcnId":"53","name":"Private","data":[[0,800,11]]}`)
+	var internalTemplates []admin.MCNTemplate
+	check(json.Unmarshal(internalTemplate("list", ""), &internalTemplates))
+	if len(internalTemplates) != 1 || internalTemplates[0].Name != "Private" {
+		t.Fatalf("MCN private template list = %+v", internalTemplates)
+	}
+	privateID := internalTemplates[0].ID
+	if data := internalTemplate("detail", fmt.Sprintf(`{"mcnId":"53","templateId":"%d"}`, privateID)); !strings.Contains(string(data), `"ratio":"11"`) {
+		t.Fatalf("MCN private template detail = %s", data)
+	}
+	if data := internalTemplate("detail", fmt.Sprintf(`{"mcnId":"55","templateId":"%d"}`, privateID)); string(data) != "[]" {
+		t.Fatalf("template details leaked into other agency = %s", data)
+	}
+	internalTemplate("delete", fmt.Sprintf(`{"id":"%d"}`, privateID))
+	if data := internalTemplate("list", ""); string(data) != "[]" {
+		t.Fatalf("MCN private template deletion returned %s", data)
+	}
 	mutate := func(path, body string, code int, status string) json.RawMessage {
 		t.Helper()
 		return request(fin, "/api/finance"+path, finance, admin.FinanceTenant, "", body, code, status)

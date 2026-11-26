@@ -126,11 +126,11 @@ func (b backoffice) registerMCNDirectory(mux *http.ServeMux) {
 			mcnDirectoryResult(w, err)
 		})
 	}
-	b.mountMCNFinance(mux, "/template/page", "/template/list", func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
+	b.mountMCNFinance(mux, "/template/page", "/agency/template/list", func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
 		rows, err := store.MCNTemplates(r.Context())
 		backofficeReply(w, nonNil(rows), err)
 	})
-	b.mountMCNFinance(mux, "/template/detail", "/template/detail", func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
+	b.mountMCNFinance(mux, "/template/detail", "/agency/template/detail", func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
 		var q MCNTemplateQuery
 		if httpx.Decode(w, r, &q) {
 			if q.AgencyID < 0 || q.TemplateID <= 0 {
@@ -153,9 +153,9 @@ func (b backoffice) registerMCNDirectory(mux *http.ServeMux) {
 		}
 		mcnDirectoryResult(w, store.WriteMCNTemplate(r.Context(), operator, r.URL.Path, q, remove))
 	}
-	b.mountMCNFinance(mux, "/template/add", "/template/add_edit", writeTemplate)
+	b.mountMCNFinance(mux, "/template/add", "/agency/template/add_edit", writeTemplate)
 	b.mountMCNFinance(mux, "/template/edit", "", writeTemplate)
-	b.mountMCNFinance(mux, "/template/delete", "/template/delete", writeTemplate)
+	b.mountMCNFinance(mux, "/template/delete", "/agency/template/delete", writeTemplate)
 }
 
 func (b backoffice) mountMCNFinance(mux *http.ServeMux, finance, internal string, next backofficeHandler) {
@@ -177,6 +177,9 @@ func (b backoffice) mountMCNFinance(mux *http.ServeMux, finance, internal string
 }
 
 func validateMCNAgency(entry *MCNAgencyEdit, action string) (string, error) {
+	if action == "add" {
+		entry.ID = 0
+	}
 	if (action != "add" && entry.ID <= 0) || (entry.TemplateID != nil && *entry.TemplateID <= 0) {
 		return "", ErrSystemInvalid
 	}

@@ -68,6 +68,15 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 		defer close(monitorDone)
 		a.monitorAnchorAway(monitorCtx)
 	}()
+	liveAuditDone := make(chan struct{})
+	if a.liveAudit != nil {
+		go func() {
+			defer close(liveAuditDone)
+			a.monitorLiveAudit(monitorCtx)
+		}()
+	} else {
+		close(liveAuditDone)
+	}
 	sttDone := make(chan struct{})
 	if a.Subtitles != nil && a.Subtitles.Enabled() {
 		go func() {
@@ -87,6 +96,26 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 		close(dateDone)
 	}
 	mailDone := make(chan struct{})
+	remindersDone := make(chan struct{})
+	if a.db != nil {
+		go func() {
+			defer close(remindersDone)
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for monitorCtx.Err() == nil {
+				if _, err := a.db.SendSubscriptionReminders(monitorCtx, time.Now()); err != nil && monitorCtx.Err() == nil {
+					log.Printf("subscription expiry notices: %v", err)
+				}
+				select {
+				case <-monitorCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	} else {
+		close(remindersDone)
+	}
 	if a.MCNBackoffice != nil && a.db != nil && a.mcnMailer != nil {
 		go func() {
 			defer close(mailDone)
@@ -151,9 +180,11 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 		serveErr = errors.Join(serveErr, <-httpDone)
 	}
 	<-monitorDone
+	<-liveAuditDone
 	<-sttDone
 	<-dateDone
 	<-mailDone
+	<-remindersDone
 	<-kafkaDone
 	clusterDone.Wait()
 	return serveErr
@@ -214,12 +245,10 @@ func (a *App) monitorAnchorAway(ctx context.Context) {
 		if err := a.Rooms.CloseExpiredAnchorRooms(ctx, time.Now()); err != nil && ctx.Err() == nil {
 			log.Printf("close expired anchor rooms: %v", err)
 		}
-		if len(a.Config.RoomBots.Accounts) > 0 {
+		if a.db != nil {
 			if err := a.db.SweepRoomBots(ctx); err != nil && ctx.Err() == nil {
 				log.Printf("update live room bots: %v", err)
 			}
-		}
-		if a.db != nil {
 			if err := a.db.SweepRoomGiftEffects(ctx); err != nil && ctx.Err() == nil {
 				log.Printf("start queued hardware gifts: %v", err)
 			}

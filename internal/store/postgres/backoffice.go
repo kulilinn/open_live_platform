@@ -131,21 +131,39 @@ func readBackofficePage[T any](ctx context.Context, s *Store, page admin.PageReq
 }
 
 const backofficeAccountStatus = `(CASE WHEN ` + activeAccountLimit + ` THEN u.account_status ELSE 0 END)`
+
+func (s *Store) PlatformStats(ctx context.Context, start, end time.Time) (admin.PlatformStats, error) {
+	var p admin.PlatformStats
+	err := s.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE created_at BETWEEN $1 AND $2),
+		(SELECT count(*) FROM user_login_activity WHERE last_login_at BETWEEN $1 AND $2),
+		(SELECT count(*) FROM (SELECT user_id FROM sessions UNION SELECT j.user_id FROM jwt_sessions j
+			LEFT JOIN user_login_activity a ON a.user_id=j.user_id WHERE j.revoked_at IS NULL AND
+			coalesce(j.expires_at,a.last_login_at+interval '24 hours')>now()) active),
+		(SELECT count(*) FROM rooms WHERE online) FROM users`, start, end).Scan(&p.Users, &p.NewUsers, &p.Logins, &p.Online, &p.Streams)
+	return p, err
+}
+
 const backofficeRoomBanned = `(r.moderation_until=-1 OR (r.moderation_until>0 AND r.moderation_until>=floor(extract(epoch FROM clock_timestamp()))))`
 
 func (s *Store) BackofficeUsers(ctx context.Context, query admin.UserQuery) ([]admin.UserRow, int64, error) {
 	const columns = `u.id, COALESCE(u.email,u.legacy_profile_email,''), u.account, u.profile->>'SearchName', u.profile->>'Photo',
-		(u.profile->>'Gender')::integer, u.created_at, CASE WHEN COALESCE((u.profile->>'IsAnchor')::boolean,r.id IS NOT NULL) THEN 1 ELSE 0 END,
+		(u.profile->>'Gender')::integer, u.created_at, a.last_login_at,(ledger.record->>'point')::bigint,
+		(ledger.record->>'total_used_point')::bigint,(ledger.record->>'total_expired_point')::bigint,(ledger.record->>'history_total')::bigint,
+		CASE WHEN COALESCE((u.profile->>'IsAnchor')::boolean,r.id IS NOT NULL) THEN 1 ELSE 0 END,
 		` + backofficeAccountStatus + `, CASE WHEN r.id IS NULL THEN NULL WHEN ` + backofficeRoomBanned + ` THEN CASE WHEN r.moderation_until=-1 THEN -1 ELSE 1 END ELSE 0 END,
 		CASE WHEN ` + backofficeRoomBanned + ` AND r.moderation_until>0 THEN to_timestamp(r.moderation_until) END`
-	const relation = `FROM users u LEFT JOIN rooms r ON r.id=u.id WHERE ($1::bigint IS NULL OR u.id=$1)
+	const relation = `FROM users u LEFT JOIN rooms r ON r.id=u.id LEFT JOIN user_login_activity a ON a.user_id=u.id
+		LEFT JOIN legacy_business_history ledger ON ledger.source_table='user_points' AND ledger.source_id=u.id::text
+		WHERE ($1::bigint IS NULL OR u.id=$1)
 		AND ($2::text IS NULL OR strpos(lower(u.account),lower($2))>0)
 		AND ($3::text IS NULL OR strpos(lower(COALESCE(u.email,u.legacy_profile_email,'')),lower($3))>0)
-		AND ($4::smallint IS NULL OR ` + backofficeAccountStatus + `=$4)`
-	return readBackofficePage(ctx, s, query.PageRequest, columns, relation, "u.id DESC", []any{query.ID, query.Nickname, query.Email, query.Status},
+		AND ($4::smallint IS NULL OR ` + backofficeAccountStatus + `=$4)
+		AND ($5::timestamptz IS NULL OR a.last_login_at >= $5) AND ($6::timestamptz IS NULL OR a.last_login_at <= $6)`
+	return readBackofficePage(ctx, s, query.PageRequest, columns, relation, "u.id DESC", []any{query.ID, query.Nickname, query.Email, query.Status, query.Start, query.End},
 		func(row pgx.CollectableRow) (admin.UserRow, error) {
 			var item admin.UserRow
 			err := row.Scan(&item.ID, &item.Email, &item.DisplayName, &item.SearchName, &item.Photo, &item.Gender, &item.CreatedAt,
+				&item.LastLogin, &item.Point, &item.UsedPoint, &item.ExpiredPoint, &item.HistoryPoints,
 				&item.IsStreamer, &item.Status, &item.RoomLimited, &item.RoomLimitedAt)
 			return item, err
 		})
@@ -205,88 +223,96 @@ func (s *Store) ApplyBackofficeAction(ctx context.Context, actor admin.Principal
 		id = op.RoomID
 	}
 	return s.change(ctx, id, func(r *roomChange) error {
-		var userID int64
-		if err := r.tx.QueryRow(ctx, "SELECT id FROM users WHERE id=$1 FOR UPDATE", op.UserID).Scan(&userID); errors.Is(err, pgx.ErrNoRows) {
+		return s.applyBackofficeAction(ctx, r, actor, op)
+	})
+}
+
+func (s *Store) applyBackofficeAction(ctx context.Context, r *roomChange, actor admin.Principal, op admin.Action) error {
+	var userID int64
+	if err := r.tx.QueryRow(ctx, "SELECT id FROM users WHERE id=$1 FOR UPDATE", op.UserID).Scan(&userID); errors.Is(err, pgx.ErrNoRows) {
+		return admin.ErrBackofficeNotFound
+	} else if err != nil {
+		return err
+	}
+	if op.RoomID != 0 {
+		var ownerID int64
+		err := r.tx.QueryRow(ctx, "SELECT owner_id FROM rooms WHERE id=$1", op.RoomID).Scan(&ownerID)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && ownerID != op.UserID) {
 			return admin.ErrBackofficeNotFound
-		} else if err != nil {
-			return err
 		}
-		if op.RoomID != 0 {
-			var ownerID int64
-			err := r.tx.QueryRow(ctx, "SELECT owner_id FROM rooms WHERE id=$1", op.RoomID).Scan(&ownerID)
-			if errors.Is(err, pgx.ErrNoRows) || (err == nil && ownerID != op.UserID) {
-				return admin.ErrBackofficeNotFound
-			}
-			if err != nil {
-				return err
-			}
-		}
-		reason := strings.Join(op.Reason, ",")
-		var recordID int64
-		err := r.tx.QueryRow(ctx, `INSERT INTO backoffice_logs (area,tenant,operator_id,operator_name,path,target,action,reason)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, actor.Area, actor.Scope(), actor.ID, actor.Name(), op.Path,
-			strconv.FormatInt(op.UserID, 10), op.Kind, reason).Scan(&recordID)
 		if err != nil {
 			return err
 		}
-		if ty := map[string]int{"account_disable": 1, "no_talking": 2, "account_reset": 3, "streamer_end_stream": 5, "streamer_disable": 6}[op.Kind]; ty != 0 {
-			if _, err := r.tx.Exec(ctx, `INSERT INTO user_violation_records (id,user_id,reason,limit_duration,create_time,create_by_name,ty)
+	}
+	reason := strings.Join(op.Reason, ",")
+	var recordID int64
+	err := r.tx.QueryRow(ctx, `INSERT INTO backoffice_logs (area,tenant,operator_id,operator_name,path,target,action,reason)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, actor.Area, actor.Scope(), actor.ID, actor.Name(), op.Path,
+		strconv.FormatInt(op.UserID, 10), op.Kind, reason).Scan(&recordID)
+	if err != nil {
+		return err
+	}
+	if ty := map[string]int{"account_disable": 1, "no_talking": 2, "account_reset": 3, "streamer_alert": 4, "streamer_end_stream": 5, "streamer_disable": 6}[op.Kind]; ty != 0 {
+		if _, err := r.tx.Exec(ctx, `INSERT INTO user_violation_records (id,user_id,reason,limit_duration,create_time,create_by_name,ty)
 				VALUES($1,$2,$3,$4,statement_timestamp(),$5,$6)`, recordID, op.UserID, reason, op.Duration, actor.Name(), ty); err != nil {
-				return err
-			}
-		}
-		until := op.Duration
-		if until > 0 {
-			until += time.Now().Unix()
-		}
-		switch op.Kind {
-		case "account_reset":
-			if _, err := r.tx.Exec(ctx, `UPDATE users SET account='',profile=coalesce(profile,'{}'::jsonb)||'{"Name":"","Photo":""}' WHERE id=$1`, op.UserID); err != nil {
-				return err
-			}
-			_, err := r.tx.Exec(ctx, `INSERT INTO notices(id,notice_target,notice_type,receive_id,content,create_time)
-				VALUES(nextval('local_notice_ids'),3,16,$1,jsonb_build_object('reason',coalesce($2::text[],'{}')),now())`, op.UserID, op.Reason)
 			return err
-		case "account_disable", "account_enable", "no_talking":
-			status := auth.AccountNormal
-			switch op.Kind {
-			case "account_disable":
-				status = auth.AccountBanned
-			case "no_talking":
-				status = auth.AccountMuted
-			case "account_enable":
-				recordID, until = 0, 0
-			}
-			if _, err := r.tx.Exec(ctx, `UPDATE users SET account_status=$2,account_limit_until=$3,account_violation_id=$4 WHERE id=$1`, op.UserID, status, until, recordID); err != nil {
-				return err
-			}
-			if status != auth.AccountBanned {
-				return nil
-			}
-			if err := s.revokeBannedSessions(ctx, r.tx, op.UserID); err != nil {
-				return err
-			}
-			if err := r.close(op.UserID); !errors.Is(err, live.ErrRoomNotFound) {
-				return err
-			}
-			return nil
-		case "streamer_disable", "streamer_enable":
-			if op.Kind == "streamer_enable" {
-				until, op.Duration, reason = 0, 0, ""
-			}
-			if _, err := r.tx.Exec(ctx, `UPDATE rooms SET moderation_until=$2,moderation_total=$3,moderation_reason=$4 WHERE id=$1`, op.RoomID, until, op.Duration, reason); err != nil {
-				return err
-			}
-			if op.Kind == "streamer_enable" {
-				return nil
-			}
-			return r.close(op.UserID)
-		case "streamer_end_stream":
-			return r.close(op.UserID)
-		default:
-			return errors.New("unknown backoffice action")
 		}
-	})
+	}
+	until := op.Duration
+	if until > 0 {
+		until += time.Now().Unix()
+	}
+	switch op.Kind {
+	case "streamer_alert":
+		_, err := r.tx.Exec(ctx, `INSERT INTO notices(id,notice_target,notice_type,receive_id,content,create_time)
+				VALUES(nextval('local_notice_ids'),1,12,$1,jsonb_build_object('reason',coalesce($2::text[],'{}')),now())`, op.UserID, op.Reason)
+		return err
+	case "account_reset":
+		if _, err := r.tx.Exec(ctx, `UPDATE users SET account='',profile=coalesce(profile,'{}'::jsonb)||'{"Name":"","Photo":""}' WHERE id=$1`, op.UserID); err != nil {
+			return err
+		}
+		_, err := r.tx.Exec(ctx, `INSERT INTO notices(id,notice_target,notice_type,receive_id,content,create_time)
+				VALUES(nextval('local_notice_ids'),3,16,$1,jsonb_build_object('reason',coalesce($2::text[],'{}')),now())`, op.UserID, op.Reason)
+		return err
+	case "account_disable", "account_enable", "no_talking":
+		status := auth.AccountNormal
+		switch op.Kind {
+		case "account_disable":
+			status = auth.AccountBanned
+		case "no_talking":
+			status = auth.AccountMuted
+		case "account_enable":
+			recordID, until = 0, 0
+		}
+		if _, err := r.tx.Exec(ctx, `UPDATE users SET account_status=$2,account_limit_until=$3,account_violation_id=$4 WHERE id=$1`, op.UserID, status, until, recordID); err != nil {
+			return err
+		}
+		if status != auth.AccountBanned {
+			return nil
+		}
+		if err := s.revokeBannedSessions(ctx, r.tx, op.UserID); err != nil {
+			return err
+		}
+		if err := r.close(op.UserID); !errors.Is(err, live.ErrRoomNotFound) {
+			return err
+		}
+		return nil
+	case "streamer_disable", "streamer_enable":
+		if op.Kind == "streamer_enable" {
+			until, op.Duration, reason = 0, 0, ""
+		}
+		if _, err := r.tx.Exec(ctx, `UPDATE rooms SET moderation_until=$2,moderation_total=$3,moderation_reason=$4 WHERE id=$1`, op.RoomID, until, op.Duration, reason); err != nil {
+			return err
+		}
+		if op.Kind == "streamer_enable" {
+			return nil
+		}
+		return r.close(op.UserID)
+	case "streamer_end_stream":
+		return r.close(op.UserID)
+	default:
+		return errors.New("unknown backoffice action")
+	}
 }
 
 func (s *Store) BackofficeStreamers(ctx context.Context, p admin.Principal, query admin.StreamerQuery) ([]admin.StreamerRow, int64, error) {
@@ -313,11 +339,13 @@ func (s *Store) BackofficeStreamers(ctx context.Context, p admin.Principal, quer
 }
 
 func (s *Store) BackofficeGiftPurchases(ctx context.Context, query admin.PurchaseQuery) ([]admin.PurchaseRow, int64, error) {
-	const relation = `FROM gift_orders WHERE state=1 AND ($1::bigint IS NULL OR receiver_id=$1) AND ($2::bigint IS NULL OR sender_id=$2)
+	const relation = `FROM gift_orders g LEFT JOIN finance_bad_debt_receipts debt ON debt.provider_order_id=g.provider_order_id
+		AND debt.provider_order_no=g.receipt->>'order_no' AND debt.spender_id=g.sender_id AND debt.charged_points=g.cost
+		WHERE state=1 AND ($1::bigint IS NULL OR receiver_id=$1) AND ($2::bigint IS NULL OR sender_id=$2)
 		AND ($3::bigint IS NULL OR receipt->>'order_no'=$3::bigint::text) AND ($4::smallint IS NULL OR $4=2)
 		AND ($5::text IS NULL OR starts_with(item->>'name',$5)) AND ($6::timestamptz IS NULL OR paid_at>=$6)
 		AND ($7::timestamptz IS NULL OR paid_at<=$7)`
-	const debt = `COALESCE((receipt->>'total_bad_debt_point')::bigint,0)`
+	const debt = `COALESCE(debt.bad_debt_points,(receipt->>'total_bad_debt_point')::bigint,0)`
 	const columns = `cost,receiver_id,sender_id,COALESCE(receipt->>'order_no',''),income,` + debt + `,
 		COALESCE(trunc(income::numeric*` + debt + `/NULLIF(cost,0))::bigint,0),item->>'name',paid_at`
 	args := []any{query.ReceiverID, query.SenderID, query.TradeNo, query.TradeType, query.GiftName, query.Start, query.End}

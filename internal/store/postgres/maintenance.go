@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"iter"
 	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
@@ -68,9 +69,9 @@ func (s *Store) FillSearchNames(ctx context.Context) error {
 	})
 }
 
-func (s *Store) BatchRegister(ctx context.Context, rows []auth.ProvisionUser, price int64) error {
+func (s *Store) RegisterAccounts(ctx context.Context, rows iter.Seq[auth.ProvisionUser], price int64) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		for _, row := range rows {
+		for row := range rows {
 			email := auth.NormalizeEmail(row.Email)
 			display := strings.TrimSpace(row.DisplayName)
 			if email == "" || row.Password == "" || display == "" {

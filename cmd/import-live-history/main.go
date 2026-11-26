@@ -20,13 +20,18 @@ import (
 type sourceTable struct{ name, key, owner, columns string }
 
 var tables = []sourceTable{
+	{"anchor_users", "id", "id", "id state channel del_flag reject_reason kyc_status create_time family_name country address intro welcome free_sub twitter ?instagram_link ?strip_chat_link ?tiktok_link ?yutube_link"},
+	{"anchor_users_kyc", "user_id", "user_id", "user_id applicant_id name ?first_name ?second_name ?ja_first_name ?ja_second_name birth gender country area code address ?id_card_type id_card phone_number ?id_card_front_pic ?id_card_back_pic ?id_card_hold_pic extra status create_time"},
 	{"room", "room", "uid", "room uid create_at name subject banner online tag description activity avatar chat_id limited offline_info plan gifts live_id area toy_label hot_label teacher_label ticket_label limited_time trans trans_lang violation_record_id"},
 	{"room_metrics", "id", "CAST(room AS SIGNED)", "id room audience income new_fans gift_fans start_time end_time fans ?like_quantity"},
 	{"room_report", "id", "uid", "id room uid subject description time"},
+	{"anchor_live_income_statistic", "id", "streamer_uid", "id streamer_sid streamer_uid streamer_name mcn_id mcn_name live_start_time live_end_time live_duration diamond create_at"},
 	{"user_points", "id", "id", "id point total_used_point total_expired_point create_time update_time ?increase_times ?decrease_times ?history_total"},
 	{"user_pt_log", "id", "CAST(uid AS SIGNED)", "id uid pt change_type comment time"},
 	{"recharges", "id", "user_id", "id no user_id origin_order_id origin_order_no origin_order_type point remain_point expire_time status bad_debt_id bad_debt_no bad_debt_time create_time update_time"},
-	{"pay_orders", "id", "user_id", "id user_id amount point payment_method_name status create_time"},
+	{"pay_orders", "id", "user_id", "id ?no user_id amount point payment_method_name status create_time"},
+	{"order_statistic_data", "id", "0", "id dau first_purchase_num purchase_user_num point_total consume_point_total platform_point_total pay_amount receivable_amount create_time"},
+	{"admin_modify_point_log", "id", "create_by", "id users point create_by create_by_name create_time reason"},
 	{"point_transactions", "id", "user_id", "id no user_id anchor_id live_id transaction_type transaction_order_id transaction_order_no subject total_point income_or_expenses total_bad_debt_point create_time update_time"},
 	{"gift_production_marketing", "id", "sender_id", "id gift_id sender_id"},
 	{"gifts", "id", "id", "id name"},

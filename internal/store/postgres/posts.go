@@ -59,20 +59,65 @@ func (s *Store) ReviewPost(ctx context.Context, id int64, decision posts.ReviewD
 		if errors.Is(err, pgx.ErrNoRows) {
 			return posts.ErrNotFound
 		}
-		if err != nil || current == decision.Status {
+		if err != nil {
 			return err
 		}
-		if current != posts.Pending {
-			return posts.ErrReviewConflict
+		return applyPostReview(ctx, tx, id, owner, current, level, decision)
+	})
+}
+
+func applyPostReview(ctx context.Context, tx pgx.Tx, id, owner int64, current, level int, decision posts.ReviewDecision) error {
+	if current == decision.Status {
+		return nil
+	}
+	if current != posts.Pending {
+		return posts.ErrReviewConflict
+	}
+	if _, err := tx.Exec(ctx, `UPDATE anchor_posts SET status=$2,reviewed_at=now() WHERE id=$1`, id, decision.Status); err != nil {
+		return err
+	}
+	switch decision.Status {
+	case posts.Approved:
+		return publishPostNotices(ctx, tx, id, owner, level)
+	case posts.Rejected:
+		return addPostRejectionNotice(ctx, tx, decision.Notice, owner, "post:rejected:"+strconv.FormatInt(id, 10))
+	}
+	return nil
+}
+
+func (s *Store) ApplyPostMediaReview(ctx context.Context, id, owner int64, request string, manual bool, decision posts.ReviewDecision,
+	submit func(context.Context, posts.Post) (string, error)) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		post := posts.Post{ID: id, OwnerID: owner}
+		var manualRequest string
+		err := tx.QueryRow(ctx, `SELECT content,media,status,visibility,manual_audit_request_id FROM anchor_posts
+			WHERE id=$1 AND owner_id=$2 AND NOT deleted AND $3<>''
+			AND CASE WHEN $4 THEN manual_audit_request_id=$3 ELSE audit_request_id=$3 END FOR UPDATE`, id, owner, request, manual).
+			Scan(&post.Content, &post.Media, &post.Status, &post.Level, &manualRequest)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return posts.ErrNotFound
 		}
-		if _, err := tx.Exec(ctx, `UPDATE anchor_posts SET status=$2,reviewed_at=now() WHERE id=$1`, id, decision.Status); err != nil {
+		if err != nil {
 			return err
 		}
-		switch decision.Status {
-		case posts.Approved:
-			return publishPostNotices(ctx, tx, id, owner, level)
-		case posts.Rejected:
-			return addPostRejectionNotice(ctx, tx, decision.Notice, owner, "post:rejected:"+strconv.FormatInt(id, 10))
+		tag, err := tx.Exec(ctx, `INSERT INTO post_media_audit_history(post_id,request_id,manual,status)
+			VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, id, request, manual, decision.Status)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		if decision.Status != posts.Pending {
+			if post.Status != posts.Pending {
+				return nil
+			}
+			return applyPostReview(ctx, tx, id, owner, post.Status, post.Level, decision)
+		}
+		if submit != nil && !manual && manualRequest == "" && post.Status == posts.Pending {
+			requestID, err := submit(ctx, post)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE anchor_posts SET manual_audit_request_id=$2 WHERE id=$1`, id, requestID)
+			return err
 		}
 		return nil
 	})

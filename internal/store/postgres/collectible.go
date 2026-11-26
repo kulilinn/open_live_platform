@@ -71,29 +71,38 @@ func (s *Store) BindNFT(ctx context.Context, c collectible.Challenge, b collecti
 		if tag.RowsAffected() != 1 {
 			return collectible.ErrSignature
 		}
-		var already bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nft_bindings WHERE user_id=$1)`, c.UserID).Scan(&already); err != nil {
-			return err
+		return bindNFTAccount(ctx, tx, c.UserID, b, slots, false)
+	})
+}
+
+func bindNFTAccount(ctx context.Context, tx pgx.Tx, userID int64, b collectible.Binding, slots map[int8]int32, idempotent bool) error {
+	var previous collectible.Binding
+	err := tx.QueryRow(ctx, `SELECT token_id,address FROM nft_bindings WHERE user_id=$1`, userID).
+		Scan(&previous.TokenID, &previous.Address)
+	if err == nil {
+		if idempotent && previous == b {
+			return nil
 		}
-		if already {
-			return collectible.ErrAlready
-		}
-		if _, err := tx.Exec(ctx, `
+		return collectible.ErrAlready
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
 			WITH removed AS (DELETE FROM nft_bindings WHERE token_id=$1 RETURNING *)
 			INSERT INTO nft_binding_events(user_id,token_id,address,bound)
 			SELECT user_id,token_id,address,FALSE FROM removed`, b.TokenID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO nft_bindings(user_id,token_id,address) VALUES($1,$2,$3)`,
-			c.UserID, b.TokenID, b.Address); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO nft_binding_events(user_id,token_id,address,bound) VALUES($1,$2,$3,TRUE)`,
-			c.UserID, b.TokenID, b.Address); err != nil {
-			return err
-		}
-		return equipNFTSlots(ctx, tx, c.UserID, slots)
-	})
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO nft_bindings(user_id,token_id,address) VALUES($1,$2,$3)`,
+		userID, b.TokenID, b.Address); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO nft_binding_events(user_id,token_id,address,bound) VALUES($1,$2,$3,TRUE)`,
+		userID, b.TokenID, b.Address); err != nil {
+		return err
+	}
+	return equipNFTSlots(ctx, tx, userID, slots)
 }
 
 func (s *Store) UnbindNFT(ctx context.Context, userID int64, expected *collectible.Binding) error {
@@ -189,8 +198,8 @@ func (s *Store) SaveNFTCards(ctx context.Context, cards []collectible.Card, sold
 		for _, card := range cards {
 			if _, err := tx.Exec(ctx, `INSERT INTO nft_card_inventory(id,name,english,chinese,picture,address,status,sold_at)
 				VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN statement_timestamp() END)
-				ON CONFLICT(id) DO UPDATE SET address=EXCLUDED.address,status=EXCLUDED.status,sold_at=EXCLUDED.sold_at
-				WHERE $8 AND nft_card_inventory.status<>1`, card.ID, card.Name, card.English, card.Chinese, card.Picture,
+				ON CONFLICT(id) DO UPDATE SET address=EXCLUDED.address,status=EXCLUDED.status,sold_at=COALESCE(nft_card_inventory.sold_at,EXCLUDED.sold_at)
+				WHERE $8 AND (nft_card_inventory.status<>1 OR nft_card_inventory.address='')`, card.ID, card.Name, card.English, card.Chinese, card.Picture,
 				card.Address, card.Status, sold); err != nil {
 				return err
 			}

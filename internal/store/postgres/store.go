@@ -15,6 +15,7 @@ import (
 )
 
 type Store struct {
+	rocketRelayScope    string
 	rocketRules         *gift.RocketRules
 	bots                atomic.Pointer[roomBots]
 	pool                *pgxpool.Pool

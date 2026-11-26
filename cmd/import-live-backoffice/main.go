@@ -66,11 +66,15 @@ func run(ctx context.Context, source, target, bootstrap, area string) error {
 
 	var areas []postgres.LegacyBackoffice
 	if area == "all" || area == admin.OperationArea {
+		roleOrder, err := legacyAdminRoleOrder(ctx, snapshot)
+		if err != nil {
+			return err
+		}
 		areas = append(areas, postgres.LegacyBackoffice{
 			Area:      admin.OperationArea,
 			Tenants:   sourceRows(ctx, snapshot, "admin_tenant", operationTenants, scanTenant),
 			Accounts:  sourceRows(ctx, snapshot, "admin_user", operationUsers, scanAccount),
-			Roles:     sourceRows(ctx, snapshot, "admin_role", operationRoles, scanRole),
+			Roles:     sourceRows(ctx, snapshot, "admin_role", fmt.Sprintf(operationRoles, roleOrder), scanRole),
 			Menus:     sourceRows(ctx, snapshot, "admin_menu", operationMenus, scanMenu),
 			Members:   sourceRows(ctx, snapshot, "admin_user_role", operationMembers, scanGrant),
 			RoleMenus: sourceRows(ctx, snapshot, "admin_role_menu", operationRoleMenus, scanGrant),
@@ -97,7 +101,7 @@ func run(ctx context.Context, source, target, bootstrap, area string) error {
 const operationTenants = `SELECT id,code,name,remark,create_time FROM admin_tenant ORDER BY id`
 const operationUsers = `SELECT id,tenant_code,username,nick_name,email,phone_number,gender,0,0,admin,status,del_flag,remark,password,create_time
 	FROM admin_user ORDER BY id`
-const operationRoles = `SELECT id,tenant_code,name,code,sort,status,remark,create_time FROM admin_role ORDER BY id`
+const operationRoles = `SELECT id,tenant_code,name,code,%s,status,remark,create_time FROM admin_role ORDER BY id`
 const operationMenus = `SELECT id,tenant_code,pid,name,url,menu_type,hidden,target,refresh,perms,icon,display_order,remark,create_time
 	FROM admin_menu ORDER BY id`
 const operationMembers = `SELECT tenant_code,uid,rid,0 FROM admin_user_role ORDER BY id`
@@ -112,6 +116,20 @@ const mcnMembers = `SELECT CAST(COALESCE(u.mcn_id,0) AS CHAR),m.user_id,m.role_i
 const mcnRoleMenus = `SELECT CAST(COALESCE(r.mcn_id,0) AS CHAR),m.role_id,m.role_menu_id,0
 	FROM mcn_role_menu m LEFT JOIN mcn_role r ON r.id=m.role_id ORDER BY m.id`
 const mcnUserMenus = `SELECT CAST(mcn_id AS CHAR),user_id,menu_id,0 FROM mcn_user_privilege ORDER BY id`
+
+func legacyAdminRoleOrder(ctx context.Context, snapshot *sql.Tx) (string, error) {
+	// The checked-in bootstrap SQL uses display_order. The newer ORM uses sort.
+	var modern bool
+	err := snapshot.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns
+		WHERE table_schema=DATABASE() AND table_name='admin_role' AND column_name='sort')`).Scan(&modern)
+	if err != nil {
+		return "", fmt.Errorf("identify admin_role ordering: %w", err)
+	}
+	if modern {
+		return "sort", nil
+	}
+	return "display_order", nil
+}
 
 func sourceRows[T any](ctx context.Context, snapshot *sql.Tx, table, query string, scan func(*sql.Rows) (T, error)) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {

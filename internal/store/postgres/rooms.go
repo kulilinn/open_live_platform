@@ -105,6 +105,14 @@ func (s *Store) StartWithSettings(ctx context.Context, owner int64, settings liv
 	}
 	var result live.Room
 	err := s.change(ctx, owner, func(r *roomChange) error {
+		var cancelled bool
+		if err := r.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM anchor_review_cancellations c
+			WHERE c.user_id=$1 AND NOT EXISTS(SELECT 1 FROM anchor_profiles a WHERE a.user_id=c.user_id AND a.state=1))`, owner).Scan(&cancelled); err != nil {
+			return err
+		}
+		if cancelled {
+			return live.ErrForbidden
+		}
 		room, err := scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1", owner))
 		newRoom := errors.Is(err, live.ErrRoomNotFound)
 		if err != nil && !newRoom {

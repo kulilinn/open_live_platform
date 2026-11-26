@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var LubanTables = []string{
 	"robot_create_property", "robot_welcome_message_text", "robot_interactive_gift_text",
 	"robot_room_population", "robot_room_entry_time", "robot_room_exit_time",
 	"robot_welcome_message_time", "robot_interactive_gift_time",
+	"robot_like_time", "robot_daily_time", "robot_daily_text",
 }
 
 type weightedValue struct {
@@ -42,7 +44,7 @@ func FromLuban(base Config, tables map[string][]byte) (Config, error) {
 		}
 	}
 	cfg := base
-	if len(accounts) == 0 {
+	if len(accounts) == 0 && !cfg.DatabasePool {
 		return Config{}, fmt.Errorf("Luban robot account table is empty")
 	}
 	cfg.Accounts = make([]Account, 0, len(accounts))
@@ -65,8 +67,23 @@ func FromLuban(base Config, tables map[string][]byte) (Config, error) {
 		script.Gifts[line.Kind] = append(script.Gifts[line.Kind], line.Text)
 		cfg.Scripts[key] = script
 	}
-	rules := []*[]weightedValue{&cfg.population, &cfg.entry, &cfg.stay, &cfg.welcome, &cfg.gift}
-	for i, table := range LubanTables[3:] {
+	if data, found := tables["robot_daily_text"]; found {
+		var daily []struct {
+			Locale string `json:"weight"`
+			Text   string `json:"text"`
+		}
+		if err := json.Unmarshal(data, &daily); err != nil {
+			return Config{}, fmt.Errorf("robot_daily_text: %w", err)
+		}
+		for _, line := range daily {
+			key := strings.ToLower(strings.TrimSpace(line.Locale))
+			script := cfg.Scripts[key]
+			script.Daily = append(script.Daily, line.Text)
+			cfg.Scripts[key] = script
+		}
+	}
+	rules := []*[]weightedValue{&cfg.population, &cfg.entry, &cfg.stay, &cfg.welcome, &cfg.gift, &cfg.like, &cfg.daily}
+	for i, table := range LubanTables[3 : 3+len(rules)] {
 		if data, ok := tables[table]; ok {
 			if err := json.Unmarshal(data, rules[i]); err != nil {
 				return Config{}, fmt.Errorf("%s: %w", table, err)
@@ -109,6 +126,15 @@ func (c Config) RoomSchedule(liveID int64) (population, entry, stay int) {
 	seed := uint64(liveID)
 	return pickWeighted(c.population, c.RoomPopulation, mix(seed)),
 		pickWeighted(c.entry, c.EntrySeconds, mix(seed+1)), pickWeighted(c.stay, c.StaySeconds, mix(seed+2))
+}
+
+func (c Config) LikeDelay(liveID, userID int64) time.Duration {
+	seed := mix(uint64(liveID) + mix(uint64(userID)))
+	fallback := 600 + int(seed%600)
+	if c.LikeDelaySeconds != nil {
+		fallback = *c.LikeDelaySeconds
+	}
+	return time.Duration(pickWeighted(c.like, fallback, seed)) * time.Second
 }
 
 func (c Config) CandidateSchedule() (maxPopulation, minEntry int) {

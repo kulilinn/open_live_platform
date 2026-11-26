@@ -37,7 +37,23 @@ type PurchaseRow struct {
 
 func (b backoffice) registerCatalogAndFinance(mux *http.ServeMux, catalog *gift.Catalog) {
 	b.registerGiftTemplates(mux, catalog)
+	b.registerLiveIncome(mux)
 	const base = "POST /api/operation/gifts/gift/"
+	mux.HandleFunc(base+"discount", b.authorized(false, true, func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
+		var body struct {
+			Users *string `json:"users"`
+			Point *int32  `json:"point"`
+		}
+		if !httpx.Decode(w, r, &body) {
+			return
+		}
+		if body.Users == nil || body.Point == nil {
+			backofficeError(w, http.StatusBadRequest, "400", "invalid discount request")
+			return
+		}
+		// The legacy admin proxy acknowledged this call with its internal handler disabled.
+		backofficeReply(w, nil, nil)
+	}))
 	mux.HandleFunc(base+"list", b.authorized(false, true, func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
 		items, err := catalog.Items(r.Context())
 		if err != nil {

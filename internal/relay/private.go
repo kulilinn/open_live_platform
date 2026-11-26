@@ -53,6 +53,27 @@ func (p *privateStreams) deliver(id int64, frame json.RawMessage) {
 	}
 }
 
+func (p *privateStreams) deliverGlobal(payload json.RawMessage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id, streams := range p.users {
+		frame, err := json.Marshal(struct {
+			Content string          `json:"content"`
+			Queue   string          `json:"queue"`
+			Payload json.RawMessage `json:"payload"`
+		}{"notification", strconv.FormatInt(id, 10), payload})
+		if err != nil {
+			return
+		}
+		for ch := range streams {
+			select {
+			case ch <- frame:
+			default:
+			}
+		}
+	}
+}
+
 func (h *deviceHub) pushPrivate(ctx context.Context, id int64, content string, payload any) error {
 	queue := id
 	if msg, ok := payload.(QueuedPayload); ok {

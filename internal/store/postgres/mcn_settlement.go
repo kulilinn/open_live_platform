@@ -59,7 +59,7 @@ func (s *Store) FinishMCNMembership(ctx context.Context, actor admin.Principal, 
 		// Take a short write barrier across incoming receipts. A debit that
 		// started during this contract must be resolved before final settlement.
 		if _, err := tx.Exec(ctx, `LOCK TABLE gift_orders,date_gift_orders,room_wheel_orders,anchor_post_orders,
-			subscription_orders,mcn_legacy_settlement_proofs IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+			subscription_orders,mcn_legacy_settlement_proofs,finance_payment_attempts,finance_bad_debt_receipts IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			return err
 		}
 		var pending bool
@@ -70,7 +70,14 @@ func (s *Store) FinishMCNMembership(ctx context.Context, actor admin.Principal, 
 			 OR EXISTS(SELECT 1 FROM anchor_post_orders o JOIN anchor_posts p ON p.id=o.post_id WHERE p.owner_id=$1 AND o.state=0)
 			 OR EXISTS(SELECT 1 FROM subscription_orders o JOIN subscription_plans p ON p.id=o.plan_id WHERE p.anchor_id=$1 AND o.status=0)
 			 OR EXISTS(SELECT 1 FROM mcn_legacy_settlement_proofs
-				WHERE streamer_id=$1 AND agency_id=$2 AND source_pending AND NOT provider_verified AND paid_at >= $3)`,
+				WHERE streamer_id=$1 AND agency_id=$2 AND source_pending AND NOT provider_verified AND paid_at >= $3)
+			 OR EXISTS(SELECT 1 FROM finance_payment_attempts f WHERE f.action='bad_debt' AND f.state IN ('reserved','unknown') AND f.user_id IN (
+				SELECT sender_id FROM gift_orders WHERE receiver_id=$1 AND state=1 AND paid_at>=$3
+				UNION ALL SELECT sender_id FROM date_gift_orders WHERE anchor_id=$1 AND state=1 AND paid_at>=$3
+				UNION ALL SELECT user_id FROM room_wheel_orders WHERE anchor_id=$1 AND state=1 AND paid_at>=$3
+				UNION ALL SELECT o.actor_id FROM anchor_post_orders o JOIN anchor_posts p ON p.id=o.post_id WHERE p.owner_id=$1 AND o.state=1 AND o.paid_at>=$3
+				UNION ALL SELECT o.fan_id FROM subscription_orders o JOIN subscription_plans p ON p.id=o.plan_id WHERE p.anchor_id=$1 AND o.status=1 AND o.confirmed_at>=$3
+			))`,
 			streamerID, actor.AgencyID, *joined).Scan(&pending)
 		if err != nil {
 			return err
@@ -163,8 +170,11 @@ const mcnEntrySQL = `WITH candidates AS (
 	FROM mcn_legacy_settlement_proofs l WHERE l.streamer_id=$1 AND l.agency_id=$2 AND l.source_pending AND l.provider_verified
 		AND l.paid_at >= $3 AND l.paid_at < $4
 )
-SELECT source,source_id,payment_group,paid_at,gross,charge,reported,debt_points,debt_ld,COALESCE(proof_id,0),COALESCE(proof_no,'')
-	FROM candidates c WHERE NOT EXISTS(SELECT 1 FROM mcn_final_settlement_items i WHERE i.source=c.source AND i.source_id=c.source_id)
+SELECT source,source_id,payment_group,paid_at,gross,charge,reported,COALESCE(d.bad_debt_points,c.debt_points),
+	CASE WHEN c.debt_ld IS NOT NULL AND d.provider_order_id IS NOT NULL THEN trunc(c.gross::numeric*d.bad_debt_points/d.charged_points)::bigint ELSE c.debt_ld END,
+	COALESCE(proof_id,0),COALESCE(proof_no,'')
+	FROM candidates c LEFT JOIN finance_bad_debt_receipts d ON d.provider_order_id=c.proof_id AND d.provider_order_no=c.proof_no AND d.charged_points=c.charge
+	WHERE NOT EXISTS(SELECT 1 FROM mcn_final_settlement_items i WHERE i.source=c.source AND i.source_id=c.source_id)
 	ORDER BY paid_at,source,source_id`
 
 func mcnSettlementItems(ctx context.Context, tx pgx.Tx, streamer, agency int64, joined, cutoff time.Time) ([]mcnSettlementItem, error) {

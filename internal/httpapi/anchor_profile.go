@@ -288,7 +288,7 @@ func (s anchorAPI) kycToken(w http.ResponseWriter, r *http.Request, actor int64)
 }
 
 func (s anchorAPI) kycConfirm(w http.ResponseWriter, r *http.Request, actor int64) {
-	var body map[string]any
+	var body anchor.IdentityUpdate
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if !httpx.Decode(w, r, &body) {
 		return
@@ -303,15 +303,14 @@ func (s anchorAPI) kycConfirm(w http.ResponseWriter, r *http.Request, actor int6
 		collectibleData(w, false)
 		return
 	}
-	// Identity data stays with the configured provider. Client fields cannot
-	// set a verification status. Verify the stored applicant for this actor.
+	// Only the provider can confirm verification of this applicant.
 	verified, err := s.kyc.Verified(ctx, actor, applicant)
 	if err != nil {
 		anchorError(w, err)
 		return
 	}
 	if verified {
-		verified, err = s.store.ConfirmAnchorKYC(ctx, actor, applicant)
+		verified, err = s.store.ConfirmAnchorKYC(ctx, actor, applicant, body)
 		if err != nil {
 			anchorError(w, err)
 			return

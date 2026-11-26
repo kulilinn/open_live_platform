@@ -15,6 +15,7 @@ import (
 
 	"open_live_platform/internal/app"
 	"open_live_platform/internal/gift"
+	"open_live_platform/internal/relay"
 	"open_live_platform/internal/store/postgres"
 )
 
@@ -54,6 +55,7 @@ func TestPostgresRocketRefuelSettlesWeightedRewardsAndPool(t *testing.T) {
 	}))
 	t.Cleanup(billing.Close)
 	cfg.PaymentHost, cfg.PaymentAppID = billing.URL, "rocket-test"
+	cfg.RelayRust = relay.RustOptions{AppKey: "rocket-test", AppSecret: "rocket-test-secret"}
 	dir := t.TempDir()
 	cfg.GiftCatalogFile = filepath.Join(dir, "gifts.json")
 	check(os.WriteFile(cfg.GiftCatalogFile, []byte(`[
@@ -73,7 +75,7 @@ func TestPostgresRocketRefuelSettlesWeightedRewardsAndPool(t *testing.T) {
 			{"notice_type":1,"config_condition":3,"content":"equal threshold is skipped"},
 			{"notice_type":1,"config_condition":4,"content":"deleted","del_flag":1},
 			{"notice_type":1,"config_condition":5,"content":"Critical"},
-			{"notice_type":2,"config_condition":2,"live_room_flag":0},
+			{"notice_type":2,"config_condition":2,"live_room_flag":0,"broadcast_config_id":"40"},
 			{"notice_type":2,"config_condition":3,"live_room_flag":1}
 		]
 	}`), 0600))
@@ -86,9 +88,14 @@ func TestPostgresRocketRefuelSettlesWeightedRewardsAndPool(t *testing.T) {
 	unconfigured := open(cfg)
 	cfg.RocketConfigFile = rules
 	first, second := open(cfg), open(cfg)
+	_, err := db.Exec(ctx, `INSERT INTO public_catalog(section,records) VALUES('broadcast_configs',
+		'[{"id":40,"jump_type":1,"jump_target":"test-room","jump_background":"plain","jump_name":"Go","background":"blue"}]'::jsonb)`)
+	check(err)
 	owner, err := first.Accounts.SignUp(ctx, "owner@rocket.test", "password", "Owner")
 	check(err)
 	viewer, err := first.Accounts.SignUp(ctx, "viewer@rocket.test", "password", "Viewer")
+	check(err)
+	outside, err := first.Accounts.SignUp(ctx, "outside@rocket.test", "password", "Outside")
 	check(err)
 	room, err := first.Rooms.Start(ctx, owner.User.ID, "Rocket Live", "")
 	check(err)
@@ -117,8 +124,37 @@ func TestPostgresRocketRefuelSettlesWeightedRewardsAndPool(t *testing.T) {
 	sub, err := first.Rooms.SubscribeWithTranslations(ctx, room.ID, owner.User.ID)
 	check(err)
 	defer sub.Unsubscribe()
+	server := httptest.NewServer(first.Server.Handler)
+	t.Cleanup(server.Close)
+	socket := openPrivateH5(t, server, outside)
+	t.Cleanup(func() { socket.Close() })
 	send(second, 101, 2, "fuel", 200, "200")
 	send(first, 101, 2, "fuel", 200, "200")
+	for {
+		var broadcast struct {
+			Content, Queue string
+			Payload        struct {
+				Type int `json:"broadcast_type"`
+				Data struct {
+					Combo int    `json:"combo"`
+					Jump  string `json:"jump_target"`
+				} `json:"data"`
+			}
+		}
+		_, wire, err := socket.ReadMessage()
+		check(err)
+		var envelope struct{ Content string }
+		check(json.Unmarshal(wire, &envelope))
+		if envelope.Content != "notification" {
+			continue
+		}
+		check(json.Unmarshal(wire, &broadcast))
+		if broadcast.Queue != strconv.FormatInt(outside.User.ID, 10) || broadcast.Payload.Type != 6 ||
+			broadcast.Payload.Data.Combo != 2 || broadcast.Payload.Data.Jump != "test-room" {
+			t.Fatalf("unexpected rocket broadcast %s", wire)
+		}
+		break
+	}
 	notices := make(map[string]bool)
 	var criticalFrames, comboFrames int
 	deadline := time.After(3 * time.Second)

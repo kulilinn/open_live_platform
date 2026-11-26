@@ -42,9 +42,36 @@ type Record struct {
 
 type Application struct {
 	FamilyName string  `json:"family_name"`
-	Country    string  `json:"country"`
-	Address    *string `json:"address"`
 	Twitter    *string `json:"twitter"`
+	IdentityForm
+}
+
+type IdentityForm struct {
+	Name           *string `json:"name"`
+	FirstName      *string `json:"first_name"`
+	SecondName     *string `json:"second_name"`
+	JapaneseFirst  *string `json:"ja_first_name"`
+	JapaneseSecond *string `json:"ja_second_name"`
+	Birth          *string `json:"birth"`
+	Gender         *int8   `json:"gender"`
+	Country        string  `json:"country"`
+	Area           *string `json:"area"`
+	Code           *string `json:"code"`
+	Address        *string `json:"address"`
+	DocumentType   *int8   `json:"id_card_type"`
+	Document       *string `json:"id_card"`
+	Phone          *string `json:"phone_number"`
+	Front          *string `json:"id_card_front_pic"`
+	Back           *string `json:"id_card_back_pic"`
+	Holding        *string `json:"id_card_hold_pic"`
+	Extra          *string `json:"extra"`
+}
+
+// Verified applicants can update this subset of their submitted form.
+type IdentityUpdate struct {
+	Name, Birth, Country, Area, Code, Address, Extra *string
+	Gender                                           *int8
+	IDCard, PhoneNumber                              *string
 }
 
 type Social struct {
@@ -98,7 +125,7 @@ type Store interface {
 	EditAnchorSocial(context.Context, int64, Social) error
 	AnchorApplicant(context.Context, int64) (string, error)
 	SaveAnchorApplicant(context.Context, int64, string) error
-	ConfirmAnchorKYC(context.Context, int64, string) (bool, error)
+	ConfirmAnchorKYC(context.Context, int64, string, IdentityUpdate) (bool, error)
 }
 
 func FromIdentity(u auth.User) (Record, error) {
@@ -207,7 +234,7 @@ func (m *Memory) SaveAnchorApplicant(ctx context.Context, id int64, applicant st
 	return nil
 }
 
-func (m *Memory) ConfirmAnchorKYC(ctx context.Context, id int64, applicant string) (bool, error) {
+func (m *Memory) ConfirmAnchorKYC(ctx context.Context, id int64, applicant string, _ IdentityUpdate) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := ctx.Err(); err != nil {

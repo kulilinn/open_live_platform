@@ -82,7 +82,11 @@ func (c *Client) request(ctx context.Context, method, path string, userID int64,
 	if c == nil {
 		return ErrUnavailable
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.host+path, bytes.NewReader(body))
+	var payloadReader io.Reader
+	if body != nil {
+		payloadReader = io.NopCloser(bytes.NewReader(body))
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.host+path, payloadReader)
 	if err != nil {
 		return ErrUnavailable
 	}
@@ -90,6 +94,7 @@ func (c *Client) request(ctx context.Context, method, path string, userID int64,
 	req.Header.Set("USER_ID", strconv.FormatInt(userID, 10))
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = int64(len(body))
 	}
 	res, err := c.client.Do(req)
 	if err != nil {
@@ -110,6 +115,10 @@ func (c *Client) request(ctx context.Context, method, path string, userID int64,
 		return ErrUnavailable
 	}
 	if res.StatusCode == http.StatusOK && result.Code == 200 {
+		if raw, ok := data.(*financeConfirmation); ok {
+			*raw = financeConfirmation(payload)
+			return nil
+		}
 		if len(result.Data) == 0 || string(result.Data) == "null" || json.Unmarshal(result.Data, data) != nil {
 			return ErrUnavailable
 		}

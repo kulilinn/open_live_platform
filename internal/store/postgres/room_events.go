@@ -31,6 +31,7 @@ type roomSignal struct {
 	CreatedAt  time.Time       `json:"CreatedAt,omitzero"`
 	RoomStatus live.RoomStatus `json:"RoomStatus,omitempty"`
 	Likes      int64           `json:"Likes,omitempty"`
+	RelayScope string          `json:",omitempty"`
 }
 
 func (s *Store) startRoomEvents(ctx context.Context) error {
@@ -88,6 +89,9 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 		signal.RoomStatus = r.event.RoomStatus
 	case "gift", "rocket_refuel", "rocket_final":
 		signal.CreatedAt = r.event.CreatedAt
+		if r.event.Type == "rocket_refuel" {
+			signal.RelayScope = s.rocketRelayScope
+		}
 	case "room_like":
 		signal.CreatedAt = r.event.CreatedAt
 		signal.LiveID, signal.Likes = r.event.LiveID, r.event.Likes
@@ -181,6 +185,11 @@ func (s *Store) readRoomEvents(ctx context.Context, conn *pgx.Conn) {
 		var signal roomSignal
 		if json.Unmarshal([]byte(n.Payload), &signal) != nil {
 			continue
+		}
+		if signal.Kind == "rocket_refuel" {
+			if err := s.sendRocketComboBroadcast(ctx, conn, signal); err != nil {
+				return
+			}
 		}
 		if err := s.deliverRoomSignal(ctx, conn, signal); err != nil {
 			return

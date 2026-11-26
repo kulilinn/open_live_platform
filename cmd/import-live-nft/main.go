@@ -47,6 +47,22 @@ func run(ctx context.Context) error {
 	}
 	source := sql.OpenDB(connector)
 	defer source.Close()
+	snapshot, err := source.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("read legacy NFT snapshot: %w", err)
+	}
+	defer snapshot.Rollback()
+	bindings, err := readBindings(ctx, snapshot)
+	if err != nil {
+		return fmt.Errorf("read MySQL NFT bindings: %w", err)
+	}
+	cards, skipped, err := readNFTInventory(ctx, snapshot)
+	if err != nil {
+		return fmt.Errorf("read MySQL NFT inventory: %w", err)
+	}
+	if err := snapshot.Commit(); err != nil {
+		return fmt.Errorf("close legacy NFT snapshot: %w", err)
+	}
 	target, err := postgres.Open(ctx, targetDSN)
 	if err != nil {
 		return fmt.Errorf("open PostgreSQL: %w", err)
@@ -56,9 +72,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	bindings, err := readBindings(ctx, source)
+	inventory, err := target.ImportLegacyNFTInventory(ctx, cards)
 	if err != nil {
-		return fmt.Errorf("read MySQL NFT bindings: %w", err)
+		return fmt.Errorf("import legacy NFT inventory: %w", err)
 	}
 	var imported, existing, transferred int
 	for _, legacy := range bindings {
@@ -80,11 +96,12 @@ func run(ctx context.Context) error {
 			existing++
 		}
 	}
-	fmt.Printf("bindings_created=%d existing_or_missing_user=%d ownership_changed=%d\n", imported, existing, transferred)
+	fmt.Printf("bindings_created=%d existing_or_missing_user=%d ownership_changed=%d cards_created=%d cards_existing=%d cards_skipped=%d\n",
+		imported, existing, transferred, inventory, len(cards)-inventory, skipped)
 	return nil
 }
 
-func readBindings(ctx context.Context, source *sql.DB) ([]legacyBinding, error) {
+func readBindings(ctx context.Context, source *sql.Tx) ([]legacyBinding, error) {
 	rows, err := source.QueryContext(ctx, `SELECT c.id,c.token_id,c.account,a.adorn_type,a.adorn_id
 		FROM user_creation_card c LEFT JOIN user_equipped_adorn a ON a.user_id=c.id
 			AND a.source_type=1 AND (a.expires_at IS NULL OR a.expires_at>UTC_TIMESTAMP())
@@ -110,4 +127,33 @@ func readBindings(ctx context.Context, source *sql.DB) ([]legacyBinding, error) 
 		}
 	}
 	return result, rows.Err()
+}
+
+func readNFTInventory(ctx context.Context, source *sql.Tx) ([]collectible.ManagedCard, int, error) {
+	rows, err := source.QueryContext(ctx, `SELECT id,name,card_english_name,card_chinese_name,card_pic_name,status,order_account,
+		pre_order_account,pre_order_name,description,create_time,update_time,sale_time,sold_time FROM nft_creation_cards ORDER BY id`)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1146 {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var cards []collectible.ManagedCard
+	var skipped int
+	for rows.Next() {
+		var card collectible.ManagedCard
+		err := rows.Scan(&card.ID, &card.Name, &card.English, &card.Chinese, &card.Picture, &card.Status, &card.OrderAccount,
+			&card.PreOrderAccount, &card.PreOrderName, &card.Description, &card.Created, &card.Updated, &card.Sale, &card.Sold)
+		if err != nil {
+			return nil, 0, err
+		}
+		if card.Status < 1 || card.Status > 5 || card.Created == nil || card.Created.IsZero() {
+			skipped++
+			continue
+		}
+		cards = append(cards, card)
+	}
+	return cards, skipped, rows.Err()
 }

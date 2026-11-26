@@ -34,6 +34,7 @@ func startEditorialAPI(t *testing.T, configure ...func(*app.Config)) editorialAP
 	data, err := json.Marshal([]admin.Principal{
 		{ID: 97, Area: admin.OperationArea, Tenant: admin.OperationTenant, Username: "editor", Admin: true, PasswordHash: hash},
 		{ID: 98, Area: admin.OperationArea, Tenant: admin.FinanceTenant, Username: "finance", Admin: true, PasswordHash: hash},
+		{ID: 99, Area: admin.MCNArea, AgencyID: 1, Email: "mcn@example.test", Admin: true, PasswordHash: hash},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -156,7 +156,7 @@ func TestPostgresAnchorOnboarding(t *testing.T) {
 		t.Fatalf("client KYC claims were trusted: %s", raw)
 	}
 	green.Store(true)
-	if raw := post(public, api+"kyc_set_info", alice.Token, `{}`, 200, "200").Data; string(raw) != "true" {
+	if raw := post(public, api+"kyc_set_info", alice.Token, `{"name":"Example Applicant","idCard":"test-document"}`, 200, "200").Data; string(raw) != "true" {
 		t.Fatalf("provider KYC was not recorded: %s", raw)
 	}
 	login := func(name string) string {
@@ -169,6 +169,15 @@ func TestPostgresAnchorOnboarding(t *testing.T) {
 		return token.AccessToken
 	}
 	readonly, operator := login("readonly"), login("reviewer")
+	post(ops, adminAPI+"kyc_detail", readonly, reviewRequest, 403, "403")
+	for route, want := range map[string]string{"detail": `"idCard":"test-document"`, "kyc_detail": `"id_card":"test-document"`} {
+		if raw := post(ops, adminAPI+route, operator, reviewRequest, 200, "200").Data; !strings.Contains(string(raw), want) {
+			t.Fatalf("%s = %s", route, raw)
+		}
+	}
+	if raw := post(ops, adminAPI+"kyc_page", operator, `{"name":"Example Applicant"}`, 200, "200").Data; !strings.Contains(string(raw), `"total":1`) {
+		t.Fatalf("kyc filter = %s", raw)
+	}
 	if result := post(ops, adminAPI+"page", readonly, reviewRequest, 200, "200").Data; !strings.Contains(string(result), `"kycStatus":1`) ||
 		!strings.Contains(string(result), `"state":0`) {
 		t.Fatalf("pending review list = %s", result)
@@ -210,5 +219,30 @@ func TestPostgresAnchorOnboarding(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT count(*) FROM backoffice_logs WHERE target=$1 AND operator_id=10
 		AND action IN ('anchor_approved','anchor_rejected')`, id).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("persistent reviews audit = %d, error=%v", count, err)
+	}
+	post(ops, adminAPI+"cancel", readonly, reviewRequest, 403, "403")
+	post(ops, adminAPI+"cancel", operator, reviewRequest, 200, "200")
+	post(ops, adminAPI+"kyc_detail", operator, reviewRequest, 200, "4005")
+	if _, err := platform.Rooms.Start(ctx, alice.User.ID, "cancelled", ""); err == nil {
+		t.Fatal("cancelled host opened a room")
+	}
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM subscription_plans WHERE anchor_id=$1 AND NOT deleted`, alice.User.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("active plans=%d, error=%v", count, err)
+	}
+	post(public, api+"become_anchor", alice.Token, `{"country":"JP"}`, 200, "200")
+	post(ops, adminAPI+"pass", operator, reviewRequest, 200, "200")
+	if _, err := platform.Rooms.Start(ctx, alice.User.ID, "approved again", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM subscription_plans WHERE anchor_id=$1 AND NOT deleted`, alice.User.ID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("restored plans=%d, error=%v", count, err)
+	}
+	batch := `{"prefix":"fixture","beginIndex":42,"count":2,"mail":"example.test","password":"fixture-password","isAnchor":true}`
+	post(ops, "/api/test/batch_signup", readonly, batch, 403, "403")
+	for range 2 {
+		post(ops, "/api/test/batch_signup", operator, batch, 200, "200")
+	}
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM anchor_profiles a JOIN users u ON u.id=a.user_id WHERE u.email IN ('fixture_42@example.test','fixture_43@example.test') AND a.state=1`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("batch-created anchors=%d, error=%v", count, err)
 	}
 }

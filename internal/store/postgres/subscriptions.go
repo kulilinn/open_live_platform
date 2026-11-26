@@ -26,7 +26,7 @@ func ensureFreePlan(ctx context.Context, executor interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }, anchorID int64) error {
 	_, err := executor.Exec(ctx, `INSERT INTO subscription_plans(anchor_id,plan_type,price) SELECT $1,2,0
-		WHERE NOT EXISTS(SELECT 1 FROM subscription_plans WHERE anchor_id=$1 AND plan_type=2) ON CONFLICT DO NOTHING`, anchorID)
+		WHERE NOT EXISTS(SELECT 1 FROM subscription_plans WHERE anchor_id=$1 AND plan_type=2 AND NOT deleted) ON CONFLICT DO NOTHING`, anchorID)
 	return err
 }
 

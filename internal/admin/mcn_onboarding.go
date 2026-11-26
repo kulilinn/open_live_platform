@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/transport/httpx"
 	"open_live_platform/internal/upload"
 )
@@ -66,8 +67,11 @@ type MCNOnboardingStore interface {
 
 type BackofficeOptions struct {
 	MCNJoinURL, MCNInternalToken string
+	ConfigDiagnostics            http.HandlerFunc
+	Finance                      FinancePayments
 	Images                       upload.Config
 	ImagePrefix                  string
+	Collectibles                 *collectible.Service
 }
 
 func (b backoffice) registerMCNOnboarding(mux *http.ServeMux) {
@@ -105,7 +109,7 @@ func (b backoffice) registerMCNOnboarding(mux *http.ServeMux) {
 						return
 					}
 					var valid bool
-					edit.ManagerID, manager, valid = b.manager(actor, edit.ManagerID)
+					edit.ManagerID, manager, valid = b.manager(r.Context(), actor, edit.ManagerID)
 					if !valid {
 						backofficeError(w, http.StatusForbidden, "403", "Manager is outside the agency")
 						return
@@ -161,24 +165,30 @@ func (b backoffice) registerMCNOnboarding(mux *http.ServeMux) {
 		}))
 }
 
-func (b backoffice) manager(actor Principal, id *int64) (*int64, *string, bool) {
+func (b backoffice) manager(ctx context.Context, actor Principal, id *int64) (*int64, *string, bool) {
 	if actor.Manager {
 		if id != nil && *id != actor.ID {
 			return nil, nil, false
 		}
-		name := actor.Name()
+		name := mcnStaffName(actor)
 		return &actor.ID, &name, true
 	}
 	if id == nil || *id == 0 {
 		return nil, nil, true
 	}
-	for _, p := range b.principals {
-		if p.ID == *id && p.Area == MCNArea && p.AgencyID == actor.AgencyID && p.Manager && !p.Disabled {
-			name := p.Name()
-			return id, &name, true
-		}
+	p, err := b.currentPrincipal(ctx, *id)
+	if err == nil && p.Area == MCNArea && p.AgencyID == actor.AgencyID && p.Manager && !p.Disabled {
+		name := mcnStaffName(p)
+		return id, &name, true
 	}
 	return nil, nil, false
+}
+
+func mcnStaffName(actor Principal) string {
+	if actor.Nickname != "" {
+		return actor.Nickname
+	}
+	return actor.Name()
 }
 
 func mcnOperationResult(w http.ResponseWriter, err error) {

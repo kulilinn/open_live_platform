@@ -48,9 +48,12 @@ func (h *deviceHub) accepts(signal RustDeviceSignal) bool {
 	if signal.Scope != h.scope || signal.Node == h.node {
 		return false
 	}
-	if signal.Kind == "private" {
+	if signal.Kind == "private" || signal.Kind == "global" {
 		h.private.mu.Lock()
 		defer h.private.mu.Unlock()
+		if signal.Kind == "global" {
+			return len(h.private.users) != 0
+		}
 		return len(h.private.users[signal.UserID]) != 0
 	}
 	h.mu.Lock()
@@ -121,6 +124,10 @@ func (h *deviceHub) receive(signal RustDeviceSignal) {
 	}
 	if signal.Kind == "private" {
 		h.private.deliver(signal.UserID, signal.Data)
+		return
+	}
+	if signal.Kind == "global" {
+		h.private.deliverGlobal(signal.Data)
 		return
 	}
 	h.mu.Lock()

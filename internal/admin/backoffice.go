@@ -195,7 +195,9 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		b.options = options[0]
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthchecker", func(w http.ResponseWriter, _ *http.Request) { backofficeReply(w, nil, nil) })
+	mux.HandleFunc("GET /healthchecker", func(w http.ResponseWriter, _ *http.Request) {
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "200", "message": "Loverose Server"})
+	})
 	login, logout := "POST /api/auth/accountlogin", "POST /api/auth/logout"
 	if area == MCNArea {
 		login, logout = "POST /api/user/account_login", "POST /api/user/logout"
@@ -222,27 +224,38 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		b.registerMCNReports(mux)
 		b.registerMCNIncome(mux)
 	} else {
+		if b.options.ConfigDiagnostics != nil {
+			mux.HandleFunc("GET /testconfig", b.options.ConfigDiagnostics)
+		}
 		b.registerOperations(mux)
 		b.registerUserHistory(mux)
 		b.registerCatalogAndFinance(mux, catalog)
 		b.registerGiftMutations(mux, catalog)
 		b.registerAnchorReviews(mux)
+		b.registerAnchorRecords(mux)
 		b.registerPostReviews(mux)
 		b.registerEditorial(mux)
+		b.registerNFTManagement(mux)
 		b.registerPlatformSettings(mux)
+		b.registerFinancePayments(mux)
+		b.registerPlatformStats(mux)
 		b.registerWordLists(mux)
 		b.registerUploads(mux, catalog)
 	}
 	b.registerMCNDirectory(mux)
 	b.registerMCNFinanceIncome(mux)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var limit int64 = 64 * 1024
-		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
-			limit = 2 * 1024 * 1024
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, limit)
-		mux.ServeHTTP(w, r)
-	}), nil
+	return managementMux{mux}, nil
+}
+
+type managementMux struct{ *http.ServeMux }
+
+func (m managementMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var limit int64 = 64 * 1024
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		limit = 2 * 1024 * 1024
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	m.ServeMux.ServeHTTP(w, r)
 }
 
 func (b backoffice) login(w http.ResponseWriter, r *http.Request) {
