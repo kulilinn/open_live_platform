@@ -39,6 +39,7 @@ type AccountStore interface {
 	Revoke(ctx context.Context, token string) error
 	Find(ctx context.Context, id int64) (User, bool, error)
 	SetLanguage(ctx context.Context, id int64, language string) error
+	ChangePassword(ctx context.Context, id int64, oldPassword, newPassword string) error
 	Users(ctx context.Context) ([]User, error)
 	Names(ctx context.Context, ids []int64) (map[int64]string, error)
 }
@@ -198,6 +199,38 @@ func (s *Store) SetLanguage(ctx context.Context, id int64, language string) erro
 		return nil
 	}
 	return nil
+}
+
+func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPassword string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if oldPassword == "" || newPassword == "" {
+		return ErrMissingFields
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for email, login := range s.users {
+		if login.user.ID != id {
+			continue
+		}
+		oldKey, err := PasswordKey(oldPassword, login.salt[:])
+		if err != nil || subtle.ConstantTimeCompare(oldKey, login.key) != 1 {
+			return ErrInvalidCredentials
+		}
+		var salt [16]byte
+		if _, err := rand.Read(salt[:]); err != nil {
+			return err
+		}
+		key, err := PasswordKey(newPassword, salt[:])
+		if err != nil {
+			return err
+		}
+		login.salt, login.key = salt, key
+		s.users[email] = login
+		return nil
+	}
+	return ErrInvalidCredentials
 }
 
 func (s *Store) Users(ctx context.Context) ([]User, error) {

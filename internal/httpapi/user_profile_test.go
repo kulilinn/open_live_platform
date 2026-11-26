@@ -70,4 +70,16 @@ func TestUserProfileHTTP(t *testing.T) {
 	if apps.Code != http.StatusOK || apps.Body["status"] != "200" || len(apps.Body["data"].([]any)) != 0 {
 		t.Fatalf("user apps = %d %+v", apps.Code, apps.Body)
 	}
+	password := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/auth/changepassword", owner.Token, map[string]string{
+		"old_password": "secret", "new_password": "new-secret",
+	})
+	if password.Code != http.StatusOK || password.Body["status"] != "200" {
+		t.Fatalf("change password = %d %+v", password.Code, password.Body)
+	}
+	signin := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/auth/signin", "", map[string]string{
+		"email": owner.User.Email, "password": "new-secret", "account": "ignored",
+	})
+	if signin.Code != http.StatusOK {
+		t.Fatalf("signin after password change = %d %+v", signin.Code, signin.Body)
+	}
 }

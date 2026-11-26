@@ -142,6 +142,39 @@ func (s *Store) SetLanguage(ctx context.Context, id int64, language string) erro
 	return err
 }
 
+func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPassword string) error {
+	if oldPassword == "" || newPassword == "" {
+		return auth.ErrMissingFields
+	}
+	var salt, storedKey []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT password_salt, password_hash FROM users WHERE id = $1`, id,
+	).Scan(&salt, &storedKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.ErrInvalidCredentials
+	}
+	if err != nil {
+		return err
+	}
+	oldKey, err := auth.PasswordKey(oldPassword, salt)
+	if err != nil || subtle.ConstantTimeCompare(oldKey, storedKey) != 1 {
+		return auth.ErrInvalidCredentials
+	}
+	newSalt := make([]byte, 16)
+	if _, err := rand.Read(newSalt); err != nil {
+		return err
+	}
+	newKey, err := auth.PasswordKey(newPassword, newSalt)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
+		`UPDATE users SET password_salt=$2, password_hash=$3 WHERE id=$1`,
+		id, newSalt, newKey,
+	)
+	return err
+}
+
 func (s *Store) Users(ctx context.Context) ([]auth.User, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, email, account, language FROM users ORDER BY id`)
 	if err != nil {
