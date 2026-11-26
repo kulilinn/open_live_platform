@@ -60,4 +60,14 @@ func TestUserProfileHTTP(t *testing.T) {
 	if me.Body["data"].(map[string]any)["language"] != "en" {
 		t.Fatalf("language profile = %+v", me.Body)
 	}
+	status := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/user/check_user_status", owner.Token, nil)
+	statusData := status.Body["data"].(map[string]any)
+	if status.Code != http.StatusOK || status.Body["status"] != "200" ||
+		statusData["allow"] != true || statusData["ty"] != float64(0) {
+		t.Fatalf("check status = %d %+v", status.Code, status.Body)
+	}
+	apps := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/user/apps", owner.Token, map[string]any{})
+	if apps.Code != http.StatusOK || apps.Body["status"] != "200" || len(apps.Body["data"].([]any)) != 0 {
+		t.Fatalf("user apps = %d %+v", apps.Code, apps.Body)
+	}
 }

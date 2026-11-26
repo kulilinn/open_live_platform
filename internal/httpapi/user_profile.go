@@ -20,6 +20,19 @@ func (s server) setLanguage(w http.ResponseWriter, r *http.Request, userID int64
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
 }
 
+func (s server) checkUserStatus(w http.ResponseWriter, _ *http.Request, _ int64) {
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"status": "200",
+		"data": map[string]any{
+			"ty": 0, "allow": true, "limit_total": 0, "duration": 0, "reason": []string{},
+		},
+	})
+}
+
+func (s server) userApps(w http.ResponseWriter, _ *http.Request, _ int64) {
+	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": []any{}})
+}
+
 func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID int64) {
 	targetID := currentID
 	if value := r.PathValue("user_id"); value != "" && value != "me" {
