@@ -113,6 +113,8 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 
 兼容原浏览器 relay 时，在 WebSocket 请求中声明 `Sec-WebSocket-Protocol: h5relayer`。服务会先发送 `control` 用户帧，聊天使用原版的 `live_chat`、`queue`、`payload` 结构。主播主动关播时，H5 连接先收到 `channel: "room_status"`、`msgType: "O"`、状态值 `"0"` 的通知，再收到 WebSocket 正常关闭帧。省略子协议的旧客户端继续使用 Go 的事件格式，关播事件为 `type: "close"`。
 
+直播中最后一个主播 H5 连接断开时，观众收到同格式的状态值 `"3"`，已有连接、`liveId` 与聊天历史继续可用。主播重新进房或重连本场 H5 后，观众收到状态值 `"1"`。兼容房间详情和 `GET /api/live/room/online` 会返回相应的数字状态。
+
 房间状态接口沿用 Rust 的 `status/data` 包装。`kicked` 和 `banned` 的 `data` 是布尔值，`limited` 返回 `limit_ty`、`limit_reason`、`limit_allow`、`limit_duration`、`limit_total`。观众接口返回字符串形式的用户 ID，并提供昵称、管理员和禁言状态。
 
 ## 聊天记录

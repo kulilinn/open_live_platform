@@ -26,10 +26,6 @@ func (s server) roomInfoWithMembers(ctx context.Context, userID int64, room live
 	for _, id := range members {
 		memberIDs = append(memberIDs, strconv.FormatInt(id, 10))
 	}
-	online := 0
-	if room.Online {
-		online = 1
-	}
 	role := 2
 	if userID == room.OwnerID {
 		role = 3
@@ -41,7 +37,7 @@ func (s server) roomInfoWithMembers(ctx context.Context, userID int64, room live
 		"room": roomIDText, "name": ownerName, "avatar": "",
 		"fansCount": 0, "anchor": strconv.FormatInt(room.OwnerID, 10), "anchorNid": room.Session.AnchorNID,
 		"banner": "", "subject": room.Title, "title": room.Title,
-		"tag": "", "description": "", "online": online, "activity": 0,
+		"tag": "", "description": "", "online": room.Status(), "activity": 0,
 		"members": memberIDs, "memberCount": room.MemberCount, "member_count": room.MemberCount,
 		"isAnchor": userID == room.OwnerID, "showing": false,
 		"chatId": roomIDText, "liveId": strconv.FormatInt(room.Session.LiveID, 10), "gifts": []any{}, "plan": []any{},

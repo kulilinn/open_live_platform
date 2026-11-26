@@ -18,6 +18,8 @@ type Store struct {
 	eventReady   atomic.Bool
 	stopEvents   context.CancelFunc
 	eventsDone   chan struct{}
+	shutdown     sync.Once
+	anchors      anchorPresence
 	// Independent rooms can publish in parallel. Each shard orders local
 	// subscriptions and delivery with the commits that change their room.
 	streams [32]streams
@@ -54,9 +56,12 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 }
 
 func (s *Store) Shutdown() {
-	s.stopEvents()
-	<-s.eventsDone
-	s.pool.Close()
+	s.shutdown.Do(func() {
+		s.closeAnchorPresence()
+		s.stopEvents()
+		<-s.eventsDone
+		s.pool.Close()
+	})
 }
 
 func (s *Store) closeSubscriptions() {

@@ -73,13 +73,9 @@ func (s server) online(w http.ResponseWriter, r *http.Request, userID int64) {
 		roomStatusError(w, err)
 		return
 	}
-	online := 0
-	if room.Online {
-		online = 1
-	}
 	durationSeconds := int64(room.Session.Duration(time.Now()) / time.Second)
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"status": "200", "data": map[string]any{"online": online, "duration": durationSeconds},
+		"status": "200", "data": map[string]any{"online": room.Status(), "duration": durationSeconds},
 	})
 }
 

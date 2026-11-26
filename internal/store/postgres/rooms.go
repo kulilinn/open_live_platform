@@ -12,7 +12,7 @@ import (
 
 const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
     (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
-    live_id, live_started_at, live_ended_at, trans_lang`
+    live_id, live_started_at, live_ended_at, trans_lang, anchor_away`
 
 const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
@@ -22,7 +22,7 @@ func scanRoom(row pgx.Row) (live.Room, error) {
 	var room live.Room
 	var startedAt, endedAt *time.Time
 	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
-		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage)
+		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
 	}
@@ -116,13 +116,13 @@ func (s *Store) StartWithLanguage(ctx context.Context, owner int64, title, passw
 			result, err = scanRoom(r.tx.QueryRow(ctx, `INSERT INTO rooms(id,owner_id,title,password_hash,live_id,live_started_at,trans_lang)
 				VALUES($1,$1,$2,$3,nextval('room_live_id_seq'),statement_timestamp(),COALESCE($4,'')) RETURNING `+roomFields, owner, title, hash, language))
 		} else {
-			for _, table := range []string{"room_members", "room_admins", "room_mutes", "room_kicks", "room_password_attempts", "room_viewer_nids"} {
+			for _, table := range []string{"room_members", "room_admins", "room_mutes", "room_kicks", "room_password_attempts", "room_viewer_nids", "room_anchor_connections"} {
 				if _, err := r.tx.Exec(ctx, "DELETE FROM "+table+" WHERE room_id=$1", owner); err != nil {
 					return err
 				}
 			}
 			result, err = scanRoom(r.tx.QueryRow(ctx, `UPDATE rooms SET online=true,title=$2,password_hash=$3,
-				trans_lang=COALESCE($4,trans_lang),anchor_joined=false,
+				trans_lang=COALESCE($4,trans_lang),anchor_joined=false,anchor_away=false,
 				live_id=nextval('room_live_id_seq'),live_started_at=statement_timestamp(),live_ended_at=NULL,
 				updated_at=statement_timestamp(),`+advanceHistoryBoundary+" WHERE id=$1 RETURNING "+roomFields, owner, title, hash, language))
 		}
@@ -197,7 +197,7 @@ func (r *roomChange) close(actor int64) error {
 		return nil
 	}
 	var endedAt time.Time
-	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,
+	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_away=false,
 		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+
 		" WHERE id=$1 RETURNING live_ended_at", r.id).Scan(&endedAt); err != nil {
 		return err
@@ -206,6 +206,9 @@ func (r *roomChange) close(actor int64) error {
 		return err
 	}
 	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_viewer_nids WHERE room_id=$1", r.id); err != nil {
+		return err
+	}
+	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_anchor_connections WHERE room_id=$1", r.id); err != nil {
 		return err
 	}
 	_, err = r.tx.Exec(r.ctx, "DELETE FROM room_password_attempts WHERE room_id=$1", r.id)
@@ -270,13 +273,13 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, in
 	var rejectedPassword bool
 	err := s.change(ctx, id, func(r *roomChange) error {
 		var owner int64
-		var online, kicked bool
+		var online, kicked, anchorAway bool
 		var hash []byte
 		var failedAttempts int
-		err := r.tx.QueryRow(ctx, `SELECT owner_id, online, password_hash, anchor_joined,
+		err := r.tx.QueryRow(ctx, `SELECT owner_id, online, password_hash, anchor_joined, anchor_away,
 			EXISTS(SELECT 1 FROM room_kicks WHERE room_id=$1 AND user_id=$2),
 			COALESCE((SELECT failed_attempts FROM room_password_attempts WHERE room_id=$1 AND user_id=$2), 0)
-			FROM rooms WHERE id=$1`, id, uid).Scan(&owner, &online, &hash, &result.AnchorJoined, &kicked, &failedAttempts)
+			FROM rooms WHERE id=$1`, id, uid).Scan(&owner, &online, &hash, &result.AnchorJoined, &anchorAway, &kicked, &failedAttempts)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return live.ErrRoomNotFound
@@ -290,6 +293,11 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, in
 					return err
 				}
 				result.AnchorJoined = true
+			}
+			if anchorAway {
+				if err := r.setAnchorAway(owner, false); err != nil {
+					return err
+				}
 			}
 			return r.readJoinResult(&result, uid, includeMembers)
 		case kicked:

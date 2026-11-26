@@ -19,13 +19,15 @@ var errRoomEventsUnavailable = errors.New("room events listener unavailable")
 // roomSignal carries event metadata only. PostgreSQL limits NOTIFY payloads to
 // less than 8 KB, so chat text and the original frame stay in room_messages.
 type roomSignal struct {
-	RoomID    int64
-	Kind      string
-	UserID    int64
-	TargetID  int64
-	MessageID int64
-	Marker    string
-	ClosedAt  time.Time `json:"ClosedAt,omitzero"`
+	RoomID     int64
+	Kind       string
+	UserID     int64
+	TargetID   int64
+	MessageID  int64
+	Marker     string
+	ClosedAt   time.Time       `json:"ClosedAt,omitzero"`
+	CreatedAt  time.Time       `json:"CreatedAt,omitzero"`
+	RoomStatus live.RoomStatus `json:"RoomStatus,omitempty"`
 }
 
 func (s *Store) startRoomEvents(ctx context.Context) error {
@@ -72,8 +74,12 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 		RoomID: r.id, Kind: r.event.Type, UserID: r.event.UserID,
 		TargetID: r.event.TargetID, MessageID: r.event.MessageID, Marker: r.subMarker,
 	}
-	if r.event.Type == "close" {
+	switch r.event.Type {
+	case "close":
 		signal.ClosedAt = r.event.CreatedAt
+	case "room_status":
+		signal.CreatedAt = r.event.CreatedAt
+		signal.RoomStatus = r.event.RoomStatus
 	}
 	payload, err := json.Marshal(signal)
 	if err != nil {
@@ -155,6 +161,9 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 			// Older publishers sent close events without a timestamp.
 			event.CreatedAt = time.Now()
 		}
+	case "room_status":
+		event.CreatedAt = signal.CreatedAt
+		event.RoomStatus = signal.RoomStatus
 	}
 	stream.publish(event)
 	return nil

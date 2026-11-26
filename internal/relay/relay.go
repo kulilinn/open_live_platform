@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -141,6 +142,32 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string) {
 	defer conn.Close()
 	commandCtx := live.WithRoomCommandScope(ctx, roomID, sub.LiveID)
+	var anchorPing <-chan time.Time
+	if protocol == "h5relayer" && roomID == user.ID {
+		connectionID := rand.Text()
+		if err := rooms.AnchorConnected(ctx, roomID, sub.LiveID, connectionID); err != nil {
+			conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "could not register anchor connection"), time.Now().Add(time.Second))
+			return
+		}
+		defer func() {
+			disconnectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			if err := rooms.AnchorDisconnected(disconnectCtx, roomID, sub.LiveID, connectionID); err != nil {
+				log.Printf("disconnect anchor in room %d: %v", roomID, err)
+			}
+		}()
+
+		const pongTimeout = 75 * time.Second
+		if err := conn.SetReadDeadline(time.Now().Add(pongTimeout)); err != nil {
+			return
+		}
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(pongTimeout))
+		})
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		anchorPing = ticker.C
+	}
 	if protocol == "h5relayer" || protocol == "devicerelayer" {
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		userCommand := map[string]any{"cmd": "user", "data": map[string]any{
@@ -210,6 +237,11 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 	for {
 		var response any
 		select {
+		case <-anchorPing:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+				return
+			}
+			continue
 		case cmd, ok := <-commands:
 			if !ok {
 				return
@@ -232,6 +264,9 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 			if !ok {
 				conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
 				return
+			}
+			if event.Type == "room_status" && protocol != "h5relayer" {
+				continue
 			}
 			response = event
 			if protocol == "h5relayer" {
@@ -332,7 +367,7 @@ func parseDeviceCommand(raw json.RawMessage) (command, bool) {
 
 func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, event live.Event) any {
 	room := strconv.FormatInt(roomID, 10)
-	if event.Type == "close" {
+	if event.Type == "close" || event.Type == "room_status" {
 		return h5RoomFrame(room, map[string]any{
 			"id":        strconv.FormatInt(event.CreatedAt.UnixNano(), 10),
 			"channel":   "room_status",
@@ -343,7 +378,7 @@ func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, even
 			"message": map[string]any{
 				"msgGroup": "chat",
 				"msgType":  "O",
-				"message":  "0",
+				"message":  strconv.Itoa(int(event.RoomStatus)),
 				"userInfo": map[string]any{
 					"uid": event.UserID, "role": 5, "avatar": nil, "searchName": nil,
 					"name": nil, "country": nil, "userLevel": nil, "fanLevel": nil,

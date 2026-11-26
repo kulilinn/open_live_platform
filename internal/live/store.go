@@ -34,6 +34,7 @@ type Room struct {
 	MemberCount         int         `json:"member_count"`
 	IsLock              bool        `json:"isLock"`
 	Session             LiveSession `json:"-"`
+	AnchorAway          bool        `json:"-"`
 	ViewerNID           uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
 	TranslationLanguage string      `json:"-"`
 }
@@ -108,14 +109,15 @@ func (f RoomFilter) Window(total int64) (offset, limit, pages int64) {
 }
 
 type Event struct {
-	Type      string    `json:"type"`
-	RoomID    int64     `json:"room_id"`
-	UserID    int64     `json:"user_id"`
-	TargetID  int64     `json:"target_id,omitempty"`
-	Text      string    `json:"text,omitempty"`
-	Payload   string    `json:"-"`
-	MessageID int64     `json:"-"`
-	CreatedAt time.Time `json:"-"`
+	Type       string     `json:"type"`
+	RoomID     int64      `json:"room_id"`
+	UserID     int64      `json:"user_id"`
+	TargetID   int64      `json:"target_id,omitempty"`
+	Text       string     `json:"text,omitempty"`
+	Payload    string     `json:"-"`
+	MessageID  int64      `json:"-"`
+	CreatedAt  time.Time  `json:"-"`
+	RoomStatus RoomStatus `json:"-"`
 }
 
 const EventStreamCapacity = 33 // 32 pending events and one slot for the final close event.
@@ -150,6 +152,8 @@ type RoomStore interface {
 	ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64, error)
 	Join(ctx context.Context, roomID, userID int64, password string) error
 	JoinRoom(ctx context.Context, roomID, userID int64, password string) (JoinedRoom, error)
+	AnchorConnected(ctx context.Context, roomID, liveID int64, connectionID string) error
+	AnchorDisconnected(ctx context.Context, roomID, liveID int64, connectionID string) error
 	// RTCNID returns the RTC ID for the owner or a joined member of the active broadcast.
 	RTCNID(ctx context.Context, roomID, userID int64) (uint32, error)
 	Leave(ctx context.Context, roomID, userID int64) error
@@ -170,17 +174,18 @@ type RoomStore interface {
 
 type roomState struct {
 	Room
-	members          map[int64]struct{}
-	anchorJoined     bool
-	viewerNIDs       map[int64]uint32
-	lastViewerNID    uint32 // Retained across broadcasts on the same channel.
-	admins           map[int64]struct{}
-	muted            map[int64]time.Time
-	kicked           map[int64]struct{}
-	subscribers      map[chan Event]int64
-	passwordHash     []byte
-	passwordAttempts map[int64]int
-	history          []ChatMessage
+	members           map[int64]struct{}
+	anchorJoined      bool
+	anchorConnections map[string]struct{}
+	viewerNIDs        map[int64]uint32
+	lastViewerNID     uint32 // Retained across broadcasts on the same channel.
+	admins            map[int64]struct{}
+	muted             map[int64]time.Time
+	kicked            map[int64]struct{}
+	subscribers       map[chan Event]int64
+	passwordHash      []byte
+	passwordAttempts  map[int64]int
+	history           []ChatMessage
 }
 
 type Store struct {
@@ -446,6 +451,7 @@ func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password str
 		}
 		if userID == room.OwnerID {
 			room.anchorJoined = true
+			room.setAnchorAway(false)
 		} else if !room.hasMember(userID) {
 			room.members[userID] = struct{}{}
 			room.publish(Event{Type: "join", UserID: userID})
@@ -804,6 +810,8 @@ func (r *roomState) end() {
 	r.history = nil
 	clear(r.members)
 	r.anchorJoined = false
+	r.AnchorAway = false
+	r.anchorConnections = nil
 	r.viewerNIDs = nil
 	r.publish(Event{Type: "close", UserID: r.OwnerID, CreatedAt: r.Session.EndedAt})
 	for events := range r.subscribers {
