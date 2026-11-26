@@ -4,6 +4,8 @@ import "time"
 
 const DefaultAnchorNID uint32 = 200000001
 
+const DefaultAnchorAwayTimeout = 5 * time.Minute
+
 type RoomStatus uint8
 
 const (

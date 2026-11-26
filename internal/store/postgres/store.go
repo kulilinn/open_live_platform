@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,13 +14,14 @@ import (
 )
 
 type Store struct {
-	pool         *pgxpool.Pool
-	eventChannel string
-	eventReady   atomic.Bool
-	stopEvents   context.CancelFunc
-	eventsDone   chan struct{}
-	shutdown     sync.Once
-	anchors      anchorPresence
+	pool              *pgxpool.Pool
+	anchorAwayTimeout time.Duration
+	eventChannel      string
+	eventReady        atomic.Bool
+	stopEvents        context.CancelFunc
+	eventsDone        chan struct{}
+	shutdown          sync.Once
+	anchors           anchorPresence
 	// Independent rooms can publish in parallel. Each shard orders local
 	// subscriptions and delivery with the commits that change their room.
 	streams [32]streams
@@ -39,6 +41,13 @@ var _ auth.JWTBackend = (*Store)(nil)
 var _ live.RoomStore = (*Store)(nil)
 
 func Open(ctx context.Context, dsn string) (*Store, error) {
+	return OpenWithAnchorTimeout(ctx, dsn, live.DefaultAnchorAwayTimeout)
+}
+
+func OpenWithAnchorTimeout(ctx context.Context, dsn string, timeout time.Duration) (*Store, error) {
+	if timeout <= 0 {
+		timeout = live.DefaultAnchorAwayTimeout
+	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
@@ -47,7 +56,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	s := &Store{pool: pool}
+	s := &Store{pool: pool, anchorAwayTimeout: timeout}
 	if err := s.startRoomEvents(ctx); err != nil {
 		pool.Close()
 		return nil, err

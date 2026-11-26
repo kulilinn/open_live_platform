@@ -12,7 +12,7 @@ import (
 
 const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
     (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
-    live_id, live_started_at, live_ended_at, trans_lang, anchor_away`
+    live_id, live_started_at, live_ended_at, trans_lang, anchor_away, anchor_away_until`
 
 const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
@@ -20,9 +20,9 @@ const advanceHistoryBoundary = `history_after_id=COALESCE((SELECT max(id) FROM r
 
 func scanRoom(row pgx.Row) (live.Room, error) {
 	var room live.Room
-	var startedAt, endedAt *time.Time
+	var startedAt, endedAt, awayUntil *time.Time
 	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
-		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway)
+		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway, &awayUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
 	}
@@ -32,6 +32,9 @@ func scanRoom(row pgx.Row) (live.Room, error) {
 	}
 	if endedAt != nil {
 		room.Session.EndedAt = endedAt.UTC()
+	}
+	if awayUntil != nil {
+		room.AnchorAwayUntil = awayUntil.UTC()
 	}
 	return room, err
 }
@@ -122,7 +125,7 @@ func (s *Store) StartWithLanguage(ctx context.Context, owner int64, title, passw
 				}
 			}
 			result, err = scanRoom(r.tx.QueryRow(ctx, `UPDATE rooms SET online=true,title=$2,password_hash=$3,
-				trans_lang=COALESCE($4,trans_lang),anchor_joined=false,anchor_away=false,
+				trans_lang=COALESCE($4,trans_lang),anchor_joined=false,anchor_away=false,anchor_away_until=NULL,
 				live_id=nextval('room_live_id_seq'),live_started_at=statement_timestamp(),live_ended_at=NULL,
 				updated_at=statement_timestamp(),`+advanceHistoryBoundary+" WHERE id=$1 RETURNING "+roomFields, owner, title, hash, language))
 		}
@@ -197,7 +200,7 @@ func (r *roomChange) close(actor int64) error {
 		return nil
 	}
 	var endedAt time.Time
-	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_away=false,
+	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_away=false,anchor_away_until=NULL,
 		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+
 		" WHERE id=$1 RETURNING live_ended_at", r.id).Scan(&endedAt); err != nil {
 		return err
@@ -295,7 +298,7 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, in
 				result.AnchorJoined = true
 			}
 			if anchorAway {
-				if err := r.setAnchorAway(owner, false); err != nil {
+				if err := s.setAnchorAway(r, owner, false); err != nil {
 					return err
 				}
 			}

@@ -47,7 +47,7 @@ func (s *Store) AnchorConnected(ctx context.Context, roomID, liveID int64, conne
 		if err != nil || !away {
 			return err
 		}
-		return r.setAnchorAway(owner, false)
+		return s.setAnchorAway(r, owner, false)
 	})
 	if err == nil {
 		s.anchors.active.Store(anchorConnection{roomID, liveID, connectionID}, struct{}{})
@@ -71,7 +71,7 @@ func (s *Store) AnchorDisconnected(ctx context.Context, roomID, liveID int64, co
 		if err != nil || connected {
 			return err
 		}
-		return r.setAnchorAway(owner, true)
+		return s.setAnchorAway(r, owner, true)
 	})
 	if errors.Is(err, live.ErrRoomNotFound) || errors.Is(err, live.ErrRoomClosed) {
 		err = nil
@@ -99,10 +99,11 @@ func (s *Store) closeAnchorPresence() {
 	})
 }
 
-func (r *roomChange) setAnchorAway(owner int64, away bool) error {
+func (s *Store) setAnchorAway(r *roomChange, owner int64, away bool) error {
 	var changedAt time.Time
-	err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET anchor_away=$2,updated_at=statement_timestamp()
-		WHERE id=$1 AND anchor_away<>$2 RETURNING updated_at`, r.id, away).Scan(&changedAt)
+	err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET anchor_away=$2,updated_at=statement_timestamp(),
+		anchor_away_until=CASE WHEN $2 THEN statement_timestamp()+make_interval(secs => $3) END
+		WHERE id=$1 AND anchor_away<>$2 RETURNING updated_at`, r.id, away, s.anchorAwayTimeout.Seconds()).Scan(&changedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -115,4 +116,44 @@ func (r *roomChange) setAnchorAway(owner int64, away bool) error {
 	}
 	r.event = live.Event{Type: "room_status", UserID: owner, CreatedAt: changedAt, RoomStatus: status}
 	return nil
+}
+
+func (s *Store) CloseExpiredAnchorRooms(ctx context.Context, now time.Time) error {
+	type candidate struct {
+		RoomID, LiveID int64
+		Until          time.Time
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id,live_id,anchor_away_until FROM rooms
+		WHERE online AND anchor_away AND anchor_away_until<=LEAST($1,statement_timestamp())
+		ORDER BY anchor_away_until`, now)
+	if err != nil {
+		return err
+	}
+	candidates, err := pgx.CollectRows(rows, pgx.RowToStructByPos[candidate])
+	if err != nil {
+		return err
+	}
+	var sweepErr error
+	for _, room := range candidates {
+		err := s.change(ctx, room.RoomID, func(r *roomChange) error {
+			// Recheck the session and deadline after acquiring the room lock.
+			var owner int64
+			err := r.tx.QueryRow(ctx, `SELECT owner_id FROM rooms
+				WHERE id=$1 AND online AND anchor_away AND live_id=$2
+					AND anchor_away_until=$3 AND anchor_away_until<=LEAST($4,statement_timestamp())`,
+				room.RoomID, room.LiveID, room.Until, now).Scan(&owner)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			return r.close(owner)
+		})
+		sweepErr = errors.Join(sweepErr, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return sweepErr
 }

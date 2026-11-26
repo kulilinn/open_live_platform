@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -28,6 +29,13 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) serve(ctx context.Context, public, internal net.Listener) error {
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		a.monitorAnchorAway(monitorCtx)
+	}()
+
 	rpcServer := grpc.NewServer()
 	platformgrpc.Register(rpcServer, a.Accounts, a.Rooms)
 	served := make(chan error, 2)
@@ -42,6 +50,7 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener) error {
 			serveErr = nil
 		}
 	}
+	stopMonitor()
 
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -54,5 +63,21 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener) error {
 	if httpErr != nil {
 		a.Server.Close()
 	}
+	<-monitorDone
 	return errors.Join(serveErr, httpErr)
+}
+
+func (a *App) monitorAnchorAway(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		if err := a.Rooms.CloseExpiredAnchorRooms(ctx, time.Now()); err != nil && ctx.Err() == nil {
+			log.Printf("close expired anchor rooms: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

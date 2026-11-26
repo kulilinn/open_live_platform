@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"open_live_platform/internal/admin"
@@ -33,6 +34,7 @@ type Config struct {
 	AgoraCertificate string
 	AgoraTokenExpire string
 
+	AnchorAwayTimeout time.Duration
 	ReadTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
 	WriteTimeout      time.Duration
@@ -54,6 +56,7 @@ func ConfigFromEnv() Config {
 		AgoraAppID:        os.Getenv("AGORA_APP_ID"),
 		AgoraCertificate:  os.Getenv("AGORA_APP_CERTIFICATE"),
 		AgoraTokenExpire:  os.Getenv("AGORA_TOKEN_EXPIRE"),
+		AnchorAwayTimeout: anchorAwayTimeoutFromEnv(),
 		ReadTimeout:       duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
 		ReadHeaderTimeout: duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
 		WriteTimeout:      duration("PLATFORM_WRITE_TIMEOUT", 15*time.Second),
@@ -71,6 +74,9 @@ type App struct {
 
 func New(ctx context.Context, config Config) (*App, error) {
 	config.GRPCAddr = cmp.Or(config.GRPCAddr, "127.0.0.1:9090")
+	if config.AnchorAwayTimeout <= 0 {
+		config.AnchorAwayTimeout = live.DefaultAnchorAwayTimeout
+	}
 	signer, err := rtc.NewSigner(config.AgoraAppID, config.AgoraCertificate, config.AgoraTokenExpire)
 	if err != nil {
 		return nil, err
@@ -83,10 +89,10 @@ func New(ctx context.Context, config Config) (*App, error) {
 	var rooms live.RoomStore
 	var db *postgres.Store
 	if config.DatabaseURL == "" {
-		backend, rooms = auth.NewStore(), live.NewStore()
+		backend, rooms = auth.NewStore(), live.NewStoreWithAnchorTimeout(config.AnchorAwayTimeout)
 	} else {
 		var err error
-		db, err = postgres.Open(ctx, config.DatabaseURL)
+		db, err = postgres.OpenWithAnchorTimeout(ctx, config.DatabaseURL, config.AnchorAwayTimeout)
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +127,14 @@ func (a *App) Close() {
 	if a.db != nil {
 		a.db.Shutdown()
 	}
+}
+
+func anchorAwayTimeoutFromEnv() time.Duration {
+	seconds, err := strconv.ParseUint(os.Getenv("TEMP_OFFLINE_TIMEOUT"), 10, 32)
+	if err != nil || seconds == 0 {
+		return live.DefaultAnchorAwayTimeout
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func env(key, fallback string) string {

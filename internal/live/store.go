@@ -35,6 +35,7 @@ type Room struct {
 	IsLock              bool        `json:"isLock"`
 	Session             LiveSession `json:"-"`
 	AnchorAway          bool        `json:"-"`
+	AnchorAwayUntil     time.Time   `json:"-"`
 	ViewerNID           uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
 	TranslationLanguage string      `json:"-"`
 }
@@ -154,6 +155,7 @@ type RoomStore interface {
 	JoinRoom(ctx context.Context, roomID, userID int64, password string) (JoinedRoom, error)
 	AnchorConnected(ctx context.Context, roomID, liveID int64, connectionID string) error
 	AnchorDisconnected(ctx context.Context, roomID, liveID int64, connectionID string) error
+	CloseExpiredAnchorRooms(ctx context.Context, now time.Time) error
 	// RTCNID returns the RTC ID for the owner or a joined member of the active broadcast.
 	RTCNID(ctx context.Context, roomID, userID int64) (uint32, error)
 	Leave(ctx context.Context, roomID, userID int64) error
@@ -189,16 +191,24 @@ type roomState struct {
 }
 
 type Store struct {
-	mu            sync.Mutex
-	rooms         map[int64]*roomState
-	lastMessageID int64
-	nextLiveID    int64
+	mu                sync.Mutex
+	rooms             map[int64]*roomState
+	lastMessageID     int64
+	nextLiveID        int64
+	anchorAwayTimeout time.Duration
 }
 
 var _ RoomStore = (*Store)(nil)
 
 func NewStore() *Store {
-	return &Store{rooms: make(map[int64]*roomState), nextLiveID: 1 << 32}
+	return NewStoreWithAnchorTimeout(DefaultAnchorAwayTimeout)
+}
+
+func NewStoreWithAnchorTimeout(timeout time.Duration) *Store {
+	if timeout <= 0 {
+		timeout = DefaultAnchorAwayTimeout
+	}
+	return &Store{rooms: make(map[int64]*roomState), nextLiveID: 1 << 32, anchorAwayTimeout: timeout}
 }
 
 // Start opens the creator's room. A new broadcast uses the same room ID.
@@ -451,7 +461,7 @@ func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password str
 		}
 		if userID == room.OwnerID {
 			room.anchorJoined = true
-			room.setAnchorAway(false)
+			room.setAnchorAwayUntil(time.Time{})
 		} else if !room.hasMember(userID) {
 			room.members[userID] = struct{}{}
 			room.publish(Event{Type: "join", UserID: userID})
@@ -811,6 +821,7 @@ func (r *roomState) end() {
 	clear(r.members)
 	r.anchorJoined = false
 	r.AnchorAway = false
+	r.AnchorAwayUntil = time.Time{}
 	r.anchorConnections = nil
 	r.viewerNIDs = nil
 	r.publish(Event{Type: "close", UserID: r.OwnerID, CreatedAt: r.Session.EndedAt})

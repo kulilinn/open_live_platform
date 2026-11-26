@@ -23,7 +23,7 @@ func (s *Store) AnchorConnected(ctx context.Context, roomID, liveID int64, conne
 		room.anchorConnections = make(map[string]struct{})
 	}
 	room.anchorConnections[connectionID] = struct{}{}
-	room.setAnchorAway(false)
+	room.setAnchorAwayUntil(time.Time{})
 	return nil
 }
 
@@ -41,17 +41,33 @@ func (s *Store) AnchorDisconnected(ctx context.Context, roomID, liveID int64, co
 	if _, connected := room.anchorConnections[connectionID]; connected {
 		delete(room.anchorConnections, connectionID)
 		if len(room.anchorConnections) == 0 {
-			room.setAnchorAway(true)
+			room.setAnchorAwayUntil(time.Now().UTC().Add(s.anchorAwayTimeout))
 		}
 	}
 	return nil
 }
 
-func (r *roomState) setAnchorAway(away bool) {
+func (s *Store) CloseExpiredAnchorRooms(ctx context.Context, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, room := range s.rooms {
+		if room.Online && room.AnchorAway && !room.AnchorAwayUntil.IsZero() && !room.AnchorAwayUntil.After(now) {
+			room.end()
+		}
+	}
+	return nil
+}
+
+func (r *roomState) setAnchorAwayUntil(until time.Time) {
+	away := !until.IsZero()
 	if r.AnchorAway == away {
 		return
 	}
 	r.AnchorAway = away
+	r.AnchorAwayUntil = until
 	r.publish(Event{
 		Type: "room_status", UserID: r.OwnerID, RoomStatus: r.Status(), CreatedAt: time.Now().UTC(),
 	})
