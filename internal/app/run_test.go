@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -75,7 +76,11 @@ func TestInternalGRPCAndPublicHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		_, err = io.Copy(io.Discard, res.Body)
 		res.Body.Close()
+		if err != nil {
+			t.Fatalf("read %s response: %v", tc.path, err)
+		}
 		if res.StatusCode != tc.want {
 			t.Errorf("%s returned %d, want %d", tc.path, res.StatusCode, tc.want)
 		}
