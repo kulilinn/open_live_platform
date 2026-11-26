@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,9 +18,10 @@ import (
 
 func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 	var input struct {
-		Title    *string `json:"title"`
-		Subject  *string `json:"subject"`
-		Password string  `json:"password"`
+		Title               *string `json:"title"`
+		Subject             *string `json:"subject"`
+		Password            string  `json:"password"`
+		TranslationLanguage *string `json:"transLang"`
 	}
 	if !httpx.Decode(w, r, &input) {
 		return
@@ -29,7 +32,7 @@ func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) 
 	} else if input.Subject != nil {
 		title = *input.Subject
 	}
-	room, err := s.rooms.Start(r.Context(), userID, title, input.Password)
+	room, err := s.rooms.StartWithLanguage(r.Context(), userID, title, input.Password, input.TranslationLanguage)
 	if err != nil {
 		httpx.LiveError(w, err)
 		return
@@ -65,14 +68,20 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		liveResult(w, s.rooms.Join(r.Context(), roomID, userID, input.Password))
 		return
 	}
-	room, err := s.rooms.JoinRoom(r.Context(), roomID, userID, input.Password)
+	joined, err := s.rooms.JoinRoom(r.Context(), roomID, userID, input.Password)
 	if err != nil {
 		rustRoomError(w, err, "4005")
 		return
 	}
-	info, err := s.roomInfo(r.Context(), userID, room)
+	room := joined.Room
+	info, err := s.roomInfoWithMembers(r.Context(), userID, room, joined.Members)
 	if err != nil {
 		rustRoomError(w, err, "4005")
+		return
+	}
+	languages, err := s.roomLanguages(r.Context(), joined)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read room translation languages")
 		return
 	}
 	token, err := s.rtc.ForRoom(roomID, userID, room.ViewerNID, userID == room.OwnerID)
@@ -85,12 +94,29 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		"status": "200",
 		"data": map[string]any{
 			"room":      info,
-			"languages": []string{},
+			"languages": languages,
 			"user":      map[string]any{"id": userID},
 			"rtcToken":  token,
 			"startTime": room.Session.StartedAt.Unix(),
 		},
 	})
+}
+
+func (s server) roomLanguages(ctx context.Context, room live.JoinedRoom) ([]string, error) {
+	translations, err := s.accounts.TranslationLanguages(ctx, room.Members)
+	if err != nil {
+		return nil, err
+	}
+	languages := make(map[string]struct{})
+	for _, id := range room.Members {
+		if id != room.OwnerID {
+			languages[cmp.Or(translations[id], "en")] = struct{}{}
+		}
+	}
+	if room.AnchorJoined {
+		languages[cmp.Or(room.TranslationLanguage, "en")] = struct{}{}
+	}
+	return slices.Sorted(maps.Keys(languages)), nil
 }
 
 func (s server) roomToken(w http.ResponseWriter, r *http.Request, userID int64) {
@@ -123,9 +149,10 @@ func (s server) roomToken(w http.ResponseWriter, r *http.Request, userID int64) 
 
 func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userID int64) {
 	var input *struct {
-		Title    *string `json:"title"`
-		Subject  *string `json:"subject"`
-		Password *string `json:"password"`
+		Title               *string `json:"title"`
+		Subject             *string `json:"subject"`
+		Password            *string `json:"password"`
+		TranslationLanguage *string `json:"transLang"`
 	}
 	if !httpx.Decode(w, r, &input) {
 		return
@@ -134,7 +161,9 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 		httpx.Error(w, http.StatusBadRequest, "expected a room settings object")
 		return
 	}
-	room, err := s.rooms.UpdateSettings(r.Context(), userID, cmp.Or(input.Title, input.Subject), input.Password)
+	room, err := s.rooms.UpdateSettings(r.Context(), userID, live.RoomSettings{
+		Title: cmp.Or(input.Title, input.Subject), Password: input.Password, TranslationLanguage: input.TranslationLanguage,
+	})
 	if err != nil {
 		httpx.LiveError(w, err)
 		return

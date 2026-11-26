@@ -20,6 +20,22 @@ func (s server) setLanguage(w http.ResponseWriter, r *http.Request, userID int64
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
 }
 
+func (s server) setUserInfo(w http.ResponseWriter, r *http.Request, userID int64) {
+	var input struct {
+		TranslationLanguage *string `json:"transLang"`
+	}
+	if !httpx.Decode(w, r, &input) {
+		return
+	}
+	if input.TranslationLanguage != nil {
+		if err := s.accounts.SetTranslationLanguage(r.Context(), userID, *input.TranslationLanguage); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not update translation language")
+			return
+		}
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
+}
+
 func (s server) checkUserStatus(w http.ResponseWriter, _ *http.Request, _ int64) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200",
@@ -62,7 +78,7 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 			"toyInfo": "{}", "anchorStatus": 0, "banner": "",
 			"displayName": user.Account, "searchName": user.Account,
 			"groupRoom": "", "level": 0, "exp": 0, "maxExp": 0,
-			"trans": false, "transLang": "", "limitTy": 0, "limitAllow": true,
+			"trans": false, "transLang": user.TranslationLanguage, "limitTy": 0, "limitAllow": true,
 			"limitTotal": 0, "limitTime": 0, "limitReason": []string{},
 			"fansTotal": 0, "teacherLabel": "", "email": user.Email,
 			"language": user.Language, "search_name": user.Account, "token_id": nil,

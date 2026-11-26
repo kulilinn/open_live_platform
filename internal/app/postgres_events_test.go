@@ -51,11 +51,26 @@ func TestPostgresCrossInstanceRoomEvents(t *testing.T) {
 		t.Helper()
 		select {
 		case event, ok := <-events:
-			if ok != open || event != want {
-				t.Fatalf("event %q (stream open = %t), want %q (stream open = %t)", event.Type, ok, want.Type, open)
+			if ok != open || !event.CreatedAt.Equal(want.CreatedAt) {
+				t.Fatalf("event %q (stream open = %t) with time %v, want %q (stream open = %t) with time %v", event.Type, ok, event.CreatedAt, want.Type, open, want.CreatedAt)
+			}
+			event.CreatedAt = want.CreatedAt
+			if event != want {
+				t.Fatalf("event %q with message ID %d, want %q with message ID %d", event.Type, event.MessageID, want.Type, want.MessageID)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("timed out waiting for %q", want.Type)
+		}
+	}
+	chatEvent := func(userID int64, text, payload string) live.Event {
+		t.Helper()
+		messages, err := first.Rooms.ChatHistory(ctx, roomID, userID, 0, 1)
+		if err != nil || len(messages) != 1 || messages[0].ID < 1 || messages[0].CreatedAt.IsZero() {
+			t.Fatalf("chat history = %+v, %v, want the stored message identity", messages, err)
+		}
+		return live.Event{
+			Type: "chat", RoomID: roomID, UserID: userID, Text: text, Payload: payload,
+			MessageID: messages[0].ID, CreatedAt: messages[0].CreatedAt,
 		}
 	}
 
@@ -73,7 +88,7 @@ func TestPostgresCrossInstanceRoomEvents(t *testing.T) {
 	payload := `{"message":"` + text + `"}`
 	_, err = first.Rooms.SendChat(ctx, live.ChatMessage{RoomID: roomID, UserID: viewerID, Text: text, Payload: payload})
 	check(err)
-	chat := live.Event{Type: "chat", RoomID: roomID, UserID: viewerID, Text: text, Payload: payload}
+	chat := chatEvent(viewerID, text, payload)
 	read(hostEvents, chat, true)
 	read(viewerEvents, chat, true)
 	read(otherEvents, chat, true)
@@ -101,7 +116,7 @@ func TestPostgresCrossInstanceRoomEvents(t *testing.T) {
 	read(hostEvents, live.Event{Type: "close", RoomID: roomID, UserID: roomID}, true)
 	read(hostEvents, live.Event{}, false)
 	check(first.Rooms.Send(ctx, roomID, roomID, "new broadcast"))
-	read(reopened, live.Event{Type: "chat", RoomID: roomID, UserID: roomID, Text: "new broadcast"}, true)
+	read(reopened, chatEvent(roomID, "new broadcast", ""), true)
 }
 
 func TestPostgresRoomEventsReconnect(t *testing.T) {

@@ -83,3 +83,36 @@ func TestUserProfileHTTP(t *testing.T) {
 		t.Fatalf("signin after password change = %d %+v", signin.Code, signin.Body)
 	}
 }
+
+func TestSetUserTranslationLanguageHTTP(t *testing.T) {
+	accounts := auth.NewStore()
+	viewer, err := accounts.SignUp(t.Context(), "translation-viewer@example.com", "secret", "Viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	httpapi.Register(mux, accounts, live.NewStore())
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	updates := []struct {
+		body map[string]any
+		want string
+	}{
+		{body: map[string]any{"transLang": "fr"}, want: "fr"},
+		{body: map[string]any{"trans": true}, want: "fr"},
+		{body: map[string]any{"transLang": nil}, want: "fr"},
+		{body: map[string]any{"transLang": ""}, want: ""},
+	}
+	for _, update := range updates {
+		set := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/user/set_info", viewer.Token, update.body)
+		if set.Code != http.StatusOK || set.Body["status"] != "200" || len(set.Body) != 1 {
+			t.Fatalf("set_info %v = %d %+v", update.body, set.Code, set.Body)
+		}
+		me := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/user/me", viewer.Token, nil)
+		profile := me.Body["data"].(map[string]any)
+		if profile["transLang"] != update.want || profile["trans"] != false {
+			t.Fatalf("profile after set_info %v = %+v", update.body, profile)
+		}
+	}
+}

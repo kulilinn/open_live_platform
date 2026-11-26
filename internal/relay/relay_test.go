@@ -124,7 +124,7 @@ func TestConnectorAuthenticatesAndRelaysRoomEvents(t *testing.T) {
 	audience := connect(viewerURL + "?hash=/live/" + strconv.FormatInt(room.ID, 10))
 	denyUpgrade(ownerURL)
 	newPassword := "updated invite"
-	if _, err := rooms.UpdateSettings(t.Context(), owner.User.ID, nil, &newPassword); err != nil {
+	if _, err := rooms.UpdateSettings(t.Context(), owner.User.ID, live.RoomSettings{Password: &newPassword}); err != nil {
 		t.Fatal(err)
 	}
 	if err := audience.WriteJSON(command{Type: "chat", Text: "hello"}); err != nil {

@@ -460,7 +460,7 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 		}
 		ownerID, memberID, blockedID, freshID, kickedID = signUp("host"), signUp("member"), signUp("blocked"), signUp("fresh"), signUp("kicked")
 		rooms := platform.Rooms
-		_, err := rooms.UpdateSettings(ctx, ownerID, &newTitle, &newPassword)
+		_, err := rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Title: &newTitle, Password: &newPassword})
 		check(err, live.ErrRoomNotFound)
 		initial, err := rooms.Start(ctx, ownerID, "Initial title", oldPassword)
 		check(err, nil)
@@ -477,17 +477,17 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 		defer unsubscribe()
 
 		originalHash := passwordHash(ownerID)
-		room, err := rooms.UpdateSettings(ctx, ownerID, &empty, nil)
+		room, err := rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Title: &empty})
 		check(err, nil)
 		if room.Title != "" || !room.IsLock || !bytes.Equal(passwordHash(ownerID), originalHash) {
 			t.Fatalf("title-only update = %+v", room)
 		}
-		unchanged, err := rooms.UpdateSettings(ctx, ownerID, nil, nil)
+		unchanged, err := rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{})
 		check(err, nil)
 		if unchanged != room {
 			t.Fatalf("update with no fields = %+v, want %+v", unchanged, room)
 		}
-		updated, err = rooms.UpdateSettings(ctx, ownerID, &newTitle, &newPassword)
+		updated, err = rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Title: &newTitle, Password: &newPassword})
 		check(err, nil)
 		want := initial
 		want.Title, want.MemberCount = newTitle, 1
@@ -498,7 +498,7 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 		if !live.RoomPasswordMatches(rotatedHash, newPassword) || live.RoomPasswordMatches(rotatedHash, oldPassword) {
 			t.Fatal("updated password hash does not match the new password exclusively")
 		}
-		_, err = rooms.UpdateSettings(ctx, ownerID, nil, &newPassword)
+		_, err = rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Password: &newPassword})
 		check(err, nil)
 		if bytes.Equal(passwordHash(ownerID), rotatedHash) {
 			t.Fatal("updating the password reused its old hash")
@@ -540,7 +540,7 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 
 	joinResult := make(chan error, 1)
 	go func() { joinResult <- peer.Rooms.Join(ctx, ownerID, freshID, oldPassword) }()
-	public, err := rooms.UpdateSettings(ctx, ownerID, nil, &empty)
+	public, err := rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Password: &empty})
 	check(err, nil)
 	if err := <-joinResult; err != nil && !errors.Is(err, live.ErrInvalidRoomPassword) {
 		t.Fatalf("join during password removal = %v", err)
@@ -554,18 +554,18 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 	if cleared != 0 || unrelated != 1 {
 		t.Fatalf("remaining attempt rows for updated room = %d, other room = %d", cleared, unrelated)
 	}
-	_, err = rooms.UpdateSettings(ctx, ownerID, nil, &oldPassword)
+	_, err = rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Password: &oldPassword})
 	check(err, nil)
 	check(peer.Rooms.Join(ctx, ownerID, blockedID, oldPassword), nil)
 
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- peer.Rooms.Close(ctx, ownerID, ownerID) }()
-	_, err = rooms.UpdateSettings(ctx, ownerID, nil, &newPassword)
+	_, err = rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Password: &newPassword})
 	if err != nil && !errors.Is(err, live.ErrRoomClosed) {
 		t.Fatalf("update during close = %v", err)
 	}
 	check(<-closeResult, nil)
-	_, err = rooms.UpdateSettings(ctx, ownerID, &empty, &newPassword)
+	_, err = rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Title: &empty, Password: &newPassword})
 	check(err, live.ErrRoomClosed)
 	closed, err := rooms.Info(ctx, ownerID)
 	check(err, nil)
@@ -652,7 +652,7 @@ func TestPostgresChatHistoryUpgradeAndRestart(t *testing.T) {
 		sentID, err = rooms.SendChat(ctx, live.ChatMessage{RoomID: ownerID, UserID: viewerID, Text: "legacy chat", Payload: payload})
 		check(err, nil)
 		title := "Updated title"
-		_, err = rooms.UpdateSettings(ctx, ownerID, &title, nil)
+		_, err = rooms.UpdateSettings(ctx, ownerID, live.RoomSettings{Title: &title})
 		check(err, nil)
 		_, err = rooms.Start(ctx, ownerID, title, "")
 		check(err, nil)

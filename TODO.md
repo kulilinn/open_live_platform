@@ -4,7 +4,7 @@
 
 - 仓库目录为 `D:\my\open_live_platform`。
 - 当前主线已接入 Go 直播核心、PostgreSQL 持久化、H5 文字聊天、场次数据和跨实例房间广播。
-- 已通过本地 Go 测试、`go vet ./...` 和编译。早期版本做过真实 PostgreSQL 回归，本轮新增的迁移版本登记和 RTC NID 用例待实库验证。
+- 已通过本地 Go 测试、`go vet ./...` 和编译。早期版本做过真实 PostgreSQL 回归，近期新增的迁移版本、RTC NID、场次命令隔离和翻译语种用例待实库验证。
 - 保留 64 位用户、房间、消息 ID。未修改任何 `CMakeLists.txt` 或 `prcmake` 文件。
 
 ## 本轮优先完成
@@ -26,12 +26,15 @@
 - [ ] 完整 Rust RoomInfo 字段来源
   - [x] 每场独立 `liveId`、主播 `anchorNid` 和场次起止时间
   - [x] Agora RTC token 签发与续签、按场分配观众 RTC UID
-  - [ ] languages 的真实数据来源
+  - [x] 进房的 `languages` 读取本场成员的翻译偏好和主播的房间语种
+  - [ ] 翻译开关和 H5 翻译语种变更通知
   - [ ] banner、tag、description、plan、gifts、trans 等设置
 - [ ] Rust 房间错误码和 DataNotFound 响应
 - [ ] Rust 特有的房间在线状态及状态转换
 - [ ] relay ticket 的 Rust 签名、TTL 和重连语义
 - [ ] H5 relay 的生命周期消息、控制消息和完整 devicerelayer 命令
+- [x] WebSocket 命令绑定当前直播场次
+- [x] Go 文本聊天的 H5 实时推送与历史使用同一消息 ID 和时间戳
 
 ## 账号和用户
 

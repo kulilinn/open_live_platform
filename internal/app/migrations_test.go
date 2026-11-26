@@ -96,7 +96,7 @@ func postgresMigrationVersions(t *testing.T, db *pgx.Conn) []int32 {
 	if err := db.QueryRow(t.Context(), "SELECT ARRAY(SELECT version FROM schema_migrations ORDER BY version)").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if want := []int32{1, 2, 3, 4, 5, 6}; len(versions) < len(want) || !slices.Equal(versions[:len(want)], want) {
+	if want := []int32{1, 2, 3, 4, 5, 6, 7, 8}; len(versions) < len(want) || !slices.Equal(versions[:len(want)], want) {
 		t.Fatalf("migration versions = %v, want at least %v", versions, want)
 	}
 	return versions

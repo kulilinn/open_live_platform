@@ -69,7 +69,7 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 	}
 	signal, err := json.Marshal(roomSignal{
 		RoomID: r.id, Kind: r.event.Type, UserID: r.event.UserID,
-		TargetID: r.event.TargetID, MessageID: r.messageID, Marker: r.subMarker,
+		TargetID: r.event.TargetID, MessageID: r.event.MessageID, Marker: r.subMarker,
 	})
 	if err != nil {
 		return err
@@ -137,8 +137,9 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 	}
 	event := live.Event{Type: signal.Kind, RoomID: signal.RoomID, UserID: signal.UserID, TargetID: signal.TargetID}
 	if event.Type == "chat" {
-		err := conn.QueryRow(ctx, "SELECT text,payload FROM room_messages WHERE id=$1 AND room_id=$2",
-			signal.MessageID, signal.RoomID).Scan(&event.Text, &event.Payload)
+		event.MessageID = signal.MessageID
+		err := conn.QueryRow(ctx, "SELECT text,payload,created_at FROM room_messages WHERE id=$1 AND room_id=$2",
+			event.MessageID, signal.RoomID).Scan(&event.Text, &event.Payload, &event.CreatedAt)
 		if err != nil {
 			return err
 		}

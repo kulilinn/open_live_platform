@@ -35,6 +35,7 @@ func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.
 	mux.HandleFunc("POST /api/auth/changepassword", s.authenticated(s.changePassword))
 	mux.HandleFunc("GET /api/user/{user_id}", s.authenticated(s.userProfile))
 	mux.HandleFunc("POST /api/user/set_language", s.authenticated(s.setLanguage))
+	mux.HandleFunc("POST /api/user/set_info", s.authenticated(s.setUserInfo))
 	mux.HandleFunc("POST /api/user/check_user_status", s.authenticated(s.checkUserStatus))
 	mux.HandleFunc("POST /api/user/apps", s.authenticated(s.userApps))
 

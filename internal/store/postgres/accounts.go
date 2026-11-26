@@ -137,8 +137,8 @@ func (s *Store) Revoke(ctx context.Context, token string) error {
 func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
 	var user auth.User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, account, language FROM users WHERE id = $1`, id,
-	).Scan(&user.ID, &user.Email, &user.Account, &user.Language)
+		`SELECT id, email, account, language, trans_lang FROM users WHERE id = $1`, id,
+	).Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.TranslationLanguage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
@@ -147,6 +147,35 @@ func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
 
 func (s *Store) SetLanguage(ctx context.Context, id int64, language string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE users SET language = $2 WHERE id = $1`, id, language)
+	return err
+}
+
+func (s *Store) TranslationLanguages(ctx context.Context, ids []int64) (map[int64]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	languages := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return languages, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, trans_lang FROM users WHERE id = ANY($1::bigint[])`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var language string
+		if err := rows.Scan(&id, &language); err != nil {
+			return nil, err
+		}
+		languages[id] = language
+	}
+	return languages, rows.Err()
+}
+
+func (s *Store) SetTranslationLanguage(ctx context.Context, id int64, language string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET trans_lang = $2 WHERE id = $1`, id, language)
 	return err
 }
 

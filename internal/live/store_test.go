@@ -77,6 +77,7 @@ func TestModerationAndChat(t *testing.T) {
 	requireError(t, store.Mute(t.Context(), room.ID, admin, viewer, 0), nil)
 	requireError(t, store.Send(t.Context(), room.ID, viewer, "hello"), nil)
 	chat := Event{Type: "chat", RoomID: room.ID, UserID: viewer, Text: "hello"}
+	requireChatIdentity(t, store, &chat)
 	requireEvent(t, viewerEvents, chat)
 	requireEvent(t, ownerEvents, chat)
 
@@ -236,7 +237,7 @@ func TestUpdateSettingsKeepsBroadcastAndSubscriptions(t *testing.T) {
 	defer cancel()
 
 	emptyTitle := ""
-	updated, err := store.UpdateSettings(ctx, owner, &emptyTitle, nil)
+	updated, err := store.UpdateSettings(ctx, owner, RoomSettings{Title: &emptyTitle})
 	requireError(t, err, nil)
 	if updated.Title != "" || !updated.IsLock {
 		t.Fatalf("title update = %+v, want an empty title and a locked room", updated)
@@ -244,7 +245,7 @@ func TestUpdateSettingsKeepsBroadcastAndSubscriptions(t *testing.T) {
 	requireError(t, store.Join(ctx, room.ID, viewer, oldPassword), nil)
 
 	newTitle, newPassword := "  Live again  ", " new password "
-	updated, err = store.UpdateSettings(ctx, owner, &newTitle, &newPassword)
+	updated, err = store.UpdateSettings(ctx, owner, RoomSettings{Title: &newTitle, Password: &newPassword})
 	requireError(t, err, nil)
 	want := room
 	want.Title, want.MemberCount = newTitle, 1
@@ -253,17 +254,19 @@ func TestUpdateSettingsKeepsBroadcastAndSubscriptions(t *testing.T) {
 	}
 	requireError(t, store.Join(ctx, room.ID, owner, ""), nil)
 	requireError(t, store.Send(ctx, room.ID, viewer, "Still watching"), nil)
-	requireEvent(t, events, Event{Type: "chat", RoomID: room.ID, UserID: viewer, Text: "Still watching"})
+	chat := Event{Type: "chat", RoomID: room.ID, UserID: viewer, Text: "Still watching"}
+	requireChatIdentity(t, store, &chat)
+	requireEvent(t, events, chat)
 	admins, err := store.Admins(ctx, room.ID)
 	if err != nil || !slices.Equal(admins, []int64{viewer}) {
 		t.Fatalf("Admins = %v, %v, want [%d]", admins, err, viewer)
 	}
 	requireError(t, store.Join(ctx, room.ID, newViewer, oldPassword), ErrInvalidRoomPassword)
 	requireError(t, store.Join(ctx, room.ID, newViewer, newPassword), nil)
-	_, err = store.UpdateSettings(ctx, viewer, &emptyTitle, nil)
+	_, err = store.UpdateSettings(ctx, viewer, RoomSettings{Title: &emptyTitle})
 	requireError(t, err, ErrRoomNotFound)
 	requireError(t, store.Close(ctx, room.ID, owner), nil)
-	_, err = store.UpdateSettings(ctx, owner, nil, &newPassword)
+	_, err = store.UpdateSettings(ctx, owner, RoomSettings{Password: &newPassword})
 	requireError(t, err, ErrRoomClosed)
 }
 
@@ -279,7 +282,7 @@ func TestUpdateSettingsClearsAttemptsOnlyWhenPublic(t *testing.T) {
 	}
 
 	newPassword := "new password"
-	updated, err := store.UpdateSettings(ctx, owner, nil, &newPassword)
+	updated, err := store.UpdateSettings(ctx, owner, RoomSettings{Password: &newPassword})
 	requireError(t, err, nil)
 	if updated != room {
 		t.Fatalf("password update = %+v, want %+v", updated, room)
@@ -288,12 +291,12 @@ func TestUpdateSettingsClearsAttemptsOnlyWhenPublic(t *testing.T) {
 	requireError(t, store.Join(ctx, room.ID, secondViewer, newPassword), ErrRoomPasswordLocked)
 
 	public := ""
-	updated, err = store.UpdateSettings(ctx, owner, nil, &public)
+	updated, err = store.UpdateSettings(ctx, owner, RoomSettings{Password: &public})
 	requireError(t, err, nil)
 	if updated.IsLock {
 		t.Fatalf("public update = %+v, want an unlocked room", updated)
 	}
-	_, err = store.UpdateSettings(ctx, owner, nil, &newPassword)
+	_, err = store.UpdateSettings(ctx, owner, RoomSettings{Password: &newPassword})
 	requireError(t, err, nil)
 	requireError(t, store.Join(ctx, room.ID, firstViewer, newPassword), nil)
 	requireError(t, store.Join(ctx, room.ID, secondViewer, newPassword), nil)
@@ -336,6 +339,15 @@ func requireError(t *testing.T, got, want error) {
 	if got != want {
 		t.Fatalf("error = %v, want %v", got, want)
 	}
+}
+
+func requireChatIdentity(t *testing.T, store *Store, want *Event) {
+	t.Helper()
+	messages, err := store.ChatHistory(t.Context(), want.RoomID, want.UserID, 0, 1)
+	if err != nil || len(messages) != 1 || messages[0].ID < 1 || messages[0].CreatedAt.IsZero() {
+		t.Fatalf("chat history = %+v, %v, want the stored message identity", messages, err)
+	}
+	want.MessageID, want.CreatedAt = messages[0].ID, messages[0].CreatedAt
 }
 
 func requireEvent(t *testing.T, events <-chan Event, want Event) {

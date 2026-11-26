@@ -85,6 +85,8 @@ protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=p
 
 凭据即将到期时，用当前登录令牌请求 `GET /api/live/token/{channel}/{role}`。主播发布用 `1`，观众收看用 `2`。返回的 `data` 与进房的 `rtcToken` 同形，续签沿用同一 NID。离房后不能为该房间续签，已签发凭据按原有效期到期。Agora 项目如需在云端强制区分发布和订阅权限，请启用其主播鉴权功能。
 
+兼容进房响应的 `data.languages` 返回本场已入房参与者的翻译语种，去重后排序，缺省语种为 `en`。主播通过开播或房间设置请求中的 `transLang` 配置房间语种，观众通过 `POST /api/user/set_info` 的 `transLang` 更新自己的翻译偏好。界面语言仍通过 `POST /api/user/set_language` 设置。
+
 ## 客户端进入聊天室
 
 主播调用 `POST /api/live/room/start`。例如，请求体 `{"title":"晚场","password":"开场见"}` 会创建密码房，省略密码或传空字符串会创建公开房。开播响应、房间详情和列表的 `isLock` 表示本场是否需要密码。

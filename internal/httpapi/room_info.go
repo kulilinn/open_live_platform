@@ -14,6 +14,10 @@ func (s server) roomInfo(ctx context.Context, userID int64, room live.Room) (map
 	if err != nil {
 		return nil, err
 	}
+	return s.roomInfoWithMembers(ctx, userID, room, members)
+}
+
+func (s server) roomInfoWithMembers(ctx context.Context, userID int64, room live.Room, members []int64) (map[string]any, error) {
 	names, err := s.accounts.Names(ctx, []int64{room.OwnerID})
 	if err != nil {
 		return nil, err
@@ -45,7 +49,7 @@ func (s server) roomInfo(ctx context.Context, userID int64, room live.Room) (map
 		"area": "", "toyLabel": false, "hotLabel": "", "systemMessages": []any{},
 		"teacherLabel": "", "ticketLabel": "", "role": role, "silence": false,
 		"subLevel": nil, "freePlanId": "0", "toyInfo": "{}",
-		"trans": false, "transLang": "", "promptOpen": nil,
+		"trans": false, "transLang": room.TranslationLanguage, "promptOpen": nil,
 		"searchName": ownerName, "isLock": room.IsLock,
 	}, nil
 }

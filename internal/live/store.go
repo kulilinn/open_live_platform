@@ -27,14 +27,25 @@ var (
 )
 
 type Room struct {
-	ID          int64       `json:"id"`
-	OwnerID     int64       `json:"owner_id"`
-	Title       string      `json:"title"`
-	Online      bool        `json:"online"`
-	MemberCount int         `json:"member_count"`
-	IsLock      bool        `json:"isLock"`
-	Session     LiveSession `json:"-"`
-	ViewerNID   uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
+	ID                  int64       `json:"id"`
+	OwnerID             int64       `json:"owner_id"`
+	Title               string      `json:"title"`
+	Online              bool        `json:"online"`
+	MemberCount         int         `json:"member_count"`
+	IsLock              bool        `json:"isLock"`
+	Session             LiveSession `json:"-"`
+	ViewerNID           uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
+	TranslationLanguage string      `json:"-"`
+}
+
+type JoinedRoom struct {
+	Room
+	Members      []int64
+	AnchorJoined bool
+}
+
+type RoomSettings struct {
+	Title, Password, TranslationLanguage *string
 }
 
 func (r *Room) UnmarshalJSON(data []byte) error {
@@ -97,23 +108,33 @@ func (f RoomFilter) Window(total int64) (offset, limit, pages int64) {
 }
 
 type Event struct {
-	Type     string `json:"type"`
-	RoomID   int64  `json:"room_id"`
-	UserID   int64  `json:"user_id"`
-	TargetID int64  `json:"target_id,omitempty"`
-	Text     string `json:"text,omitempty"`
-	Payload  string `json:"-"`
+	Type      string    `json:"type"`
+	RoomID    int64     `json:"room_id"`
+	UserID    int64     `json:"user_id"`
+	TargetID  int64     `json:"target_id,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Payload   string    `json:"-"`
+	MessageID int64     `json:"-"`
+	CreatedAt time.Time `json:"-"`
+}
+
+// Subscription binds a room's event stream to the broadcast active at authorization.
+type Subscription struct {
+	Events      <-chan Event
+	LiveID      int64
+	Unsubscribe func()
 }
 
 type RoomStore interface {
 	Start(ctx context.Context, ownerID int64, title, password string) (Room, error)
-	UpdateSettings(ctx context.Context, ownerID int64, title, password *string) (Room, error)
+	StartWithLanguage(ctx context.Context, ownerID int64, title, password string, language *string) (Room, error)
+	UpdateSettings(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error)
 	Close(ctx context.Context, roomID, actorID int64) error
 	Info(ctx context.Context, roomID int64) (Room, error)
 	Rooms(ctx context.Context) ([]Room, error)
 	ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64, error)
 	Join(ctx context.Context, roomID, userID int64, password string) error
-	JoinRoom(ctx context.Context, roomID, userID int64, password string) (Room, error)
+	JoinRoom(ctx context.Context, roomID, userID int64, password string) (JoinedRoom, error)
 	// RTCNID returns the RTC ID for the owner or a joined member of the active broadcast.
 	RTCNID(ctx context.Context, roomID, userID int64) (uint32, error)
 	Leave(ctx context.Context, roomID, userID int64) error
@@ -129,11 +150,13 @@ type RoomStore interface {
 	SendChat(ctx context.Context, msg ChatMessage) (int64, error)
 	ChatHistory(ctx context.Context, roomID, userID int64, page, size uint64) ([]ChatMessage, error)
 	Subscribe(ctx context.Context, roomID, userID int64) (<-chan Event, func(), error)
+	SubscribeLive(ctx context.Context, roomID, userID int64) (Subscription, error)
 }
 
 type roomState struct {
 	Room
 	members          map[int64]struct{}
+	anchorJoined     bool
 	viewerNIDs       map[int64]uint32
 	lastViewerNID    uint32 // Retained across broadcasts on the same channel.
 	admins           map[int64]struct{}
@@ -160,6 +183,10 @@ func NewStore() *Store {
 
 // Start opens the creator's room. A new broadcast uses the same room ID.
 func (s *Store) Start(ctx context.Context, ownerID int64, title, password string) (Room, error) {
+	return s.StartWithLanguage(ctx, ownerID, title, password, nil)
+}
+
+func (s *Store) StartWithLanguage(ctx context.Context, ownerID int64, title, password string, language *string) (Room, error) {
 	if err := ctx.Err(); err != nil {
 		return Room{}, err
 	}
@@ -184,16 +211,22 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 	}
 	defer s.mu.Unlock()
 	lastViewerNID := DefaultAnchorNID
+	var translationLanguage string
 	if previous != nil {
 		lastViewerNID = previous.lastViewerNID
+		translationLanguage = previous.TranslationLanguage
+	}
+	if language != nil {
+		translationLanguage = *language
 	}
 	room := &roomState{
 		Room: Room{
-			ID:      ownerID,
-			OwnerID: ownerID,
-			Title:   title,
-			Online:  true,
-			IsLock:  len(passwordHash) != 0,
+			ID:                  ownerID,
+			OwnerID:             ownerID,
+			Title:               title,
+			Online:              true,
+			IsLock:              len(passwordHash) != 0,
+			TranslationLanguage: translationLanguage,
 			Session: LiveSession{
 				LiveID: s.nextLiveID, AnchorNID: DefaultAnchorNID, StartedAt: time.Now().UTC(),
 			},
@@ -213,7 +246,7 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 	return room.snapshot(), nil
 }
 
-func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, title, password *string) (Room, error) {
+func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error) {
 	if err := ctx.Err(); err != nil {
 		return Room{}, err
 	}
@@ -225,6 +258,7 @@ func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, title, passwo
 		return Room{}, err
 	}
 	var hash []byte
+	password := settings.Password
 	if password != nil && *password != "" {
 		s.mu.Unlock()
 		hash, err = HashRoomPassword(*password)
@@ -239,8 +273,11 @@ func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, title, passwo
 	if err := ctx.Err(); err != nil {
 		return Room{}, err
 	}
-	if title != nil {
-		room.Title = *title
+	if settings.Title != nil {
+		room.Title = *settings.Title
+	}
+	if settings.TranslationLanguage != nil {
+		room.TranslationLanguage = *settings.TranslationLanguage
 	}
 	if password != nil {
 		room.passwordHash = hash
@@ -262,6 +299,9 @@ func (s *Store) Close(ctx context.Context, roomID, actorID int64) error {
 	room := s.rooms[roomID]
 	if room == nil {
 		return ErrRoomNotFound
+	}
+	if err := room.checkCommandScope(ctx); err != nil {
+		return err
 	}
 	if actorID != room.OwnerID {
 		return ErrForbidden
@@ -337,12 +377,16 @@ func (s *Store) ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64
 }
 
 func (s *Store) Join(ctx context.Context, roomID, userID int64, password string) error {
-	_, err := s.JoinRoom(ctx, roomID, userID, password)
+	_, err := s.joinRoom(ctx, roomID, userID, password, false)
 	return err
 }
 
 // JoinRoom joins the user and returns the room snapshot of that broadcast.
-func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password string) (Room, error) {
+func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password string) (JoinedRoom, error) {
+	return s.joinRoom(ctx, roomID, userID, password, true)
+}
+
+func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password string, includeMembers bool) (JoinedRoom, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -351,19 +395,19 @@ func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password str
 	var passwordMatches bool
 	for {
 		if err := ctx.Err(); err != nil {
-			return Room{}, err
+			return JoinedRoom{}, err
 		}
 		room, err := s.onlineRoom(roomID)
 		if err != nil {
-			return Room{}, err
+			return JoinedRoom{}, err
 		}
 		if _, kicked := room.kicked[userID]; kicked {
-			return Room{}, ErrKicked
+			return JoinedRoom{}, ErrKicked
 		}
 		checkPassword := room.IsLock && userID != room.OwnerID
 		if checkPassword {
 			if room.passwordAttempts[userID] >= MaxRoomPasswordAttempts {
-				return Room{}, ErrRoomPasswordLocked
+				return JoinedRoom{}, ErrRoomPasswordLocked
 			}
 			if checkedRoom != room || !bytes.Equal(checkedHash, room.passwordHash) {
 				checkedRoom, checkedHash = room, room.passwordHash
@@ -375,22 +419,27 @@ func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password str
 			}
 			if !passwordMatches {
 				room.passwordAttempts[userID]++
-				return Room{}, ErrInvalidRoomPassword
+				return JoinedRoom{}, ErrInvalidRoomPassword
 			}
 		}
 		nid, err := room.viewerNID(userID)
 		if err != nil {
-			return Room{}, err
+			return JoinedRoom{}, err
 		}
 		if checkPassword {
 			delete(room.passwordAttempts, userID)
 		}
-		if !room.hasMember(userID) {
+		if userID == room.OwnerID {
+			room.anchorJoined = true
+		} else if !room.hasMember(userID) {
 			room.members[userID] = struct{}{}
 			room.publish(Event{Type: "join", UserID: userID})
 		}
-		info := room.snapshot()
+		info := JoinedRoom{Room: room.snapshot(), AnchorJoined: room.anchorJoined}
 		info.ViewerNID = nid
+		if includeMembers {
+			info.Members = sortedIDs(room.members)
+		}
 		return info, nil
 	}
 }
@@ -540,7 +589,7 @@ func (s *Store) Mute(ctx context.Context, roomID, actorID, targetID int64, durat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	room, err := s.onlineRoom(roomID)
+	room, err := s.commandRoom(ctx, roomID)
 	if err != nil {
 		return err
 	}
@@ -562,7 +611,7 @@ func (s *Store) Kick(ctx context.Context, roomID, actorID, targetID int64) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	room, err := s.onlineRoom(roomID)
+	room, err := s.commandRoom(ctx, roomID)
 	if err != nil {
 		return err
 	}
@@ -591,7 +640,7 @@ func (s *Store) SendChat(ctx context.Context, msg ChatMessage) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	room, err := s.onlineRoom(msg.RoomID)
+	room, err := s.commandRoom(ctx, msg.RoomID)
 	if err != nil {
 		return 0, err
 	}
@@ -613,7 +662,10 @@ func (s *Store) SendChat(ctx context.Context, msg ChatMessage) (int64, error) {
 	}
 	copy(room.history[1:], room.history)
 	room.history[0] = msg
-	room.publish(Event{Type: "chat", UserID: msg.UserID, Text: msg.Text, Payload: msg.Payload})
+	room.publish(Event{
+		Type: "chat", UserID: msg.UserID, Text: msg.Text, Payload: msg.Payload,
+		MessageID: msg.ID, CreatedAt: msg.CreatedAt,
+	})
 	return msg.ID, nil
 }
 
@@ -636,26 +688,51 @@ func (s *Store) ChatHistory(ctx context.Context, roomID, userID int64, page, siz
 
 // Subscribe receives live events for a joined user or the room owner.
 func (s *Store) Subscribe(ctx context.Context, roomID, userID int64) (<-chan Event, func(), error) {
+	sub, err := s.SubscribeLive(ctx, roomID, userID)
+	return sub.Events, sub.Unsubscribe, err
+}
+
+func (s *Store) SubscribeLive(ctx context.Context, roomID, userID int64) (Subscription, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return Subscription{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	room, err := s.onlineRoom(roomID)
 	if err != nil {
-		return nil, nil, err
+		return Subscription{}, err
 	}
 	if !room.hasMember(userID) {
-		return nil, nil, ErrNotMember
+		return Subscription{}, ErrNotMember
 	}
 	events := make(chan Event, 32)
 	room.subscribers[events] = userID
-	return events, func() {
+	unsubscribe := func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		room.unsubscribe(events)
-	}, nil
+	}
+	return Subscription{Events: events, LiveID: room.Session.LiveID, Unsubscribe: unsubscribe}, nil
+}
+
+func (s *Store) commandRoom(ctx context.Context, id int64) (*roomState, error) {
+	room, err := s.onlineRoom(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := room.checkCommandScope(ctx); err != nil {
+		return nil, err
+	}
+	return room, nil
+}
+
+func (r *roomState) checkCommandScope(ctx context.Context) error {
+	roomID, liveID, scoped := RoomCommandScope(ctx)
+	if scoped && (r.ID != roomID || !r.Online || r.Session.LiveID != liveID) {
+		return ErrRoomClosed
+	}
+	return nil
 }
 
 func (s *Store) onlineRoom(id int64) (*roomState, error) {
@@ -711,6 +788,7 @@ func (r *roomState) end() {
 	r.passwordAttempts = nil
 	r.history = nil
 	clear(r.members)
+	r.anchorJoined = false
 	r.viewerNIDs = nil
 	r.publish(Event{Type: "close", UserID: r.OwnerID})
 	for events := range r.subscribers {

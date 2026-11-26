@@ -39,7 +39,7 @@ func TestRTCNIDsAcrossBroadcasts(t *testing.T) {
 		if room.ViewerNID != nid || room.MemberCount != members {
 			t.Fatalf("JoinRoom(%d) = %+v, want RTC ID %d and %d members", user, room, nid, members)
 		}
-		return room
+		return room.Room
 	}
 	join(owner, "", DefaultAnchorNID, 0)
 	assertNID(owner, DefaultAnchorNID)

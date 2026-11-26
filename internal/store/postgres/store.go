@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -105,11 +106,15 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 	stream.Lock()
 	defer stream.Unlock()
 	var r roomChange
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	// Reads after the advisory lock must see the committed state of the previous holder.
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1::bigint)", id); err != nil {
 			return err
 		}
 		r = roomChange{ctx: ctx, tx: tx, id: id}
+		if err := r.checkCommandScope(); err != nil {
+			return err
+		}
 		if err := fn(&r); err != nil {
 			return err
 		}
@@ -135,8 +140,28 @@ type roomChange struct {
 	tx        pgx.Tx
 	id        int64
 	event     live.Event
-	messageID int64
 	sub       chan live.Event
 	subUser   int64
 	subMarker string
+}
+
+func (r *roomChange) checkCommandScope() error {
+	roomID, liveID, scoped := live.RoomCommandScope(r.ctx)
+	if !scoped {
+		return nil
+	}
+	if roomID != r.id {
+		return live.ErrRoomClosed
+	}
+	var matches bool
+	err := r.tx.QueryRow(r.ctx, "SELECT online AND live_id=$2 FROM rooms WHERE id=$1", r.id, liveID).Scan(&matches)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return live.ErrRoomNotFound
+	case err != nil:
+		return err
+	case !matches:
+		return live.ErrRoomClosed
+	}
+	return nil
 }

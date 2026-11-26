@@ -117,7 +117,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			}
 		}
 
-		events, unsubscribe, err := rooms.Subscribe(r.Context(), roomID, user.ID)
+		sub, err := rooms.SubscribeLive(r.Context(), roomID, user.ID)
 		if err != nil {
 			switch {
 			case errors.Is(err, live.ErrRoomNotFound):
@@ -129,17 +129,18 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			}
 			return
 		}
-		defer unsubscribe()
+		defer sub.Unsubscribe()
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err == nil {
-			serve(r.Context(), conn, events, accounts, rooms, roomID, user, conn.Subprotocol())
+			serve(r.Context(), conn, sub, accounts, rooms, roomID, user, conn.Subprotocol())
 		}
 	})
 }
 
-func serve(ctx context.Context, conn *websocket.Conn, events <-chan live.Event, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string) {
+func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string) {
 	defer conn.Close()
+	commandCtx := live.WithRoomCommandScope(ctx, roomID, sub.LiveID)
 	if protocol == "h5relayer" || protocol == "devicerelayer" {
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		userCommand := map[string]any{"cmd": "user", "data": map[string]any{
@@ -213,7 +214,7 @@ func serve(ctx context.Context, conn *websocket.Conn, events <-chan live.Event, 
 			if !ok {
 				return
 			}
-			if err := cmd.apply(ctx, rooms, roomID, user.ID); err != nil {
+			if err := cmd.apply(commandCtx, rooms, roomID, user.ID); err != nil {
 				response = map[string]string{"type": "error", "error": err.Error()}
 			} else if cmd.Type == "device" {
 				response = json.RawMessage(cmd.Payload)
@@ -227,7 +228,7 @@ func serve(ctx context.Context, conn *websocket.Conn, events <-chan live.Event, 
 			} else {
 				continue
 			}
-		case event, ok := <-events:
+		case event, ok := <-sub.Events:
 			if !ok {
 				conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
 				return
@@ -343,12 +344,12 @@ func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, even
 	names, _ := accounts.Names(ctx, []int64{event.UserID})
 	sender := strconv.FormatInt(event.UserID, 10)
 	payload := map[string]any{
-		"id":        strconv.FormatInt(time.Now().UnixNano(), 10),
+		"id":        strconv.FormatInt(event.MessageID, 10),
 		"channel":   "chat",
 		"room":      strconv.FormatInt(roomID, 10),
 		"priority":  0,
 		"sender":    sender,
-		"timestamp": strconv.FormatInt(time.Now().Unix(), 10),
+		"timestamp": strconv.FormatInt(event.CreatedAt.Unix(), 10),
 		"message": map[string]any{
 			"msgType":  "C",
 			"msgGroup": "chat",
