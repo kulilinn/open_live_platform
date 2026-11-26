@@ -146,3 +146,93 @@ func TestConnectorAuthenticatesAndRelaysRoomEvents(t *testing.T) {
 	// Existing integrations may still present a server-signed session URL.
 	connect(base + owner.Token + "/" + Signature(owner.Token, secret))
 }
+
+func TestH5RelayWireCompatibility(t *testing.T) {
+	const secret = "h5-relay-secret"
+	accounts := auth.NewStore()
+	owner, err := accounts.SignUp(t.Context(), "h5-owner@example.com", "password", "H5 Owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := accounts.SignUp(t.Context(), "h5-viewer@example.com", "password", "H5 Viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooms := live.NewStore()
+	room, err := rooms.Start(t.Context(), owner.User.ID, "H5 Room", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rooms.Join(t.Context(), room.ID, viewer.User.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, accounts, rooms, secret, "")
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/api/device/qrcode", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+viewer.Token)
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticket struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&ticket); err != nil {
+		res.Body.Close()
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	address := ticket.URL + "?room_id=" + strconv.FormatInt(room.ID, 10)
+	headers := http.Header{"Sec-WebSocket-Protocol": {"h5relayer"}}
+	conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), address, headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if conn.Subprotocol() != "h5relayer" {
+		t.Fatalf("subprotocol = %q", conn.Subprotocol())
+	}
+
+	var first map[string]any
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.ReadJSON(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first["content"] != "control" {
+		t.Fatalf("first frame = %+v", first)
+	}
+
+	payload := map[string]any{
+		"id": "78591199061446656", "channel": "chat",
+		"room": strconv.FormatInt(room.ID, 10), "priority": 0,
+		"sender": strconv.FormatInt(viewer.User.ID, 10), "timestamp": "1760000000",
+		"message": map[string]any{
+			"msgType": "C", "msgGroup": "chat",
+			"userInfo": map[string]any{"uid": strconv.FormatInt(viewer.User.ID, 10), "name": "Wire Name"},
+			"message":  "hello from h5",
+		},
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"content": "live_chat", "queue": strconv.FormatInt(room.ID, 10),
+		"payload": []any{payload},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var event map[string]any
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event["content"] != "live_chat" || event["queue"] != strconv.FormatInt(room.ID, 10) {
+		t.Fatalf("chat frame = %+v", event)
+	}
+	history, err := rooms.ChatHistory(t.Context(), room.ID, viewer.User.ID, 0, 0)
+	if err != nil || len(history) != 1 || history[0].Text != "hello from h5" || history[0].Payload == "" {
+		t.Fatalf("history = %+v, %v", history, err)
+	}
+}

@@ -59,7 +59,7 @@ func TestStoreChatHistoryLifecycle(t *testing.T) {
 	defer unsubscribe()
 	id, err := store.SendChat(ctx, ChatMessage{ID: 1000, RoomID: owner, UserID: viewer, Text: "hello", Payload: payload})
 	requireError(t, err, nil)
-	requireEvent(t, events, Event{Type: "chat", RoomID: owner, UserID: viewer, Text: "hello"})
+	requireEvent(t, events, Event{Type: "chat", RoomID: owner, UserID: viewer, Text: "hello", Payload: payload})
 	got, err := store.ChatHistory(ctx, owner, viewer, 0, 100)
 	requireError(t, err, nil)
 	if len(got) != 1 || id <= 0 || id == 1000 || got[0].ID != id || got[0].RoomID != owner || got[0].UserID != viewer || got[0].Text != "hello" || got[0].Payload != payload || got[0].CreatedAt.IsZero() {

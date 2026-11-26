@@ -59,6 +59,7 @@ type Event struct {
 	UserID   int64  `json:"user_id"`
 	TargetID int64  `json:"target_id,omitempty"`
 	Text     string `json:"text,omitempty"`
+	Payload  string `json:"-"`
 }
 
 type RoomStore interface {
@@ -468,7 +469,7 @@ func (s *Store) SendChat(ctx context.Context, msg ChatMessage) (int64, error) {
 	}
 	copy(room.history[1:], room.history)
 	room.history[0] = msg
-	room.publish(Event{Type: "chat", UserID: msg.UserID, Text: msg.Text})
+	room.publish(Event{Type: "chat", UserID: msg.UserID, Text: msg.Text, Payload: msg.Payload})
 	return msg.ID, nil
 }
 

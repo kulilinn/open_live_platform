@@ -393,7 +393,7 @@ func (s *Store) SendChat(ctx context.Context, msg live.ChatMessage) (int64, erro
 		}
 		err := r.tx.QueryRow(ctx, `INSERT INTO room_messages(room_id,user_id,text,payload)
 			VALUES($1,$2,$3,$4) RETURNING id`, msg.RoomID, msg.UserID, msg.Text, msg.Payload).Scan(&messageID)
-		r.event = live.Event{Type: "chat", UserID: msg.UserID, Text: msg.Text}
+		r.event = live.Event{Type: "chat", UserID: msg.UserID, Text: msg.Text, Payload: msg.Payload}
 		return err
 	})
 	if err != nil {

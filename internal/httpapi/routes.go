@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"open_live_platform/internal/auth"
@@ -23,6 +24,8 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	mux.HandleFunc("GET /status", status)
 	mux.HandleFunc("POST /api/auth/signup", s.signUp)
 	mux.HandleFunc("POST /api/auth/signin", s.signIn)
+	mux.HandleFunc("GET /api/auth/session", s.authenticated(s.session))
+	mux.HandleFunc("POST /api/auth/signout", s.authenticated(s.signOut))
 
 	mux.HandleFunc("POST /api/live/room/start", s.authenticated(s.startRoom))
 	mux.HandleFunc("POST /api/live/room/setting", s.authenticated(s.updateRoomSettings))
@@ -69,6 +72,20 @@ func (s server) signIn(w http.ResponseWriter, r *http.Request) {
 		session, err := s.accounts.SignIn(r.Context(), input.Email, input.Password)
 		sessionResponse(w, http.StatusOK, session, err)
 	}
+}
+
+func (s server) session(w http.ResponseWriter, r *http.Request, _ int64) {
+	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200", "token": token})
+}
+
+func (s server) signOut(w http.ResponseWriter, r *http.Request, _ int64) {
+	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if err := s.accounts.Revoke(r.Context(), token); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not sign out")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "success"})
 }
 
 func sessionResponse(w http.ResponseWriter, status int, session auth.Session, err error) {

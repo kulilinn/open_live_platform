@@ -42,6 +42,12 @@ func TestStoreSessions(t *testing.T) {
 	if user, ok, err := store.Lookup(t.Context(), signin.Token); err != nil || !ok || user != signup.User {
 		t.Fatalf("token lookup = %+v, %v", user, ok)
 	}
+	if err := store.Revoke(t.Context(), signin.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Lookup(t.Context(), signin.Token); err != nil || ok {
+		t.Fatal("revoked token still resolved to a user")
+	}
 	viewer, err := store.SignUp(t.Context(), "viewer@example.com", "another-test-password", "Viewer")
 	if err != nil {
 		t.Fatal(err)

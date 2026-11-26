@@ -40,6 +40,11 @@ func TestCoreHTTPFlow(t *testing.T) {
 	user := signup.Body["user"].(map[string]any)
 	roomOwner := int64(user["id"].(float64))
 
+	session := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/auth/session", token, nil)
+	if session.Code != http.StatusOK || session.Body["status"] != "200" || session.Body["token"] != token {
+		t.Fatalf("session = %d %+v", session.Code, session.Body)
+	}
+
 	unauthorized := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/start", "", map[string]string{"title": "Live"})
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized start = %d", unauthorized.Code)
@@ -66,6 +71,15 @@ func TestCoreHTTPFlow(t *testing.T) {
 	info := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/live/room/info/"+itoa(roomOwner), token, nil)
 	if info.Code != http.StatusOK || int(info.Body["member_count"].(float64)) != 0 {
 		t.Fatalf("info = %d %+v", info.Code, info.Body)
+	}
+
+	signout := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/auth/signout", token, nil)
+	if signout.Code != http.StatusOK || signout.Body["status"] != "success" {
+		t.Fatalf("signout = %d %+v", signout.Code, signout.Body)
+	}
+	afterSignout := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/auth/session", token, nil)
+	if afterSignout.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked session = %d", afterSignout.Code)
 	}
 }
 

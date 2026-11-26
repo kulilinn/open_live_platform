@@ -29,6 +29,7 @@ go run .\cmd\platform
 
 - `GET /healthchecker` 和 `GET /status`
 - `POST /api/auth/signup` 与 `POST /api/auth/signin`
+- `GET /api/auth/session` 与 `POST /api/auth/signout`
 - `POST /api/live/room/start` 开播，`POST /api/live/room/setting` 修改本场标题或密码
 - `POST /api/live/room/list` 查询观众端房间列表
 - `POST /api/live/room/join/{room}` 与 `POST /api/live/room/leave/{room}`
@@ -71,6 +72,8 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 ```
 
 连接票据在当前服务进程内有效，限 60 秒内发起一次连接，重连时重新领取。已建立的连接可继续收发。通过反向代理提供服务时，把 `RELAY_PUBLIC_URL` 设为客户端可达的基址，例如 `wss://live.example.com`。直接连接服务时默认使用请求的主机及 TLS 状态生成地址。
+
+兼容原浏览器 relay 时，在 WebSocket 请求中声明 `Sec-WebSocket-Protocol: h5relayer`。服务会先发送 `control` 用户帧，聊天使用原版的 `live_chat`、`queue`、`payload` 结构。旧客户端省略子协议时继续使用 Go 的 `type`、`text` 消息格式。当前兼容层先覆盖用户首帧和文本聊天。
 
 ## 聊天记录
 

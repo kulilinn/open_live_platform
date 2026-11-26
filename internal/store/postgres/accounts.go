@@ -101,6 +101,11 @@ func (s *Store) Bearer(ctx context.Context, authorization string) (auth.User, bo
 	return s.Lookup(ctx, token)
 }
 
+func (s *Store) Revoke(ctx context.Context, token string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token)
+	return err
+}
+
 func (s *Store) Users(ctx context.Context) ([]auth.User, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, email, account FROM users ORDER BY id`)
 	if err != nil {
