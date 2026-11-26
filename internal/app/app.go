@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/edge"
+	"open_live_platform/internal/gift"
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/relay"
@@ -17,12 +19,13 @@ import (
 )
 
 type Config struct {
-	DatabaseURL    string
-	Addr           string
-	AdminToken     string
-	EdgeToken      string
-	RelaySecret    string
-	RelayPublicURL string
+	DatabaseURL     string
+	Addr            string
+	AdminToken      string
+	EdgeToken       string
+	RelaySecret     string
+	RelayPublicURL  string
+	GiftCatalogFile string
 
 	ReadTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
@@ -39,6 +42,7 @@ func ConfigFromEnv() Config {
 		EdgeToken:         env("EDGE_TOKEN", adminToken),
 		RelaySecret:       env("RELAY_SECRET", "dev-secret"),
 		RelayPublicURL:    os.Getenv("RELAY_PUBLIC_URL"),
+		GiftCatalogFile:   os.Getenv("GIFT_CATALOG_FILE"),
 		ReadTimeout:       duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
 		ReadHeaderTimeout: duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
 		WriteTimeout:      duration("PLATFORM_WRITE_TIMEOUT", 15*time.Second),
@@ -55,6 +59,10 @@ type App struct {
 }
 
 func New(ctx context.Context, config Config) (*App, error) {
+	gifts, err := gift.Load(config.GiftCatalogFile)
+	if err != nil {
+		return nil, fmt.Errorf("gift catalog: %w", err)
+	}
 	var accounts auth.AccountStore
 	var rooms live.RoomStore
 	var db *postgres.Store
@@ -71,6 +79,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	mux := http.NewServeMux()
 
 	httpapi.Register(mux, accounts, rooms)
+	httpapi.RegisterGiftCatalog(mux, accounts, gifts)
 	admin.Register(mux, accounts, rooms, config.AdminToken)
 	edge.Register(mux, rooms, config.EdgeToken)
 	relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL)

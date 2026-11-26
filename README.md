@@ -39,6 +39,7 @@ go run .\cmd\platform
 - `POST /api/live/room/chat` 发送文本，`POST /api/live/room/messages` 读取本场聊天历史
 - `GET /api/device/qrcode` 领取 WebSocket 连接地址
 - `GET /api/connector/{token}/{sig}` WebSocket 握手
+- `GET /api/gift/list` 读取已配置的礼物目录
 - `GET /api/admin/rooms`、`GET /api/admin/users`
 - `POST /api/edge/events`
 - `POST /internal/rpc/platform.stats`
@@ -89,6 +90,10 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 
 - Go 格式 `{"room_id":42,"text":"你好"}` 成功返回 HTTP 204。WebSocket 发送的聊天也可从历史接口读取。
 - Rust 格式 `{"room":"42","channel":"chat","priority":0,"message":{"msgType":"C","msgGroup":"chat","userInfo":{"uid":"7","name":"小林"},"message":"你好"}}` 返回 `status`、布尔值 `data` 和数值 `msgId`。历史保留原消息体及其扩展字段，外层 `sender` 取自登录身份，`id`、`room`、`sender` 和 Unix 秒 `timestamp` 均为字符串。
+
+## 礼物目录
+
+将 `GIFT_CATALOG_FILE` 设为礼物 JSON 文件的路径，例如内容为 `[{"id":"101","name":"花束","price":20,"giftSort":1}]`。服务在启动时加载目录。登录后请求 `GET /api/gift/list` 会得到 `status/data`，礼物按 `giftSort` 升序排列。没有配置目录或请求带有 `?all=false` 时，`data` 为空数组。
 
 ## PostgreSQL
 
