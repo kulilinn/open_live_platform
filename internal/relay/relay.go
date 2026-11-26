@@ -186,6 +186,22 @@ func serve(ctx context.Context, conn *websocket.Conn, events <-chan live.Event, 
 				}
 				continue
 			}
+			if protocol == "devicerelayer" {
+				var raw json.RawMessage
+				if err := conn.ReadJSON(&raw); err != nil {
+					return
+				}
+				cmd, ok := parseDeviceCommand(raw)
+				if !ok {
+					continue
+				}
+				select {
+				case commands <- cmd:
+				case <-done:
+					return
+				}
+				continue
+			}
 			var cmd command
 			if err := conn.ReadJSON(&cmd); err != nil {
 				return
@@ -207,6 +223,15 @@ func serve(ctx context.Context, conn *websocket.Conn, events <-chan live.Event, 
 			}
 			if err := cmd.apply(ctx, rooms, roomID, user.ID); err != nil {
 				response = map[string]string{"type": "error", "error": err.Error()}
+			} else if cmd.Type == "device" {
+				response = json.RawMessage(cmd.Payload)
+				if protocol == "h5relayer" {
+					response = map[string]any{
+						"content": "device",
+						"queue":   strconv.FormatInt(user.ID, 10),
+						"payload": json.RawMessage(cmd.Payload),
+					}
+				}
 			} else {
 				continue
 			}
@@ -229,6 +254,11 @@ func serve(ctx context.Context, conn *websocket.Conn, events <-chan live.Event, 
 
 func (cmd command) apply(ctx context.Context, rooms live.RoomStore, roomID, userID int64) error {
 	switch cmd.Type {
+	case "device":
+		if cmd.Payload == "" {
+			return errors.New("unknown room command")
+		}
+		return nil
 	case "chat":
 		if cmd.Payload != "" {
 			_, err := rooms.SendChat(ctx, live.ChatMessage{
@@ -258,9 +288,13 @@ func parseH5Command(raw json.RawMessage, roomID, userID int64) (command, bool) {
 	var content string
 	var payloads []json.RawMessage
 	if json.Unmarshal(envelope["content"], &content) != nil ||
-		content != "live_chat" ||
-		json.Unmarshal(envelope["payload"], &payloads) != nil ||
-		len(payloads) == 0 {
+		(content != "live_chat" && content != "device") {
+		return command{}, false
+	}
+	if content == "device" {
+		return parseDeviceCommand(envelope["payload"])
+	}
+	if json.Unmarshal(envelope["payload"], &payloads) != nil || len(payloads) == 0 {
 		return command{}, false
 	}
 	var payload map[string]json.RawMessage
@@ -282,6 +316,25 @@ func parseH5Command(raw json.RawMessage, roomID, userID int64) (command, bool) {
 		return command{}, false
 	}
 	return command{Type: "chat", Text: text, Payload: string(canonical)}, true
+}
+
+func parseDeviceCommand(raw json.RawMessage) (command, bool) {
+	var value map[string]json.RawMessage
+	if json.Unmarshal(raw, &value) != nil {
+		return command{}, false
+	}
+	var name string
+	if json.Unmarshal(value["cmd"], &name) != nil {
+		return command{}, false
+	}
+	switch name {
+	case "vibrate", "devices", "mode_vibrate", "mode_vibrate_v2", "joystick",
+		"motor_strength", "connector_disconnected", "connector_connected",
+		"disconnect_connector", "user", "heartbeat", "join":
+		return command{Type: "device", Payload: string(raw)}, true
+	default:
+		return command{}, false
+	}
 }
 
 func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, event live.Event) any {

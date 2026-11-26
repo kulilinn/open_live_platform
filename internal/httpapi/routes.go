@@ -22,8 +22,8 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	mux.HandleFunc("GET /healthchecker", health)
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /status", status)
-	mux.HandleFunc("POST /api/auth/signup", s.signUp)
-	mux.HandleFunc("POST /api/auth/signin", s.signIn)
+	mux.HandleFunc("POST /api/auth/signup", s.signUpCompat)
+	mux.HandleFunc("POST /api/auth/signin", s.signInCompat)
 	mux.HandleFunc("GET /api/auth/session", s.authenticated(s.session))
 	mux.HandleFunc("POST /api/auth/signout", s.authenticated(s.signOut))
 

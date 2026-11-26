@@ -4,8 +4,11 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"open_live_platform/internal/live"
@@ -59,7 +62,34 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	liveResult(w, s.rooms.Join(r.Context(), roomID, userID, input.Password))
+	err := s.rooms.Join(r.Context(), roomID, userID, input.Password)
+	if !rustRoomCompat(r) {
+		liveResult(w, err)
+		return
+	}
+	if err != nil {
+		rustRoomError(w, err, "4005")
+		return
+	}
+	info, err := s.roomInfo(r.Context(), userID, roomID)
+	if err != nil {
+		rustRoomError(w, err, "4005")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"status": "200",
+		"data": map[string]any{
+			"room":      info,
+			"languages": []string{},
+			"user":      map[string]any{"id": userID},
+			"rtcToken": map[string]any{
+				"appid": "", "channel": strconv.FormatInt(roomID, 10),
+				"uid": strconv.FormatInt(userID, 10), "nid": strconv.FormatInt(userID, 10),
+				"token": "", "isAnchor": userID == roomID,
+			},
+			"startTime": time.Now().Unix(),
+		},
+	})
 }
 
 func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userID int64) {
@@ -162,7 +192,16 @@ func roomAction(action func(context.Context, int64, int64) error) userHandler {
 	return func(w http.ResponseWriter, r *http.Request, userID int64) {
 		roomID, ok := httpx.PathID(w, r, "room")
 		if ok {
-			liveResult(w, action(r.Context(), roomID, userID))
+			err := action(r.Context(), roomID, userID)
+			if rustRoomCompat(r) {
+				if err != nil {
+					rustRoomError(w, err, "4045")
+					return
+				}
+				httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
+				return
+			}
+			liveResult(w, err)
 		}
 	}
 }
@@ -186,4 +225,22 @@ func liveResult(w http.ResponseWriter, err error) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func rustRoomCompat(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/vnd.livemedia+json") ||
+		r.URL.Query().Get("compat") == "rust"
+}
+
+func rustRoomError(w http.ResponseWriter, err error, fallback string) {
+	status := fallback
+	switch {
+	case errors.Is(err, live.ErrInvalidRoomPassword):
+		status = "4083"
+	case errors.Is(err, live.ErrRoomPasswordLocked):
+		status = "4084"
+	case errors.Is(err, live.ErrRoomNotFound), errors.Is(err, live.ErrRoomClosed):
+		status = "4005"
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": status, "message": err.Error()})
 }

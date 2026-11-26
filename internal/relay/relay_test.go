@@ -236,3 +236,77 @@ func TestH5RelayWireCompatibility(t *testing.T) {
 		t.Fatalf("history = %+v, %v", history, err)
 	}
 }
+
+func TestDeviceRelayWireCompatibility(t *testing.T) {
+	const secret = "device-relay-secret"
+	accounts := auth.NewStore()
+	owner, err := accounts.SignUp(t.Context(), "device-owner@example.com", "password", "Device Owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooms := live.NewStore()
+	room, err := rooms.Start(t.Context(), owner.User.ID, "Device Room", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, accounts, rooms, secret, "")
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/api/device/qrcode", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+owner.Token)
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticket struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&ticket); err != nil {
+		res.Body.Close()
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	address := ticket.URL + "?room_id=" + strconv.FormatInt(room.ID, 10)
+	headers := http.Header{"Sec-WebSocket-Protocol": {"devicerelayer"}}
+	conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), address, headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var userFrame map[string]any
+	if err := conn.ReadJSON(&userFrame); err != nil {
+		t.Fatal(err)
+	}
+	if userFrame["cmd"] != "user" {
+		t.Fatalf("user frame = %+v", userFrame)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"cmd": "heartbeat"}); err != nil {
+		t.Fatal(err)
+	}
+	var heartbeat map[string]any
+	if err := conn.ReadJSON(&heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	if heartbeat["cmd"] != "heartbeat" {
+		t.Fatalf("heartbeat frame = %+v", heartbeat)
+	}
+
+	devices := []map[string]any{{"status": "online", "pid": "p1", "id": "toy-1", "battery": 88}}
+	if err := conn.WriteJSON(map[string]any{"cmd": "devices", "data": devices}); err != nil {
+		t.Fatal(err)
+	}
+	var deviceFrame map[string]any
+	if err := conn.ReadJSON(&deviceFrame); err != nil {
+		t.Fatal(err)
+	}
+	if deviceFrame["cmd"] != "devices" {
+		t.Fatalf("devices frame = %+v", deviceFrame)
+	}
+}
