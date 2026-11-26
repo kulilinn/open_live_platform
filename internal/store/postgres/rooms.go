@@ -309,6 +309,40 @@ func (s *Store) Admins(ctx context.Context, id int64) ([]int64, error) {
 	return s.ids(ctx, "room_admins", id)
 }
 
+func (s *Store) Kicked(ctx context.Context, roomID, userID int64) (bool, error) {
+	var kicked bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM room_kicks WHERE room_id=$1 AND user_id=$2)`,
+		roomID, userID,
+	).Scan(&kicked)
+	return kicked, err
+}
+
+func (s *Store) Muted(ctx context.Context, roomID, userID int64) (bool, error) {
+	var muted bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM room_mutes WHERE room_id=$1 AND user_id=$2 AND expires_at>now())`,
+		roomID, userID,
+	).Scan(&muted)
+	return muted, err
+}
+
+func (s *Store) MutedUsers(ctx context.Context, roomID int64) ([]int64, error) {
+	var ids []int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT ARRAY(
+			SELECT user_id FROM room_mutes
+			WHERE room_id=$1 AND expires_at>now()
+			ORDER BY user_id
+		) FROM rooms WHERE id=$1`,
+		roomID,
+	).Scan(&ids)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, live.ErrRoomNotFound
+	}
+	return ids, err
+}
+
 func (s *Store) SetAdmin(ctx context.Context, id, actor, target int64, enabled bool) error {
 	return s.change(ctx, id, func(r *roomChange) error {
 		if err := r.requireOnline(); err != nil {

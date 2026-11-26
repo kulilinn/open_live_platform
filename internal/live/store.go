@@ -73,6 +73,9 @@ type RoomStore interface {
 	Leave(ctx context.Context, roomID, userID int64) error
 	Members(ctx context.Context, roomID int64) ([]int64, error)
 	Admins(ctx context.Context, roomID int64) ([]int64, error)
+	Kicked(ctx context.Context, roomID, userID int64) (bool, error)
+	Muted(ctx context.Context, roomID, userID int64) (bool, error)
+	MutedUsers(ctx context.Context, roomID int64) ([]int64, error)
 	SetAdmin(ctx context.Context, roomID, actorID, targetID int64, enabled bool) error
 	Mute(ctx context.Context, roomID, actorID, targetID int64, duration time.Duration) error
 	Kick(ctx context.Context, roomID, actorID, targetID int64) error
@@ -364,6 +367,54 @@ func (s *Store) Admins(ctx context.Context, roomID int64) ([]int64, error) {
 		return nil, ErrRoomNotFound
 	}
 	return sortedIDs(room.admins), nil
+}
+
+func (s *Store) Kicked(ctx context.Context, roomID, userID int64) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	room := s.rooms[roomID]
+	if room == nil {
+		return false, nil
+	}
+	_, kicked := room.kicked[userID]
+	return kicked, nil
+}
+
+func (s *Store) Muted(ctx context.Context, roomID, userID int64) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	room := s.rooms[roomID]
+	if room == nil {
+		return false, nil
+	}
+	return time.Now().Before(room.muted[userID]), nil
+}
+
+func (s *Store) MutedUsers(ctx context.Context, roomID int64) ([]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	room := s.rooms[roomID]
+	if room == nil {
+		return nil, ErrRoomNotFound
+	}
+	now := time.Now()
+	ids := make([]int64, 0, len(room.muted))
+	for id, until := range room.muted {
+		if now.Before(until) {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
 }
 
 func (s *Store) SetAdmin(ctx context.Context, roomID, actorID, targetID int64, enabled bool) error {
