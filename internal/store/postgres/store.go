@@ -11,17 +11,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/relay"
 )
 
 type Store struct {
-	pool              *pgxpool.Pool
-	anchorAwayTimeout time.Duration
-	eventChannel      string
-	eventReady        atomic.Bool
-	stopEvents        context.CancelFunc
-	eventsDone        chan struct{}
-	shutdown          sync.Once
-	anchors           anchorPresence
+	pool                *pgxpool.Pool
+	anchorAwayTimeout   time.Duration
+	eventChannel        string
+	eventReady          atomic.Bool
+	stopEvents          context.CancelFunc
+	eventsDone          chan struct{}
+	shutdown            sync.Once
+	anchors             anchorPresence
+	sessionRevocations  auth.SessionRevocations
+	relayDeviceReceiver atomic.Pointer[func(relay.RustDeviceSignal)]
 	// Independent rooms can publish in parallel. Each shard orders local
 	// subscriptions and delivery with the commits that change their room.
 	streams [32]streams
@@ -33,8 +36,9 @@ type streams struct {
 }
 
 type subscriber struct {
-	userID int64
-	marker string
+	userID       int64
+	marker       string
+	translations bool
 }
 
 var _ auth.JWTBackend = (*Store)(nil)
@@ -94,7 +98,7 @@ func (s *Store) stream(id int64) *streams {
 func (s *streams) publish(event live.Event) {
 	listeners := s.rooms[event.RoomID]
 	for ch, sub := range listeners {
-		if sub.marker != "" {
+		if sub.marker != "" || (event.Type == "translate_change" && !sub.translations) {
 			continue
 		}
 		disconnect := event.Type == "close" || (event.Type == "kick" && sub.userID == event.TargetID) || (event.Type == "leave" && sub.userID == event.UserID)
@@ -139,19 +143,21 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 		if stream.rooms[id] == nil {
 			stream.rooms[id] = make(map[chan live.Event]subscriber)
 		}
-		stream.rooms[id][r.sub] = subscriber{userID: r.subUser, marker: r.subMarker}
+		stream.rooms[id][r.sub] = subscriber{userID: r.subUser, marker: r.subMarker, translations: r.subTranslations}
 	}
 	return nil
 }
 
 type roomChange struct {
-	ctx       context.Context
-	tx        pgx.Tx
-	id        int64
-	event     live.Event
-	sub       chan live.Event
-	subUser   int64
-	subMarker string
+	ctx               context.Context
+	tx                pgx.Tx
+	id                int64
+	event             live.Event
+	translationChange roomSignal
+	sub               chan live.Event
+	subUser           int64
+	subMarker         string
+	subTranslations   bool
 }
 
 func (r *roomChange) checkCommandScope() error {

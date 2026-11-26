@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"math"
@@ -12,7 +13,8 @@ import (
 
 const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
     (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
-    live_id, live_started_at, live_ended_at, trans_lang, anchor_away, anchor_away_until`
+    live_id, live_started_at, live_ended_at, trans_lang, anchor_away, anchor_away_until,
+    banner, tag, description, offline_info, plan::text, gifts::text, trans_enabled`
 
 const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
@@ -22,7 +24,8 @@ func scanRoom(row pgx.Row) (live.Room, error) {
 	var room live.Room
 	var startedAt, endedAt, awayUntil *time.Time
 	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
-		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway, &awayUntil)
+		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway, &awayUntil,
+		&room.Banner, &room.Tag, &room.Description, &room.OfflineInfo, &room.Plan, &room.Gifts, &room.TranslationEnabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
 	}
@@ -54,13 +57,13 @@ func (s *Store) Rooms(ctx context.Context) ([]live.Room, error) {
 }
 
 func (s *Store) ListRooms(ctx context.Context, filter live.RoomFilter) ([]live.Room, int64, error) {
-	const statusFilter = " WHERE ($1::boolean IS NULL OR online=$1)"
+	const roomFilter = " WHERE ($1::boolean IS NULL OR online=$1) AND ($2::text IS NULL OR tag=$2)"
 	rooms := []live.Room{}
 	var pages int64
 	// Count and read the page from the same snapshot when rooms open or close concurrently.
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		var total int64
-		if err := tx.QueryRow(ctx, "SELECT count(*) FROM rooms"+statusFilter, filter.Online).Scan(&total); err != nil {
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM rooms"+roomFilter, filter.Online, filter.Tag).Scan(&total); err != nil {
 			return err
 		}
 		var offset, limit int64
@@ -68,7 +71,7 @@ func (s *Store) ListRooms(ctx context.Context, filter live.RoomFilter) ([]live.R
 		if limit == 0 {
 			return nil
 		}
-		rows, err := tx.Query(ctx, roomQuery+statusFilter+" ORDER BY online DESC, id ASC LIMIT $2 OFFSET $3", filter.Online, limit, offset)
+		rows, err := tx.Query(ctx, roomQuery+roomFilter+" ORDER BY online DESC, id ASC LIMIT $3 OFFSET $4", filter.Online, filter.Tag, limit, offset)
 		if err != nil {
 			return err
 		}
@@ -88,6 +91,14 @@ func (s *Store) Start(ctx context.Context, owner int64, title, password string) 
 }
 
 func (s *Store) StartWithLanguage(ctx context.Context, owner int64, title, password string, language *string) (live.Room, error) {
+	return s.StartWithSettings(ctx, owner, live.RoomSettings{Title: &title, Password: &password, TranslationLanguage: language}, false)
+}
+
+func (s *Store) StartWithSettings(ctx context.Context, owner int64, settings live.RoomSettings, requireOffline bool) (live.Room, error) {
+	var password string
+	if settings.Password != nil {
+		password = *settings.Password
+	}
 	var result live.Room
 	err := s.change(ctx, owner, func(r *roomChange) error {
 		room, err := scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1", owner))
@@ -96,6 +107,9 @@ func (s *Store) StartWithLanguage(ctx context.Context, owner int64, title, passw
 			return err
 		}
 		if room.Online {
+			if requireOffline {
+				return live.ErrRoomAlreadyOnline
+			}
 			if password != "" {
 				if !room.IsLock {
 					return live.ErrRoomAlreadyOnline
@@ -116,19 +130,23 @@ func (s *Store) StartWithLanguage(ctx context.Context, owner int64, title, passw
 			return err
 		}
 		if newRoom {
-			result, err = scanRoom(r.tx.QueryRow(ctx, `INSERT INTO rooms(id,owner_id,title,password_hash,live_id,live_started_at,trans_lang)
-				VALUES($1,$1,$2,$3,nextval('room_live_id_seq'),statement_timestamp(),COALESCE($4,'')) RETURNING `+roomFields, owner, title, hash, language))
+			language := ""
+			if requireOffline {
+				language = "en"
+			}
+			room, err = r.createOfflineRoom(language)
+			if err != nil {
+				return err
+			}
 		} else {
 			for _, table := range []string{"room_members", "room_admins", "room_mutes", "room_kicks", "room_password_attempts", "room_viewer_nids", "room_anchor_connections"} {
 				if _, err := r.tx.Exec(ctx, "DELETE FROM "+table+" WHERE room_id=$1", owner); err != nil {
 					return err
 				}
 			}
-			result, err = scanRoom(r.tx.QueryRow(ctx, `UPDATE rooms SET online=true,title=$2,password_hash=$3,
-				trans_lang=COALESCE($4,trans_lang),anchor_joined=false,anchor_away=false,anchor_away_until=NULL,
-				live_id=nextval('room_live_id_seq'),live_started_at=statement_timestamp(),live_ended_at=NULL,
-				updated_at=statement_timestamp(),`+advanceHistoryBoundary+" WHERE id=$1 RETURNING "+roomFields, owner, title, hash, language))
 		}
+		room.ApplySettings(settings)
+		result, err = r.writeSettings(room, hash, true, true)
 		return err
 	})
 	if err != nil {
@@ -138,13 +156,24 @@ func (s *Store) StartWithLanguage(ctx context.Context, owner int64, title, passw
 }
 
 func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, settings live.RoomSettings) (live.Room, error) {
+	return s.updateSettings(ctx, ownerID, settings, false)
+}
+
+func (s *Store) ConfigureRoom(ctx context.Context, ownerID int64, settings live.RoomSettings) (live.Room, error) {
+	return s.updateSettings(ctx, ownerID, settings, true)
+}
+
+func (s *Store) updateSettings(ctx context.Context, ownerID int64, settings live.RoomSettings, allowOffline bool) (live.Room, error) {
 	var result live.Room
 	err := s.change(ctx, ownerID, func(r *roomChange) error {
 		room, err := scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1 AND owner_id=$1", ownerID))
+		if allowOffline && errors.Is(err, live.ErrRoomNotFound) {
+			room, err = r.createOfflineRoom("en")
+		}
 		if err != nil {
 			return err
 		}
-		if !room.Online {
+		if !allowOffline && !room.Online {
 			return live.ErrRoomClosed
 		}
 		result = room
@@ -159,29 +188,52 @@ func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, settings live
 			if err != nil {
 				return err
 			}
-			result.IsLock = len(hash) > 0
-			if !result.IsLock {
+			if len(hash) == 0 {
 				if _, err := r.tx.Exec(ctx, "DELETE FROM room_password_attempts WHERE room_id=$1", ownerID); err != nil {
 					return err
 				}
 			}
 		}
-		if settings.Title != nil {
-			result.Title = *settings.Title
+		room.ApplySettings(settings)
+		if room.Online && live.TranslationPreferenceChanged(result.TranslationEnabled, room.TranslationEnabled,
+			result.TranslationLanguage, room.TranslationLanguage) {
+			before, err := r.translationLanguages()
+			if err != nil {
+				return err
+			}
+			language := live.ActiveTranslationLanguage(room.TranslationEnabled, room.TranslationLanguage)
+			if _, err = r.tx.Exec(ctx, "UPDATE rooms SET anchor_trans_lang=$2 WHERE id=$1", ownerID, language); err != nil {
+				return err
+			}
+			if _, err = r.recordTranslationChange(before); err != nil {
+				return err
+			}
 		}
-		if settings.TranslationLanguage != nil {
-			result.TranslationLanguage = *settings.TranslationLanguage
-		}
-		_, err = r.tx.Exec(ctx, `UPDATE rooms SET title=COALESCE($2,title),
-			password_hash=CASE WHEN $3 THEN $4 ELSE password_hash END,
-			trans_lang=COALESCE($5,trans_lang),updated_at=now() WHERE id=$1`,
-			ownerID, settings.Title, password != nil, hash, settings.TranslationLanguage)
+		result, err = r.writeSettings(room, hash, password != nil, false)
 		return err
 	})
 	if err != nil {
 		return live.Room{}, err
 	}
 	return result, nil
+}
+
+func (r *roomChange) createOfflineRoom(language string) (live.Room, error) {
+	return scanRoom(r.tx.QueryRow(r.ctx, `INSERT INTO rooms(id,owner_id,title,online,trans_lang)
+		VALUES($1,$1,'',false,$2) RETURNING `+roomFields, r.id, language))
+}
+
+func (r *roomChange) writeSettings(room live.Room, hash []byte, replacePassword, start bool) (live.Room, error) {
+	query := `UPDATE rooms SET title=$2,password_hash=CASE WHEN $3 THEN $4 ELSE password_hash END,
+		trans_lang=$5,banner=$6,tag=$7,description=$8,offline_info=$9,plan=$10,gifts=$11,trans_enabled=$12,
+		updated_at=statement_timestamp()`
+	if start {
+		query += `,online=true,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,
+			live_id=nextval('room_live_id_seq'),live_started_at=statement_timestamp(),live_ended_at=NULL,` + advanceHistoryBoundary
+	}
+	return scanRoom(r.tx.QueryRow(r.ctx, query+" WHERE id=$1 RETURNING "+roomFields,
+		r.id, room.Title, replacePassword, hash, room.TranslationLanguage, room.Banner, room.Tag,
+		room.Description, room.OfflineInfo, cmp.Or(string(room.Plan), "[]"), cmp.Or(string(room.Gifts), "[]"), room.TranslationEnabled))
 }
 
 func (s *Store) Close(ctx context.Context, id, actor int64) error {
@@ -200,7 +252,7 @@ func (r *roomChange) close(actor int64) error {
 		return nil
 	}
 	var endedAt time.Time
-	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_away=false,anchor_away_until=NULL,
+	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,
 		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+
 		" WHERE id=$1 RETURNING live_ended_at", r.id).Scan(&endedAt); err != nil {
 		return err
@@ -263,15 +315,19 @@ func (r *roomChange) memberLiveID(uid int64) (int64, error) {
 }
 
 func (s *Store) Join(ctx context.Context, id, uid int64, password string) error {
-	_, err := s.joinRoom(ctx, id, uid, password, false)
+	_, err := s.joinRoom(ctx, id, uid, password, nil, false)
 	return err
 }
 
 func (s *Store) JoinRoom(ctx context.Context, id, uid int64, password string) (live.JoinedRoom, error) {
-	return s.joinRoom(ctx, id, uid, password, true)
+	return s.joinRoom(ctx, id, uid, password, nil, true)
 }
 
-func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, includeMembers bool) (live.JoinedRoom, error) {
+func (s *Store) JoinRoomWithLanguage(ctx context.Context, id, uid int64, password, language string) (live.JoinedRoom, error) {
+	return s.joinRoom(ctx, id, uid, password, &language, true)
+}
+
+func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, language *string, includeMembers bool) (live.JoinedRoom, error) {
 	var result live.JoinedRoom
 	var rejectedPassword bool
 	err := s.change(ctx, id, func(r *roomChange) error {
@@ -291,16 +347,22 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, in
 		case !online:
 			return live.ErrRoomClosed
 		case uid == owner:
-			if !result.AnchorJoined {
-				if _, err := r.tx.Exec(ctx, "UPDATE rooms SET anchor_joined=true WHERE id=$1", id); err != nil {
-					return err
-				}
-				result.AnchorJoined = true
+			before, err := r.translationLanguages()
+			if err != nil {
+				return err
 			}
+			if _, err := r.tx.Exec(ctx, "UPDATE rooms SET anchor_joined=true, anchor_trans_lang=COALESCE(NULLIF(trans_lang,''),'en') WHERE id=$1", id); err != nil {
+				return err
+			}
+			result.AnchorJoined = true
 			if anchorAway {
 				if err := s.setAnchorAway(r, owner, false); err != nil {
 					return err
 				}
+			}
+			result.Languages, err = r.recordTranslationChange(before)
+			if err != nil {
+				return err
 			}
 			return r.readJoinResult(&result, uid, includeMembers)
 		case kicked:
@@ -322,10 +384,25 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, in
 				}
 			}
 		}
+		before, err := r.translationLanguages()
+		if err != nil {
+			return err
+		}
 		joined, err := r.relation("room_members", uid, true)
 		if joined {
 			r.event = live.Event{Type: "join", UserID: uid}
 		}
+		if err != nil {
+			return err
+		}
+		if _, err := r.tx.Exec(ctx, `UPDATE room_members SET trans_lang=COALESCE(NULLIF(COALESCE($3,u.trans_lang),''),'en')
+			FROM users u WHERE room_members.room_id=$1 AND room_members.user_id=$2 AND u.id=$2`, id, uid, language); err != nil {
+			return err
+		}
+		if _, err := r.tx.Exec(ctx, "UPDATE users SET current_viewer_room=$1 WHERE id=$2", id, uid); err != nil {
+			return err
+		}
+		result.Languages, err = r.recordTranslationChange(before)
 		if err != nil {
 			return err
 		}
@@ -425,9 +502,14 @@ func (s *Store) Leave(ctx context.Context, id, uid int64) error {
 		} else if err != nil {
 			return err
 		}
+		before, err := r.translationLanguages()
+		if err != nil {
+			return err
+		}
 		left, err := r.relation("room_members", uid, false)
 		if left {
 			r.event = live.Event{Type: "leave", UserID: uid}
+			_, err = r.recordTranslationChange(before)
 		}
 		return err
 	})
@@ -534,6 +616,10 @@ func (s *Store) Kick(ctx context.Context, id, actor, target int64) error {
 		if err := r.canModerate(actor, target); err != nil {
 			return err
 		}
+		before, err := r.translationLanguages()
+		if err != nil {
+			return err
+		}
 		removed, err := r.relation("room_members", target, false)
 		if err != nil {
 			return err
@@ -542,7 +628,11 @@ func (s *Store) Kick(ctx context.Context, id, actor, target int64) error {
 			return live.ErrNotMember
 		}
 		_, err = r.relation("room_kicks", target, true)
+		if err != nil {
+			return err
+		}
 		r.event = live.Event{Type: "kick", UserID: actor, TargetID: target}
+		_, err = r.recordTranslationChange(before)
 		return err
 	})
 }
@@ -615,6 +705,14 @@ func (s *Store) Subscribe(ctx context.Context, id, uid int64) (<-chan live.Event
 }
 
 func (s *Store) SubscribeLive(ctx context.Context, id, uid int64) (live.Subscription, error) {
+	return s.subscribeLive(ctx, id, uid, false)
+}
+
+func (s *Store) SubscribeWithTranslations(ctx context.Context, id, uid int64) (live.Subscription, error) {
+	return s.subscribeLive(ctx, id, uid, true)
+}
+
+func (s *Store) subscribeLive(ctx context.Context, id, uid int64, translations bool) (live.Subscription, error) {
 	ch := make(chan live.Event, live.EventStreamCapacity)
 	var liveID int64
 	err := s.change(ctx, id, func(r *roomChange) error {
@@ -627,6 +725,7 @@ func (s *Store) SubscribeLive(ctx context.Context, id, uid int64) (live.Subscrip
 			return err
 		}
 		r.sub, r.subUser = ch, uid
+		r.subTranslations = translations
 		return nil
 	})
 	if err != nil {

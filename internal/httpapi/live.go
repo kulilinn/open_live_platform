@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"maps"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -16,28 +14,50 @@ import (
 	"open_live_platform/internal/transport/httpx"
 )
 
-func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) {
-	var input struct {
-		Title               *string `json:"title"`
-		Subject             *string `json:"subject"`
-		Password            string  `json:"password"`
-		TranslationLanguage *string `json:"transLang"`
+type roomSettingsInput struct {
+	Title               *string   `json:"title"`
+	Subject             *string   `json:"subject"`
+	Password            *string   `json:"password"`
+	Banner              *string   `json:"banner"`
+	Tag                 *string   `json:"tag"`
+	Description         *string   `json:"description"`
+	OfflineInfo         *string   `json:"offlineInfo"`
+	Plan                *[]string `json:"plan"`
+	Gifts               *[]string `json:"gifts"`
+	TranslationEnabled  *bool     `json:"trans"`
+	TranslationLanguage *string   `json:"transLang"`
+}
+
+func (input roomSettingsInput) settings() live.RoomSettings {
+	return live.RoomSettings{
+		Title: cmp.Or(input.Title, input.Subject), Password: input.Password, Banner: input.Banner,
+		Tag: input.Tag, Description: input.Description, OfflineInfo: input.OfflineInfo,
+		Plan: input.Plan, Gifts: input.Gifts, TranslationEnabled: input.TranslationEnabled,
+		TranslationLanguage: input.TranslationLanguage,
 	}
+}
+
+func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) {
+	var input *roomSettingsInput
 	if !httpx.Decode(w, r, &input) {
 		return
 	}
-	title := ""
-	if input.Title != nil {
-		title = *input.Title
-	} else if input.Subject != nil {
-		title = *input.Subject
+	if input == nil {
+		httpx.Error(w, http.StatusBadRequest, "expected a room settings object")
+		return
 	}
-	room, err := s.rooms.StartWithLanguage(r.Context(), userID, title, input.Password, input.TranslationLanguage)
+	rust := rustRoomCompat(r) || (input.Title == nil && (input.Subject != nil || input.Banner != nil || input.Tag != nil ||
+		input.Description != nil || input.OfflineInfo != nil || input.Plan != nil || input.Gifts != nil || input.TranslationEnabled != nil))
+	room, err := s.rooms.StartWithSettings(r.Context(), userID, input.settings(), rust)
 	if err != nil {
+		if rust && errors.Is(err, live.ErrRoomAlreadyOnline) {
+			httpx.JSON(w, http.StatusOK, map[string]string{"status": "4079", "message": "live stream already start"})
+			return
+		}
 		httpx.LiveError(w, err)
 		return
 	}
-	if input.Subject != nil && input.Title == nil {
+	if rust {
 		info, infoErr := s.roomInfo(r.Context(), userID, room)
 		if infoErr != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not build room response")
@@ -64,11 +84,16 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if !rustRoomCompat(r) {
-		liveResult(w, s.rooms.Join(r.Context(), roomID, userID, input.Password))
+	preferences, err := s.accounts.TranslationLanguages(r.Context(), []int64{userID})
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read room translation language")
 		return
 	}
-	joined, err := s.rooms.JoinRoom(r.Context(), roomID, userID, input.Password)
+	joined, err := s.rooms.JoinRoomWithLanguage(r.Context(), roomID, userID, input.Password, preferences[userID])
+	if !rustRoomCompat(r) {
+		liveResult(w, err)
+		return
+	}
 	if err != nil {
 		rustRoomError(w, err, "4005")
 		return
@@ -79,10 +104,9 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		rustRoomError(w, err, "4005")
 		return
 	}
-	languages, err := s.roomLanguages(r.Context(), joined)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "could not read room translation languages")
-		return
+	languages := joined.Languages
+	if languages == nil {
+		languages = []string{}
 	}
 	token, err := s.rtc.ForRoom(roomID, userID, room.ViewerNID, userID == room.OwnerID)
 	if err != nil {
@@ -100,23 +124,6 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 			"startTime": room.Session.StartedAt.Unix(),
 		},
 	})
-}
-
-func (s server) roomLanguages(ctx context.Context, room live.JoinedRoom) ([]string, error) {
-	translations, err := s.accounts.TranslationLanguages(ctx, room.Members)
-	if err != nil {
-		return nil, err
-	}
-	languages := make(map[string]struct{})
-	for _, id := range room.Members {
-		if id != room.OwnerID {
-			languages[cmp.Or(translations[id], "en")] = struct{}{}
-		}
-	}
-	if room.AnchorJoined {
-		languages[cmp.Or(room.TranslationLanguage, "en")] = struct{}{}
-	}
-	return slices.Sorted(maps.Keys(languages)), nil
 }
 
 func (s server) roomToken(w http.ResponseWriter, r *http.Request, userID int64) {
@@ -148,12 +155,7 @@ func (s server) roomToken(w http.ResponseWriter, r *http.Request, userID int64) 
 }
 
 func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userID int64) {
-	var input *struct {
-		Title               *string `json:"title"`
-		Subject             *string `json:"subject"`
-		Password            *string `json:"password"`
-		TranslationLanguage *string `json:"transLang"`
-	}
+	var input *roomSettingsInput
 	if !httpx.Decode(w, r, &input) {
 		return
 	}
@@ -161,14 +163,27 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 		httpx.Error(w, http.StatusBadRequest, "expected a room settings object")
 		return
 	}
-	room, err := s.rooms.UpdateSettings(r.Context(), userID, live.RoomSettings{
-		Title: cmp.Or(input.Title, input.Subject), Password: input.Password, TranslationLanguage: input.TranslationLanguage,
-	})
+	settings := input.settings()
+	rust := rustRoomCompat(r)
+	var room live.Room
+	var err error
+	if rust {
+		settings.Password = cmp.Or(settings.Password, new(string))
+		room, err = s.rooms.ConfigureRoom(r.Context(), userID, settings)
+	} else {
+		room, err = s.rooms.UpdateSettings(r.Context(), userID, settings)
+	}
 	if err != nil {
 		httpx.LiveError(w, err)
 		return
 	}
-	info, infoErr := s.roomInfo(r.Context(), userID, room)
+	var info map[string]any
+	var infoErr error
+	if rust {
+		info, infoErr = s.roomSettingsInfo(r.Context(), room)
+	} else {
+		info, infoErr = s.roomInfo(r.Context(), userID, room)
+	}
 	if infoErr != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not build room response")
 		return
@@ -176,18 +191,20 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": info})
 }
 
-func (s server) listRooms(w http.ResponseWriter, r *http.Request, _ int64) {
+func (s server) listRooms(w http.ResponseWriter, r *http.Request, userID int64) {
 	var input struct {
-		Page     *int64 `json:"page"`
-		PageSize *int64 `json:"pageSize"`
-		Online   *bool  `json:"online"`
+		Page     *int64  `json:"page"`
+		PageSize *int64  `json:"pageSize"`
+		Online   *bool   `json:"online"`
+		Tag      *string `json:"tag"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil && err != io.EOF {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	// Older clients send an empty request and expect a plain array.
-	if input.Page == nil && input.PageSize == nil && input.Online == nil {
+	rust := rustRoomCompat(r) || input.Tag != nil
+	if !rust && input.Page == nil && input.PageSize == nil && input.Online == nil {
 		rooms, err := s.rooms.Rooms(r.Context())
 		if err != nil {
 			httpx.LiveError(w, err)
@@ -196,7 +213,7 @@ func (s server) listRooms(w http.ResponseWriter, r *http.Request, _ int64) {
 		httpx.JSON(w, http.StatusOK, rooms)
 		return
 	}
-	filter := live.RoomFilter{Online: input.Online, Page: 1, PageSize: 20}
+	filter := live.RoomFilter{Online: input.Online, Tag: input.Tag, Page: 1, PageSize: 20}
 	if input.Page != nil {
 		filter.Page = *input.Page
 	}
@@ -210,6 +227,26 @@ func (s server) listRooms(w http.ResponseWriter, r *http.Request, _ int64) {
 	rooms, pages, err := s.rooms.ListRooms(r.Context(), filter)
 	if err != nil {
 		httpx.LiveError(w, err)
+		return
+	}
+	if rust {
+		owners := make([]int64, 0, len(rooms))
+		for _, room := range rooms {
+			owners = append(owners, room.OwnerID)
+		}
+		names, err := s.accounts.Names(r.Context(), owners)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not build room list")
+			return
+		}
+		data := make([]map[string]any, 0, len(rooms))
+		for _, room := range rooms {
+			info := roomInfoFields(userID, room, names[room.OwnerID], nil, -1, false)
+			info["memberCount"] = 0
+			info["member_count"] = 0
+			data = append(data, info)
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": data, "pages": pages})
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": rooms, "pages": pages})
@@ -272,7 +309,12 @@ func targetAction(action func(context.Context, int64, int64, int64) error) userH
 		}
 		targetID, ok := httpx.PathID(w, r, "uid")
 		if ok {
-			liveResult(w, action(r.Context(), roomID, userID, targetID))
+			err := action(r.Context(), roomID, userID, targetID)
+			if rustRoomCompat(r) && errors.Is(err, live.ErrRoomNotFound) {
+				roomStatusError(w, err)
+				return
+			}
+			liveResult(w, err)
 		}
 	}
 }
@@ -292,13 +334,19 @@ func rustRoomCompat(r *http.Request) bool {
 
 func rustRoomError(w http.ResponseWriter, err error, fallback string) {
 	status := fallback
+	message := err.Error()
 	switch {
+	case fallback == "4045" && (errors.Is(err, live.ErrRoomNotFound) || errors.Is(err, live.ErrRoomClosed)):
+		message = "leave failed"
 	case errors.Is(err, live.ErrInvalidRoomPassword):
 		status = "4083"
 	case errors.Is(err, live.ErrRoomPasswordLocked):
 		status = "4084"
-	case errors.Is(err, live.ErrRoomNotFound), errors.Is(err, live.ErrRoomClosed):
+	case errors.Is(err, live.ErrRoomNotFound) && fallback != "4045":
+		status = "4005"
+		message = "data not found "
+	case errors.Is(err, live.ErrRoomClosed) && fallback != "4045":
 		status = "4005"
 	}
-	httpx.JSON(w, http.StatusOK, map[string]string{"status": status, "message": err.Error()})
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": status, "message": message})
 }

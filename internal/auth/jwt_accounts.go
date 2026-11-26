@@ -33,6 +33,10 @@ func (s *JWTAccounts) SignInJWT(ctx context.Context, email, password string) (Se
 	if err != nil {
 		return Session{}, err
 	}
+	return s.signInUser(ctx, user)
+}
+
+func (s *JWTAccounts) signInUser(ctx context.Context, user User) (Session, error) {
 	token, claims, err := s.tokens.IssueRefresh(user.ID, user.Email)
 	if err != nil {
 		return Session{}, err
@@ -133,6 +137,7 @@ func (s *Store) RevokeJWTSession(ctx context.Context, userID, familyID int64) er
 	defer s.mu.Unlock()
 	if s.jwtSessions[userID] == familyID {
 		delete(s.jwtSessions, userID)
+		s.sessionRevocations.Revoke(JWTSessionKey(userID, familyID))
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -19,11 +20,13 @@ var (
 )
 
 type User struct {
-	ID                  int64  `json:"id"`
-	Email               string `json:"email"`
-	Account             string `json:"account"`
-	Language            string `json:"language,omitempty"`
-	TranslationLanguage string `json:"-" db:"-"`
+	ID                  int64    `json:"id"`
+	Email               string   `json:"email"`
+	Account             string   `json:"account"`
+	Language            string   `json:"language,omitempty"`
+	TranslationLanguage string   `json:"-" db:"-"`
+	TranslationEnabled  bool     `json:"-" db:"-"`
+	Profile             *Profile `json:"-" db:"-"`
 }
 
 type Session struct {
@@ -43,6 +46,7 @@ type AccountStore interface {
 	// TranslationLanguages returns stored preferences for existing accounts. An empty preference means the default.
 	TranslationLanguages(ctx context.Context, ids []int64) (map[int64]string, error)
 	SetTranslationLanguage(ctx context.Context, id int64, language string) error
+	SetTranslationSettings(ctx context.Context, id int64, enabled *bool, language *string) error
 	ChangePassword(ctx context.Context, id int64, oldPassword, newPassword string) error
 	Users(ctx context.Context) ([]User, error)
 	Names(ctx context.Context, ids []int64) (map[int64]string, error)
@@ -60,8 +64,14 @@ type Store struct {
 	users                map[string]credentials
 	names                map[int64]string
 	translationLanguages map[int64]string
+	translationEnabled   map[int64]bool
 	sessions             map[string]User
 	jwtSessions          map[int64]int64
+	sessionRevocations   SessionRevocations
+	emailCodes           map[string]emailCode
+	nextEmailCodeSweep   time.Time
+	loginGrants          map[[32]byte]LoginGrant
+	nextLoginGrantSweep  time.Time
 }
 
 var _ AccountStore = (*Store)(nil)
@@ -71,6 +81,7 @@ func NewStore() *Store {
 		users:                make(map[string]credentials),
 		names:                make(map[int64]string),
 		translationLanguages: make(map[int64]string),
+		translationEnabled:   make(map[int64]bool),
 		sessions:             make(map[string]User),
 		jwtSessions:          make(map[int64]int64),
 	}
@@ -174,8 +185,11 @@ func (s *Store) Revoke(ctx context.Context, token string) error {
 		return err
 	}
 	s.mu.Lock()
-	delete(s.sessions, token)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if _, exists := s.sessions[token]; exists {
+		delete(s.sessions, token)
+		s.sessionRevocations.Revoke(OpaqueSessionKey(token))
+	}
 	return nil
 }
 
@@ -188,6 +202,7 @@ func (s *Store) Find(ctx context.Context, id int64) (User, bool, error) {
 	for _, login := range s.users {
 		if login.user.ID == id {
 			login.user.TranslationLanguage = s.translationLanguages[id]
+			login.user.TranslationEnabled = s.translationEnabled[id]
 			return login.user, true, nil
 		}
 	}
@@ -233,13 +248,22 @@ func (s *Store) TranslationLanguages(ctx context.Context, ids []int64) (map[int6
 }
 
 func (s *Store) SetTranslationLanguage(ctx context.Context, id int64, language string) error {
+	return s.SetTranslationSettings(ctx, id, nil, &language)
+}
+
+func (s *Store) SetTranslationSettings(ctx context.Context, id int64, enabled *bool, language *string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.names[id]; exists {
-		s.translationLanguages[id] = language
+		if language != nil {
+			s.translationLanguages[id] = *language
+		}
+		if enabled != nil {
+			s.translationEnabled[id] = *enabled
+		}
 	}
 	return nil
 }

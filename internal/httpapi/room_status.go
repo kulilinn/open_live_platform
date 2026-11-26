@@ -42,12 +42,15 @@ func (s server) limited(w http.ResponseWriter, r *http.Request, _ int64) {
 	if !ok {
 		return
 	}
-	if _, err := s.rooms.Info(r.Context(), roomID); err != nil {
+	limitType, allow, reason := 0, true, []string{}
+	if _, err := s.rooms.Info(r.Context(), roomID); errors.Is(err, live.ErrRoomNotFound) {
+		limitType, allow, reason = 2, false, []string{""}
+	} else if err != nil {
 		roomStatusError(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": map[string]any{
-		"limit_ty": 0, "limit_reason": []string{}, "limit_allow": true,
+		"limit_ty": limitType, "limit_reason": reason, "limit_allow": allow,
 		"limit_duration": 0, "limit_total": 0,
 	}})
 }
@@ -86,6 +89,13 @@ func (s server) audience(w http.ResponseWriter, r *http.Request, _ int64) {
 	}
 	if _, err := s.rooms.Info(r.Context(), roomID); err != nil {
 		roomStatusError(w, err)
+		return
+	}
+	if _, found, err := s.accounts.Find(r.Context(), userID); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read audience")
+		return
+	} else if !found {
+		roomStatusError(w, live.ErrRoomNotFound)
 		return
 	}
 	admins, err := s.rooms.Admins(r.Context(), roomID)

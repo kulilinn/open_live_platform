@@ -4,14 +4,14 @@
 
 - 仓库目录为 `D:\my\open_live_platform`。
 - 当前主线已接入 Go 直播核心、PostgreSQL 持久化、H5 文字聊天、场次数据和跨实例房间广播。
-- 已通过本地 Go 测试、`go vet ./...` 和编译。早期版本做过真实 PostgreSQL 回归，近期新增的迁移版本、RTC NID、场次命令隔离和翻译语种用例待实库验证。
+- PostgreSQL 实库回归覆盖迁移重启、RTC NID、主播进程退出、跨实例登出、房间设置、翻译和通知。MySQL 8.4.7 → PostgreSQL 的账号导入已用隔离实例验证。
 - 保留 64 位用户、房间、消息 ID。未修改任何 `CMakeLists.txt` 或 `prcmake` 文件。
 
 ## 本轮优先完成
 
 - [x] Rust 兼容认证的响应字段和包装
 - [x] 兼容登录的 refresh/access JWT、过期、登出和重新登录撤销
-- [ ] 迁移现有 Rust/Redis 会话，登出时主动断开已建立的 WebSocket
+- [x] Rust/Redis 登录会话的导出、导入、到期和防重放；登出关闭已建立的 WebSocket（含跨实例）
 - [x] 房间进出协议兼容
   - [x] join 的 `status/data/room/languages/user/rtcToken/startTime`，配置 Agora 后返回已签名凭据
   - [x] leave 的 `status` 响应
@@ -19,7 +19,8 @@
 - [ ] relay 设备协议兼容
   - [x] `devicerelayer` 首帧
   - [x] 基础 DeviceCommand 帧解析和回传
-  - [ ] H5 和设备端互通、真实设备控制与状态广播
+  - [x] H5 与模拟设备同账号互通、设备状态和跨实例控制消息
+  - [ ] 真实设备验收、外部应用凭据和跨账号授权控制
 
 ## 直播核心后续
 
@@ -27,16 +28,16 @@
   - [x] 每场独立 `liveId`、主播 `anchorNid` 和场次起止时间
   - [x] Agora RTC token 签发与续签、按场分配观众 RTC UID
   - [x] 进房的 `languages` 读取本场成员的翻译偏好和主播的房间语种
-  - [ ] 翻译开关和 H5 翻译语种变更通知
-  - [ ] banner、tag、description、plan、gifts、trans 等设置
+  - [x] 翻译开关和 H5 翻译语种变更通知
+  - [x] banner、tag、description、plan、gifts、trans 等设置
 - [ ] Rust 房间错误码和 DataNotFound 响应
 - [ ] Rust 特有的房间在线状态及状态转换
-- [ ] relay ticket 的 Rust 签名、TTL 和重连语义
+- [x] Rust relay ticket 的签名、有效期、重复连接和 PostgreSQL 跨实例校验
 - [ ] H5 relay 的生命周期消息、控制消息和完整 devicerelayer 命令
   - [x] 主动关播通过 H5 状态消息 `O` 发送离线值，随后关闭连接
   - [x] 主播 H5 暂离和恢复使用同一直播场次
   - [x] 主播暂离超时后自动关播
-  - [ ] 处理进程强制退出或数据库故障后残留的主播连接登记
+  - [x] 主播进程退出或清理失败后按数据库租约回收连接登记
 - [x] WebSocket 命令绑定当前直播场次
 - [x] Go 文本聊天的 H5 实时推送与历史使用同一消息 ID 和时间戳
 
@@ -45,16 +46,18 @@
 - [x] `/api/user/{user_id}`、`/api/user/me`
 - [x] 用户语言设置和资料语言字段
 - [x] 用户状态检查和用户应用列表基础响应
-- [ ] 用户状态、头像和完整资料字段
+- [x] 导入账号的头像、搜索名、主播标记等静态资料，按本人和公开接口返回
+- [ ] 处罚、实时在线状态、等级、收益、装扮等关联资料
 - [x] 修改密码
-- [ ] 密码重置、邮箱验证码
-- [ ] 第三方登录和 token exchange
+- [x] 密码重置、邮箱验证码、一次性登录码交换
+- [ ] 第三方登录与各上游身份提供方验收
 
 ## 业务模块
 
 - [x] 只读礼物目录 `GET /api/gift/list`
 - [ ] 发送礼物、积分、收益、订阅和排行榜
-- [ ] Feed、通知、私信和会话
+- [x] 站内通知分页、未读和已读；私信会话的发送、分页、已读和隐藏
+- [ ] Feed、私信权益来源与实时投递、历史私信导入
 - [ ] 文件上传、媒体审核和消息审核
 - [ ] Agora 真实音视频通话验收、STT、翻译和设备控制
 - [ ] 支付、钱包、订单和退款
@@ -70,7 +73,8 @@
 - [ ] Kafka edge 消费链路
 - [ ] etcd 配置和服务发现
 - [ ] S3、邮件、推送和第三方服务适配
-- [ ] Rust MySQL 数据导入 PostgreSQL
+- [x] Rust MySQL 普通账号、已知密码格式与资料导入 PostgreSQL
+- [ ] 受限及无邮箱账号、历史房间、余额、账单、订阅、私信和其他业务数据导入
 - [ ] 多实例、限流、Origin、心跳、监控和生产部署
 - [ ] 原前端真实端到端验收
 

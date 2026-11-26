@@ -11,10 +11,12 @@ import (
 
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/dm"
 	"open_live_platform/internal/edge"
 	"open_live_platform/internal/gift"
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/notice"
 	"open_live_platform/internal/relay"
 	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/store/postgres"
@@ -28,11 +30,17 @@ type Config struct {
 	EdgeToken        string
 	RelaySecret      string
 	RelayPublicURL   string
+	RelayRust        relay.RustOptions
 	GiftCatalogFile  string
 	JWTSecret        string
+	MailSMTP         auth.SMTPConfig
+	MailCodeSecret   string
+	MailCodeTTL      time.Duration
 	AgoraAppID       string
 	AgoraCertificate string
 	AgoraTokenExpire string
+	DMModerationURL  string
+	DMModerator      dm.Moderator
 
 	AnchorAwayTimeout time.Duration
 	ReadTimeout       time.Duration
@@ -51,11 +59,16 @@ func ConfigFromEnv() Config {
 		EdgeToken:         env("EDGE_TOKEN", adminToken),
 		RelaySecret:       env("RELAY_SECRET", "dev-secret"),
 		RelayPublicURL:    os.Getenv("RELAY_PUBLIC_URL"),
+		RelayRust:         relayRustOptionsFromEnv(),
 		GiftCatalogFile:   os.Getenv("GIFT_CATALOG_FILE"),
 		JWTSecret:         os.Getenv("JWT_SECRET"),
+		MailSMTP:          smtpFromEnv(),
+		MailCodeSecret:    os.Getenv("MAIL_CODE_SECRET"),
+		MailCodeTTL:       mailCodeTTLFromEnv(),
 		AgoraAppID:        os.Getenv("AGORA_APP_ID"),
 		AgoraCertificate:  os.Getenv("AGORA_APP_CERTIFICATE"),
 		AgoraTokenExpire:  os.Getenv("AGORA_TOKEN_EXPIRE"),
+		DMModerationURL:   os.Getenv("DM_MODERATION_URL"),
 		AnchorAwayTimeout: anchorAwayTimeoutFromEnv(),
 		ReadTimeout:       duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
 		ReadHeaderTimeout: duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
@@ -68,6 +81,7 @@ type App struct {
 	Config   Config
 	Accounts auth.AccountStore
 	Rooms    live.RoomStore
+	DM       dm.Store
 	Server   *http.Server
 	db       *postgres.Store
 }
@@ -81,15 +95,30 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	mailSender, err := auth.NewSMTPSender(config.MailSMTP)
+	if err != nil {
+		return nil, err
+	}
 	gifts, err := gift.Load(config.GiftCatalogFile)
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
 	}
+	if config.DMModerator == nil && config.DMModerationURL != "" {
+		moderator, err := dm.NewHTTPModerator(config.DMModerationURL)
+		if err != nil {
+			return nil, err
+		}
+		config.DMModerator = moderator
+	}
 	var backend auth.JWTBackend
 	var rooms live.RoomStore
+	var notices notice.Store
+	var messages dm.Store
 	var db *postgres.Store
 	if config.DatabaseURL == "" {
 		backend, rooms = auth.NewStore(), live.NewStoreWithAnchorTimeout(config.AnchorAwayTimeout)
+		notices = &notice.Memory{}
+		messages = &dm.Memory{}
 	} else {
 		var err error
 		db, err = postgres.OpenWithAnchorTimeout(ctx, config.DatabaseURL, config.AnchorAwayTimeout)
@@ -97,21 +126,35 @@ func New(ctx context.Context, config Config) (*App, error) {
 			return nil, err
 		}
 		backend, rooms = db, db
+		config.RelayRust.Tickets = db
+		config.RelayRust.Devices = db
+		notices = db
+		messages = db
 	}
 	accounts := auth.WithJWT(backend, config.JWTSecret)
+	emailVerification, err := auth.NewEmailVerification(accounts, mailSender, cmp.Or(config.MailCodeSecret, config.JWTSecret), config.MailCodeTTL)
+	if err != nil {
+		if db != nil {
+			db.Shutdown()
+		}
+		return nil, err
+	}
 	mux := http.NewServeMux()
 
-	httpapi.RegisterWithRTC(mux, accounts, rooms, signer)
+	httpapi.RegisterWithEmail(mux, accounts, rooms, signer, emailVerification)
 	httpapi.RegisterGiftCatalog(mux, accounts, gifts)
 	admin.Register(mux, accounts, rooms, config.AdminToken)
-	edge.Register(mux, rooms, config.EdgeToken)
-	relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL)
+	httpapi.RegisterNotices(mux, accounts, notices)
+	httpapi.RegisterDirectMessages(mux, accounts, messages, config.DMModerator)
+	edge.Register(mux, rooms, notices, config.EdgeToken)
+	relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL, config.RelayRust)
 
 	return &App{
 		db:       db,
 		Config:   config,
 		Accounts: accounts,
 		Rooms:    rooms,
+		DM:       messages,
 		Server: &http.Server{
 			Addr:              config.Addr,
 			Handler:           mux,
@@ -121,6 +164,25 @@ func New(ctx context.Context, config Config) (*App, error) {
 			IdleTimeout:       config.IdleTimeout,
 		},
 	}, nil
+}
+
+func smtpFromEnv() auth.SMTPConfig {
+	address := os.Getenv("MAIL_SMTP_ADDR")
+	from := os.Getenv("MAIL_SMTP_FROM")
+	if address != "" {
+		from = cmp.Or(from, os.Getenv("LR_FROM_MAIL"))
+	}
+	return auth.SMTPConfig{
+		Address: address, From: from, Username: os.Getenv("MAIL_SMTP_USERNAME"), Password: os.Getenv("MAIL_SMTP_PASSWORD"),
+	}
+}
+
+func mailCodeTTLFromEnv() time.Duration {
+	seconds, err := strconv.ParseUint(os.Getenv("MAIL_CODE_EXPIRY"), 10, 32)
+	if err != nil || seconds == 0 {
+		return time.Minute
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func (a *App) Close() {
@@ -135,6 +197,11 @@ func anchorAwayTimeoutFromEnv() time.Duration {
 		return live.DefaultAnchorAwayTimeout
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func relayRustOptionsFromEnv() relay.RustOptions {
+	seconds, _ := strconv.ParseUint(os.Getenv("WS_TOEKN_EXPIRE"), 10, 32)
+	return relay.RustOptions{AppKey: os.Getenv("RELAY_APP_KEY"), AppSecret: os.Getenv("RELAY_APP_SECRET"), TTL: time.Duration(seconds) * time.Second}
 }
 
 func env(key, fallback string) string {

@@ -79,14 +79,19 @@ func (s *Store) VerifyPassword(ctx context.Context, email, password string) (aut
 	if err != nil {
 		return auth.User{}, err
 	}
-	key, err := auth.PasswordKey(password, salt)
-	if err != nil {
-		return auth.User{}, err
-	}
-	if subtle.ConstantTimeCompare(key, storedKey) != 1 {
+	if !passwordMatches(password, salt, storedKey) {
 		return auth.User{}, auth.ErrInvalidCredentials
 	}
 	return user, nil
+}
+
+func passwordMatches(password string, salt, storedKey []byte) bool {
+	if len(salt) == 0 {
+		legacy, ok := auth.ParseLegacyPassword(string(storedKey))
+		return ok && legacy.Matches(password)
+	}
+	key, err := auth.PasswordKey(password, salt)
+	return err == nil && subtle.ConstantTimeCompare(key, storedKey) == 1
 }
 
 func (s *Store) Lookup(ctx context.Context, token string) (auth.User, bool, error) {
@@ -130,15 +135,21 @@ func (s *Store) Refresh(ctx context.Context, token string) (auth.Session, bool, 
 }
 
 func (s *Store) Revoke(ctx context.Context, token string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token = $1`, token)
+	key := auth.OpaqueSessionKey(token)
+	tag, err := s.pool.Exec(ctx, `
+		WITH revoked AS (DELETE FROM sessions WHERE token=$1 RETURNING 1)
+		SELECT pg_notify($2,$3) FROM revoked`, token, s.eventChannel, sessionRevocationPrefix+string(key))
+	if err == nil && tag.RowsAffected() != 0 {
+		s.sessionRevocations.Revoke(key)
+	}
 	return err
 }
 
 func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
 	var user auth.User
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, account, language, trans_lang FROM users WHERE id = $1`, id,
-	).Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.TranslationLanguage)
+		`SELECT id, email, account, language, trans_lang, trans_enabled, profile FROM users WHERE id = $1`, id,
+	).Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.TranslationLanguage, &user.TranslationEnabled, &user.Profile)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, false, nil
 	}
@@ -175,7 +186,11 @@ func (s *Store) TranslationLanguages(ctx context.Context, ids []int64) (map[int6
 }
 
 func (s *Store) SetTranslationLanguage(ctx context.Context, id int64, language string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE users SET trans_lang = $2 WHERE id = $1`, id, language)
+	return s.SetTranslationSettings(ctx, id, nil, &language)
+}
+
+func (s *Store) SetTranslationSettings(ctx context.Context, id int64, enabled *bool, language *string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE users SET trans_lang=COALESCE($2,trans_lang), trans_enabled=COALESCE($3,trans_enabled) WHERE id=$1`, id, language, enabled)
 	return err
 }
 
@@ -193,8 +208,7 @@ func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPa
 	if err != nil {
 		return err
 	}
-	oldKey, err := auth.PasswordKey(oldPassword, salt)
-	if err != nil || subtle.ConstantTimeCompare(oldKey, storedKey) != 1 {
+	if !passwordMatches(oldPassword, salt, storedKey) {
 		return auth.ErrInvalidCredentials
 	}
 	newSalt := make([]byte, 16)
@@ -205,10 +219,14 @@ func (s *Store) ChangePassword(ctx context.Context, id int64, oldPassword, newPa
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx,
-		`UPDATE users SET password_salt=$2, password_hash=$3 WHERE id=$1`,
-		id, newSalt, newKey,
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET password_salt=$2, password_hash=$3
+		 WHERE id=$1 AND password_salt=$4 AND password_hash=$5`,
+		id, newSalt, newKey, salt, storedKey,
 	)
+	if err == nil && tag.RowsAffected() == 0 {
+		return auth.ErrInvalidCredentials
+	}
 	return err
 }
 

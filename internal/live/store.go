@@ -38,16 +38,74 @@ type Room struct {
 	AnchorAwayUntil     time.Time   `json:"-"`
 	ViewerNID           uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
 	TranslationLanguage string      `json:"-"`
+	TranslationEnabled  bool        `json:"-"`
+	Banner              string      `json:"-"`
+	Tag                 string      `json:"-"`
+	Description         string      `json:"-"`
+	OfflineInfo         string      `json:"-"`
+	Plan                RoomItemIDs `json:"-"`
+	Gifts               RoomItemIDs `json:"-"`
 }
 
 type JoinedRoom struct {
 	Room
 	Members      []int64
 	AnchorJoined bool
+	Languages    []string
 }
 
 type RoomSettings struct {
-	Title, Password, TranslationLanguage *string
+	Title, Password, TranslationLanguage  *string
+	Banner, Tag, Description, OfflineInfo *string
+	TranslationEnabled                    *bool
+	Plan, Gifts                           *[]string
+}
+
+// RoomItemIDs stores the JSON array of string IDs as an immutable value.
+type RoomItemIDs string
+
+func (ids RoomItemIDs) MarshalJSON() ([]byte, error) {
+	return []byte(cmp.Or(string(ids), "[]")), nil
+}
+
+func (r *Room) ApplySettings(settings RoomSettings) {
+	if settings.Title != nil {
+		r.Title = *settings.Title
+	}
+	if settings.Banner != nil && *settings.Banner != "" {
+		r.Banner = *settings.Banner
+	}
+	if settings.Tag != nil {
+		r.Tag = *settings.Tag
+	}
+	if settings.Description != nil {
+		r.Description = *settings.Description
+	}
+	if settings.OfflineInfo != nil {
+		r.OfflineInfo = *settings.OfflineInfo
+	}
+	if settings.TranslationLanguage != nil {
+		r.TranslationLanguage = *settings.TranslationLanguage
+	}
+	if settings.TranslationEnabled != nil {
+		r.TranslationEnabled = *settings.TranslationEnabled
+	}
+	if settings.Plan != nil {
+		plan := slices.Clone(*settings.Plan)
+		slices.Sort(plan)
+		r.Plan = roomItemIDs(plan)
+	}
+	if settings.Gifts != nil {
+		r.Gifts = roomItemIDs(*settings.Gifts)
+	}
+}
+
+func roomItemIDs(ids []string) RoomItemIDs {
+	if len(ids) == 0 {
+		return ""
+	}
+	encoded, _ := json.Marshal(ids)
+	return RoomItemIDs(encoded)
 }
 
 func (r *Room) UnmarshalJSON(data []byte) error {
@@ -92,6 +150,7 @@ func (r *Room) UnmarshalJSON(data []byte) error {
 // A nil Online matches all rooms. A zero PageSize requests only the matching count.
 type RoomFilter struct {
 	Online         *bool
+	Tag            *string
 	Page, PageSize int64
 }
 
@@ -146,13 +205,17 @@ type Subscription struct {
 type RoomStore interface {
 	Start(ctx context.Context, ownerID int64, title, password string) (Room, error)
 	StartWithLanguage(ctx context.Context, ownerID int64, title, password string, language *string) (Room, error)
+	StartWithSettings(ctx context.Context, ownerID int64, settings RoomSettings, requireOffline bool) (Room, error)
 	UpdateSettings(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error)
+	ConfigureRoom(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error)
 	Close(ctx context.Context, roomID, actorID int64) error
 	Info(ctx context.Context, roomID int64) (Room, error)
 	Rooms(ctx context.Context) ([]Room, error)
 	ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64, error)
 	Join(ctx context.Context, roomID, userID int64, password string) error
 	JoinRoom(ctx context.Context, roomID, userID int64, password string) (JoinedRoom, error)
+	JoinRoomWithLanguage(ctx context.Context, roomID, userID int64, password, language string) (JoinedRoom, error)
+	ChangeViewerTranslation(ctx context.Context, userID int64, language string) error
 	AnchorConnected(ctx context.Context, roomID, liveID int64, connectionID string) error
 	AnchorDisconnected(ctx context.Context, roomID, liveID int64, connectionID string) error
 	CloseExpiredAnchorRooms(ctx context.Context, now time.Time) error
@@ -172,19 +235,27 @@ type RoomStore interface {
 	ChatHistory(ctx context.Context, roomID, userID int64, page, size uint64) ([]ChatMessage, error)
 	Subscribe(ctx context.Context, roomID, userID int64) (<-chan Event, func(), error)
 	SubscribeLive(ctx context.Context, roomID, userID int64) (Subscription, error)
+	SubscribeWithTranslations(ctx context.Context, roomID, userID int64) (Subscription, error)
+}
+
+type roomSubscriber struct {
+	userID       int64
+	translations bool
 }
 
 type roomState struct {
 	Room
 	members           map[int64]struct{}
 	anchorJoined      bool
+	anchorLanguage    string
+	viewerLanguages   map[int64]string
 	anchorConnections map[string]struct{}
 	viewerNIDs        map[int64]uint32
 	lastViewerNID     uint32 // Retained across broadcasts on the same channel.
 	admins            map[int64]struct{}
 	muted             map[int64]time.Time
 	kicked            map[int64]struct{}
-	subscribers       map[chan Event]int64
+	subscribers       map[chan Event]roomSubscriber
 	passwordHash      []byte
 	passwordAttempts  map[int64]int
 	history           []ChatMessage
@@ -193,6 +264,7 @@ type roomState struct {
 type Store struct {
 	mu                sync.Mutex
 	rooms             map[int64]*roomState
+	viewerRooms       map[int64]int64
 	lastMessageID     int64
 	nextLiveID        int64
 	anchorAwayTimeout time.Duration
@@ -217,8 +289,16 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 }
 
 func (s *Store) StartWithLanguage(ctx context.Context, ownerID int64, title, password string, language *string) (Room, error) {
+	return s.StartWithSettings(ctx, ownerID, RoomSettings{Title: &title, Password: &password, TranslationLanguage: language}, false)
+}
+
+func (s *Store) StartWithSettings(ctx context.Context, ownerID int64, settings RoomSettings, requireOffline bool) (Room, error) {
 	if err := ctx.Err(); err != nil {
 		return Room{}, err
+	}
+	var password string
+	if settings.Password != nil {
+		password = *settings.Password
 	}
 	passwordHash, err := HashRoomPassword(password)
 	if err != nil {
@@ -234,40 +314,36 @@ func (s *Store) StartWithLanguage(ctx context.Context, ownerID int64, title, pas
 	if previous != nil && previous.Online {
 		info, hash := previous.snapshot(), previous.passwordHash
 		s.mu.Unlock()
-		if password != "" && (!info.IsLock || !RoomPasswordMatches(hash, password)) {
+		if requireOffline || (password != "" && (!info.IsLock || !RoomPasswordMatches(hash, password))) {
 			return Room{}, ErrRoomAlreadyOnline
 		}
 		return info, nil
 	}
 	defer s.mu.Unlock()
 	lastViewerNID := DefaultAnchorNID
-	var translationLanguage string
+	info := Room{ID: ownerID, OwnerID: ownerID}
 	if previous != nil {
 		lastViewerNID = previous.lastViewerNID
-		translationLanguage = previous.TranslationLanguage
+		info = previous.Room
+	} else if requireOffline {
+		info.TranslationLanguage = "en"
 	}
-	if language != nil {
-		translationLanguage = *language
-	}
+	info.ApplySettings(settings)
+	info.Online = true
+	info.IsLock = len(passwordHash) != 0
+	info.AnchorAway = false
+	info.AnchorAwayUntil = time.Time{}
+	info.Session = LiveSession{LiveID: s.nextLiveID, AnchorNID: DefaultAnchorNID, StartedAt: time.Now().UTC()}
 	room := &roomState{
-		Room: Room{
-			ID:                  ownerID,
-			OwnerID:             ownerID,
-			Title:               title,
-			Online:              true,
-			IsLock:              len(passwordHash) != 0,
-			TranslationLanguage: translationLanguage,
-			Session: LiveSession{
-				LiveID: s.nextLiveID, AnchorNID: DefaultAnchorNID, StartedAt: time.Now().UTC(),
-			},
-		},
+		Room:             info,
 		members:          make(map[int64]struct{}),
+		viewerLanguages:  make(map[int64]string),
 		viewerNIDs:       make(map[int64]uint32),
 		lastViewerNID:    lastViewerNID,
 		admins:           make(map[int64]struct{}),
 		muted:            make(map[int64]time.Time),
 		kicked:           make(map[int64]struct{}),
-		subscribers:      make(map[chan Event]int64),
+		subscribers:      make(map[chan Event]roomSubscriber),
 		passwordHash:     passwordHash,
 		passwordAttempts: make(map[int64]int),
 	}
@@ -277,37 +353,58 @@ func (s *Store) StartWithLanguage(ctx context.Context, ownerID int64, title, pas
 }
 
 func (s *Store) UpdateSettings(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error) {
+	return s.updateSettings(ctx, ownerID, settings, false)
+}
+
+func (s *Store) ConfigureRoom(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error) {
+	return s.updateSettings(ctx, ownerID, settings, true)
+}
+
+func (s *Store) updateSettings(ctx context.Context, ownerID int64, settings RoomSettings, allowOffline bool) (Room, error) {
 	if err := ctx.Err(); err != nil {
 		return Room{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	room, err := s.onlineRoom(ownerID)
-	if err != nil {
-		return Room{}, err
+	room := s.rooms[ownerID]
+	if !allowOffline {
+		if room == nil {
+			return Room{}, ErrRoomNotFound
+		}
+		if !room.Online {
+			return Room{}, ErrRoomClosed
+		}
 	}
 	var hash []byte
 	password := settings.Password
 	if password != nil && *password != "" {
 		s.mu.Unlock()
-		hash, err = HashRoomPassword(*password)
+		newHash, err := HashRoomPassword(*password)
 		s.mu.Lock()
 		if err != nil {
 			return Room{}, err
 		}
-		if s.rooms[ownerID] != room || !room.Online {
+		if !allowOffline && (s.rooms[ownerID] != room || !room.Online) {
 			return Room{}, ErrRoomClosed
 		}
+		hash = newHash
+		room = s.rooms[ownerID]
 	}
 	if err := ctx.Err(); err != nil {
 		return Room{}, err
 	}
-	if settings.Title != nil {
-		room.Title = *settings.Title
+	if room == nil {
+		room = &roomState{Room: Room{ID: ownerID, OwnerID: ownerID, TranslationLanguage: "en"}, lastViewerNID: DefaultAnchorNID}
+		s.rooms[ownerID] = room
 	}
-	if settings.TranslationLanguage != nil {
-		room.TranslationLanguage = *settings.TranslationLanguage
+	previous := room.Room
+	room.Room.ApplySettings(settings)
+	if room.Online && TranslationPreferenceChanged(previous.TranslationEnabled, room.TranslationEnabled,
+		previous.TranslationLanguage, room.TranslationLanguage) {
+		before := room.translationLanguages()
+		room.anchorLanguage = ActiveTranslationLanguage(room.TranslationEnabled, room.TranslationLanguage)
+		room.publishTranslationChange(before)
 	}
 	if password != nil {
 		room.passwordHash = hash
@@ -378,7 +475,7 @@ func (s *Store) ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64
 	var matched []*roomState
 	var total int64
 	for _, room := range s.rooms {
-		if filter.Online != nil && room.Online != *filter.Online {
+		if (filter.Online != nil && room.Online != *filter.Online) || (filter.Tag != nil && room.Tag != *filter.Tag) {
 			continue
 		}
 		total++
@@ -407,16 +504,20 @@ func (s *Store) ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64
 }
 
 func (s *Store) Join(ctx context.Context, roomID, userID int64, password string) error {
-	_, err := s.joinRoom(ctx, roomID, userID, password, false)
+	_, err := s.joinRoom(ctx, roomID, userID, password, "", false)
 	return err
 }
 
 // JoinRoom joins the user and returns the room snapshot of that broadcast.
 func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password string) (JoinedRoom, error) {
-	return s.joinRoom(ctx, roomID, userID, password, true)
+	return s.JoinRoomWithLanguage(ctx, roomID, userID, password, "")
 }
 
-func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password string, includeMembers bool) (JoinedRoom, error) {
+func (s *Store) JoinRoomWithLanguage(ctx context.Context, roomID, userID int64, password, language string) (JoinedRoom, error) {
+	return s.joinRoom(ctx, roomID, userID, password, language, true)
+}
+
+func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password, language string, includeMembers bool) (JoinedRoom, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -459,14 +560,24 @@ func (s *Store) joinRoom(ctx context.Context, roomID, userID int64, password str
 		if checkPassword {
 			delete(room.passwordAttempts, userID)
 		}
+		before := room.translationLanguages()
 		if userID == room.OwnerID {
 			room.anchorJoined = true
 			room.setAnchorAwayUntil(time.Time{})
-		} else if !room.hasMember(userID) {
-			room.members[userID] = struct{}{}
-			room.publish(Event{Type: "join", UserID: userID})
+			room.anchorLanguage = cmp.Or(room.TranslationLanguage, "en")
+		} else {
+			if !room.hasMember(userID) {
+				room.members[userID] = struct{}{}
+				room.publish(Event{Type: "join", UserID: userID})
+			}
+			room.viewerLanguages[userID] = cmp.Or(language, "en")
+			if s.viewerRooms == nil {
+				s.viewerRooms = make(map[int64]int64)
+			}
+			s.viewerRooms[userID] = roomID
 		}
-		info := JoinedRoom{Room: room.snapshot(), AnchorJoined: room.anchorJoined}
+		languages := room.publishTranslationChange(before)
+		info := JoinedRoom{Room: room.snapshot(), AnchorJoined: room.anchorJoined, Languages: languages}
 		info.ViewerNID = nid
 		if includeMembers {
 			info.Members = sortedIDs(room.members)
@@ -507,9 +618,12 @@ func (s *Store) Leave(ctx context.Context, roomID, userID int64) error {
 	if userID == room.OwnerID {
 		room.end()
 	} else if room.hasMember(userID) {
+		before := room.translationLanguages()
 		delete(room.members, userID)
+		delete(room.viewerLanguages, userID)
 		room.publish(Event{Type: "leave", UserID: userID})
 		room.disconnect(userID)
+		room.publishTranslationChange(before)
 	}
 	return nil
 }
@@ -653,9 +767,12 @@ func (s *Store) Kick(ctx context.Context, roomID, actorID, targetID int64) error
 		return ErrNotMember
 	}
 	room.kicked[targetID] = struct{}{}
+	before := room.translationLanguages()
 	delete(room.members, targetID)
+	delete(room.viewerLanguages, targetID)
 	room.publish(Event{Type: "kick", UserID: actorID, TargetID: targetID})
 	room.disconnect(targetID)
+	room.publishTranslationChange(before)
 	return nil
 }
 
@@ -724,6 +841,14 @@ func (s *Store) Subscribe(ctx context.Context, roomID, userID int64) (<-chan Eve
 }
 
 func (s *Store) SubscribeLive(ctx context.Context, roomID, userID int64) (Subscription, error) {
+	return s.subscribeLive(ctx, roomID, userID, false)
+}
+
+func (s *Store) SubscribeWithTranslations(ctx context.Context, roomID, userID int64) (Subscription, error) {
+	return s.subscribeLive(ctx, roomID, userID, true)
+}
+
+func (s *Store) subscribeLive(ctx context.Context, roomID, userID int64, translations bool) (Subscription, error) {
 	if err := ctx.Err(); err != nil {
 		return Subscription{}, err
 	}
@@ -738,7 +863,7 @@ func (s *Store) SubscribeLive(ctx context.Context, roomID, userID int64) (Subscr
 		return Subscription{}, ErrNotMember
 	}
 	events := make(chan Event, EventStreamCapacity)
-	room.subscribers[events] = userID
+	room.subscribers[events] = roomSubscriber{userID: userID, translations: translations}
 	unsubscribe := func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -819,6 +944,8 @@ func (r *roomState) end() {
 	r.passwordAttempts = nil
 	r.history = nil
 	clear(r.members)
+	clear(r.viewerLanguages)
+	r.anchorLanguage = ""
 	r.anchorJoined = false
 	r.AnchorAway = false
 	r.AnchorAwayUntil = time.Time{}
@@ -831,8 +958,8 @@ func (r *roomState) end() {
 }
 
 func (r *roomState) disconnect(userID int64) {
-	for events, subscriberID := range r.subscribers {
-		if subscriberID == userID {
+	for events, subscriber := range r.subscribers {
+		if subscriber.userID == userID {
 			r.unsubscribe(events)
 		}
 	}
@@ -847,7 +974,10 @@ func (r *roomState) unsubscribe(events chan Event) {
 
 func (r *roomState) publish(event Event) {
 	event.RoomID = r.ID
-	for events := range r.subscribers {
+	for events, subscriber := range r.subscribers {
+		if event.Type == "translate_change" && !subscriber.translations {
+			continue
+		}
 		if !event.Enqueue(events) {
 			r.unsubscribe(events)
 		}

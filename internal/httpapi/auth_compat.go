@@ -10,15 +10,40 @@ import (
 )
 
 func (s server) signUpCompat(w http.ResponseWriter, r *http.Request) {
-	if !rustAuthCompat(r) {
+	compat := rustAuthCompat(r)
+	if !compat && s.emailVerification == nil {
 		s.signUp(w, r)
 		return
 	}
-	var input credentials
-	if !httpx.Decode(w, r, &input) {
+	var input struct {
+		credentials
+		Code string `json:"code"`
+	}
+	if !decodeEmailRequest(w, r, &input) {
 		return
 	}
-	session, err := s.accounts.SignUp(r.Context(), input.Email, input.Password, input.Account)
+	var session auth.Session
+	var err error
+	if s.emailVerification != nil {
+		if compat && !validRustPassword(w, input.Password) {
+			return
+		}
+		if strings.TrimSpace(input.Account) == "" || input.Password == "" {
+			emailCodeError(w, auth.ErrMissingFields, compat)
+			return
+		}
+		session, err = s.emailVerification.SignUp(r.Context(), input.Email, input.Code, input.Password, input.Account)
+		if err != nil {
+			emailCodeError(w, err, compat)
+			return
+		}
+	} else {
+		session, err = s.accounts.SignUp(r.Context(), input.Email, input.Password, input.Account)
+	}
+	if !compat {
+		sessionResponse(w, http.StatusCreated, session, err)
+		return
+	}
 	if err != nil {
 		sessionResponse(w, http.StatusOK, session, err)
 		return

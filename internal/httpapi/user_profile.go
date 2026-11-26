@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"open_live_platform/internal/auth"
+	"open_live_platform/internal/live"
 	"open_live_platform/internal/transport/httpx"
 )
 
@@ -23,14 +25,33 @@ func (s server) setLanguage(w http.ResponseWriter, r *http.Request, userID int64
 func (s server) setUserInfo(w http.ResponseWriter, r *http.Request, userID int64) {
 	var input struct {
 		TranslationLanguage *string `json:"transLang"`
+		TranslationEnabled  *bool   `json:"trans"`
 	}
 	if !httpx.Decode(w, r, &input) {
 		return
 	}
-	if input.TranslationLanguage != nil {
-		if err := s.accounts.SetTranslationLanguage(r.Context(), userID, *input.TranslationLanguage); err != nil {
+	if input.TranslationLanguage != nil || input.TranslationEnabled != nil {
+		user, found, err := s.accounts.Find(r.Context(), userID)
+		if err != nil || !found {
+			httpx.Error(w, http.StatusInternalServerError, "could not read translation settings")
+			return
+		}
+		if err := s.accounts.SetTranslationSettings(r.Context(), userID, input.TranslationEnabled, input.TranslationLanguage); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not update translation language")
 			return
+		}
+		enabled, language := user.TranslationEnabled, user.TranslationLanguage
+		if input.TranslationEnabled != nil {
+			enabled = *input.TranslationEnabled
+		}
+		if input.TranslationLanguage != nil {
+			language = *input.TranslationLanguage
+		}
+		if live.TranslationPreferenceChanged(user.TranslationEnabled, enabled, user.TranslationLanguage, language) {
+			if err := s.rooms.ChangeViewerTranslation(r.Context(), userID, live.ActiveTranslationLanguage(enabled, language)); err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not update room translation language")
+				return
+			}
 		}
 	}
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
@@ -68,21 +89,27 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "4005", "message": "data not found "})
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{
-		"status": "200",
-		"data": map[string]any{
-			"id": strconv.FormatInt(user.ID, 10), "name": user.Account,
-			"gender": "0", "photo": "", "verified": false, "online": 0,
-			"popularity": 0, "xkey": "", "rkey": "", "userType": "normal",
-			"pt": 0, "promotion": "", "nsfw": nil, "isAnchor": false,
-			"toyInfo": "{}", "anchorStatus": 0, "banner": "",
-			"displayName": user.Account, "searchName": user.Account,
-			"groupRoom": "", "level": 0, "exp": 0, "maxExp": 0,
-			"trans": false, "transLang": user.TranslationLanguage, "limitTy": 0, "limitAllow": true,
-			"limitTotal": 0, "limitTime": 0, "limitReason": []string{},
-			"fansTotal": 0, "teacherLabel": "", "email": user.Email,
-			"language": user.Language, "search_name": user.Account, "token_id": nil,
-			"equipped_adorn": map[string]any{},
-		},
-	})
+	p := user.Profile
+	if p == nil {
+		p = &auth.Profile{Name: user.Account, SearchName: user.Account, ToyInfo: "{}", UserType: "normal"}
+	}
+	data := map[string]any{
+		"id": strconv.FormatInt(user.ID, 10), "name": p.Name,
+		"gender": strconv.Itoa(p.Gender), "photo": p.Photo, "online": 0,
+		"popularity": p.Popularity, "isAnchor": p.IsAnchor,
+		"toyInfo": p.ToyInfo, "anchorStatus": 0,
+		"displayName": user.Account, "searchName": p.SearchName,
+		"groupRoom": p.GroupRoom, "level": 0, "exp": 0, "maxExp": 0,
+		"trans": user.TranslationEnabled, "transLang": user.TranslationLanguage, "limitTy": 0, "limitAllow": true,
+		"limitTotal": 0, "limitTime": 0, "limitReason": []string{},
+		"teacherLabel": "",
+	}
+	if r.PathValue("user_id") == "me" {
+		data["verified"], data["banner"], data["nsfw"], data["userType"] = p.Verified, p.Banner, p.NSFW, p.UserType
+		data["email"], data["language"], data["search_name"] = user.Email, user.Language, p.SearchName
+		data["pt"], data["fansTotal"], data["token_id"] = 0, 0, nil
+		data["xkey"], data["rkey"], data["promotion"] = "", "", ""
+		data["equipped_adorn"] = map[string]any{}
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": data})
 }

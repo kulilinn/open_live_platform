@@ -12,10 +12,11 @@ import (
 )
 
 type server struct {
-	accounts    auth.AccountStore
-	rooms       live.RoomStore
-	rtc         rtc.Signer
-	recentChats *sync.Map
+	accounts          auth.AccountStore
+	rooms             live.RoomStore
+	rtc               rtc.Signer
+	recentChats       *sync.Map
+	emailVerification *auth.EmailVerification
 }
 
 func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore) {
@@ -23,7 +24,11 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 }
 
 func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer) {
-	s := server{accounts: accounts, rooms: rooms, rtc: signer, recentChats: &sync.Map{}}
+	RegisterWithEmail(mux, accounts, rooms, signer, nil)
+}
+
+func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer, email *auth.EmailVerification) {
+	s := server{accounts: accounts, rooms: rooms, rtc: signer, recentChats: &sync.Map{}, emailVerification: email}
 
 	mux.HandleFunc("GET /healthchecker", health)
 	mux.HandleFunc("GET /health", health)
@@ -33,6 +38,11 @@ func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.
 	mux.HandleFunc("GET /api/auth/session", s.sessionCompat)
 	mux.HandleFunc("POST /api/auth/signout", s.authenticated(s.signOut))
 	mux.HandleFunc("POST /api/auth/changepassword", s.authenticated(s.changePassword))
+	mux.HandleFunc("POST /api/auth/code", s.emailCode)
+	mux.HandleFunc("POST /api/auth/verifycode", s.verifyEmailCode)
+	mux.HandleFunc("POST /api/auth/reset", s.resetPassword)
+	mux.HandleFunc("POST /api/auth/exchange_code", s.exchangeCode)
+	mux.HandleFunc("POST /api/auth/exchange_token", s.exchangeToken)
 	mux.HandleFunc("GET /api/user/{user_id}", s.authenticated(s.userProfile))
 	mux.HandleFunc("POST /api/user/set_language", s.authenticated(s.setLanguage))
 	mux.HandleFunc("POST /api/user/set_info", s.authenticated(s.setUserInfo))

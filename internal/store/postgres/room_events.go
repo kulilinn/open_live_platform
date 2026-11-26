@@ -24,6 +24,7 @@ type roomSignal struct {
 	UserID     int64
 	TargetID   int64
 	MessageID  int64
+	LiveID     int64 `json:",omitempty"`
 	Marker     string
 	ClosedAt   time.Time       `json:"ClosedAt,omitzero"`
 	CreatedAt  time.Time       `json:"CreatedAt,omitzero"`
@@ -63,7 +64,10 @@ func (s *Store) connectRoomEvents(ctx context.Context) (*pgx.Conn, error) {
 
 func (s *Store) notifyRoomChange(r *roomChange) error {
 	if r.event.Type == "" && r.sub == nil {
-		return nil
+		if r.translationChange.Kind == "" {
+			return nil
+		}
+		return s.notifyRoomSignal(r, r.translationChange)
 	}
 	if r.sub != nil {
 		// Room transactions commit under the same room advisory lock. This
@@ -81,6 +85,16 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 		signal.CreatedAt = r.event.CreatedAt
 		signal.RoomStatus = r.event.RoomStatus
 	}
+	if err := s.notifyRoomSignal(r, signal); err != nil {
+		return err
+	}
+	if r.translationChange.Kind != "" {
+		return s.notifyRoomSignal(r, r.translationChange)
+	}
+	return nil
+}
+
+func (s *Store) notifyRoomSignal(r *roomChange, signal roomSignal) error {
 	payload, err := json.Marshal(signal)
 	if err != nil {
 		return err
@@ -94,7 +108,11 @@ func (s *Store) listenRoomEvents(ctx context.Context, conn *pgx.Conn) {
 	for {
 		s.readRoomEvents(ctx, conn)
 		s.eventReady.Store(false)
-		conn.Close(ctx)
+		s.sessionRevocations.CloseAll()
+		closeCtx, cancel := context.WithTimeout(ctx, anchorHeartbeatTimeout)
+		conn.Close(closeCtx)
+		cancel()
+		s.stopAnchorLeases()
 		// LISTEN has no replay. End old sockets so reconnecting clients
 		// recheck room membership and can reload the persisted chat history.
 		s.closeSubscriptions()
@@ -104,7 +122,10 @@ func (s *Store) listenRoomEvents(ctx context.Context, conn *pgx.Conn) {
 				return
 			case <-time.After(time.Second):
 			}
-			if next, err := s.connectRoomEvents(ctx); err == nil {
+			connectCtx, cancel := context.WithTimeout(ctx, anchorHeartbeatTimeout)
+			next, err := s.connectRoomEvents(connectCtx)
+			cancel()
+			if err == nil {
 				conn = next
 				break
 			}
@@ -114,10 +135,37 @@ func (s *Store) listenRoomEvents(ctx context.Context, conn *pgx.Conn) {
 }
 
 func (s *Store) readRoomEvents(ctx context.Context, conn *pgx.Conn) {
+	lastHeartbeat := time.Now()
 	for {
-		n, err := conn.WaitForNotification(ctx)
+		nextHeartbeat := lastHeartbeat.Add(anchorHeartbeatInterval)
+		if now := time.Now(); !now.Before(nextHeartbeat) {
+			if !now.Before(lastHeartbeat.Add(anchorLeaseDuration - anchorHeartbeatTimeout)) {
+				// A listener stalled past its lease must drop its old sockets.
+				return
+			}
+			heartbeatCtx, cancel := context.WithTimeout(ctx, anchorHeartbeatTimeout)
+			err := s.renewAnchorLeases(heartbeatCtx, conn)
+			cancel()
+			if err != nil {
+				return
+			}
+			lastHeartbeat = now
+			continue
+		}
+		waitCtx, cancel := context.WithDeadline(ctx, nextHeartbeat)
+		n, err := conn.WaitForNotification(waitCtx)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			continue
+		}
 		if err != nil {
 			return
+		}
+		if s.readSessionRevocation(n.Payload) {
+			continue
+		}
+		if s.readRelayDeviceSignal(n.Payload) {
+			continue
 		}
 		var signal roomSignal
 		if json.Unmarshal([]byte(n.Payload), &signal) != nil {
@@ -140,7 +188,8 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 	if signal.Marker != "" {
 		for ch, sub := range listeners {
 			if sub.marker == signal.Marker {
-				listeners[ch] = subscriber{userID: sub.userID}
+				sub.marker = ""
+				listeners[ch] = sub
 				break
 			}
 		}
@@ -164,6 +213,18 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 	case "room_status":
 		event.CreatedAt = signal.CreatedAt
 		event.RoomStatus = signal.RoomStatus
+	case "translate_change":
+		var languages []string
+		var liveID, ownerID int64
+		err := conn.QueryRow(ctx, selectRoomLanguages, signal.RoomID).Scan(&languages, &liveID, &ownerID)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && liveID != signal.LiveID) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		event = live.TranslationChangeEvent(ownerID, signal.CreatedAt, languages)
+		event.RoomID = signal.RoomID
 	}
 	stream.publish(event)
 	return nil

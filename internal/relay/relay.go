@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,17 +40,40 @@ func Signature(token, secret string) string {
 // Register serves room events and accepts room commands from signed sessions.
 // Viewers join through the room API before connecting. The room defaults to
 // the user's own room unless room_id or hash=/live/{id} is given.
-func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, secret, publicURL string) {
+func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, secret, publicURL string, options ...RustOptions) {
 	type ticket struct {
 		session string
 		expires time.Time
 	}
 	const lifetime = time.Minute
 	var tickets sync.Map
+	var rust *rustTickets
+	var devices deviceHub
+	if len(options) != 0 && options[0].AppKey != "" && options[0].AppSecret != "" {
+		rust = newRustTickets(options[0])
+		devices.configure(options[0])
+		mux.HandleFunc("GET /relay/verify/{token}/{sig}", func(w http.ResponseWriter, r *http.Request) {
+			rust.verifyHTTP(accounts, w, r)
+		})
+		mux.HandleFunc("GET /api/device/toyinfo", func(w http.ResponseWriter, r *http.Request) {
+			user, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
+			if err != nil {
+				httpx.Error(w, http.StatusServiceUnavailable, "authentication unavailable")
+				return
+			}
+			if !ok {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
+				return
+			}
+			devices.sync(r.Context(), user.ID)
+			httpx.JSON(w, http.StatusOK, map[string]string{"status": "200"})
+		})
+	}
 	mux.HandleFunc("GET /api/device/qrcode", func(w http.ResponseWriter, r *http.Request) {
 		session, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		_, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
-		if err != nil || secret == "" {
+		user, ok, err := accounts.Bearer(r.Context(), r.Header.Get("Authorization"))
+		if err != nil || (secret == "" && rust == nil) {
 			httpx.Error(w, http.StatusInternalServerError, "could not issue relay ticket")
 			return
 		}
@@ -58,20 +82,28 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
+		if rust != nil {
+			login, ok := auth.RelaySessionForToken(accounts, session)
+			if !ok {
+				httpx.Error(w, http.StatusUnauthorized, "invalid bearer token")
+				return
+			}
+			ticket, err := rust.issue(r.Context(), login, user.ID, time.Now())
+			if err != nil {
+				httpx.Error(w, http.StatusServiceUnavailable, "relay tickets unavailable")
+				return
+			}
+			httpx.JSON(w, http.StatusOK, map[string]string{
+				"status": "200", "url": connectorURL(r, publicURL, ticket.Token, ticket.signature),
+			})
+			return
+		}
 		id := "ws-" + rand.Text()
 		tickets.Store(id, ticket{session, time.Now().Add(lifetime)})
 		time.AfterFunc(lifetime, func() { tickets.Delete(id) })
-		base := strings.TrimRight(publicURL, "/")
-		if base == "" {
-			scheme := "ws"
-			if r.TLS != nil {
-				scheme = "wss"
-			}
-			base = scheme + "://" + r.Host
-		}
-		w.Header().Set("Cache-Control", "no-store")
 		httpx.JSON(w, http.StatusOK, map[string]string{
-			"status": "200", "url": base + "/api/connector/" + id + "/" + Signature(id, secret),
+			"status": "200", "url": connectorURL(r, publicURL, id, Signature(id, secret)),
 		})
 	})
 	// Browser clients can use a separate host. The signed URL supplies credentials.
@@ -81,7 +113,17 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	}
 	mux.HandleFunc("GET /api/connector/{token}/{sig}", func(w http.ResponseWriter, r *http.Request) {
 		token := r.PathValue("token")
-		if secret == "" || !hmac.Equal([]byte(r.PathValue("sig")), []byte(Signature(token, secret))) {
+		signature := r.PathValue("sig")
+		var compatible *rustTicket
+		if rust != nil {
+			var err error
+			compatible, err = rust.verify(r.Context(), token, signature, time.Now())
+			if err != nil {
+				http.Error(w, "relay tickets unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		if compatible == nil && (secret == "" || !hmac.Equal([]byte(signature), []byte(Signature(token, secret)))) {
 			http.Error(w, "invalid token or signature", http.StatusForbidden)
 			return
 		}
@@ -93,7 +135,20 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			}
 			token = value.(ticket).session
 		}
-		user, ok, err := accounts.Lookup(r.Context(), token)
+		var sessionCtx context.Context
+		var unwatch func()
+		var user auth.User
+		var ok bool
+		var err error
+		if compatible != nil {
+			sessionCtx, unwatch = compatible.Login.Watch(r.Context(), accounts)
+			user, ok, err = compatible.Login.Lookup(r.Context(), accounts)
+			ok = ok && user.ID == compatible.UserID
+		} else {
+			sessionCtx, unwatch = auth.WatchSession(r.Context(), accounts, token)
+			user, ok, err = accounts.Lookup(r.Context(), token)
+		}
+		defer unwatch()
 		if err != nil {
 			http.Error(w, "authentication failed", http.StatusInternalServerError)
 			return
@@ -109,16 +164,25 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			room, _, _ = strings.Cut(channel, "?")
 		}
 		roomID := user.ID
+		if compatible != nil && room == "" {
+			roomID = 0
+		}
 		if room != "" {
-			var err error
 			roomID, err = strconv.ParseInt(room, 10, 64)
-			if err != nil {
+			if err != nil || roomID <= 0 {
 				http.Error(w, "invalid room ID", http.StatusBadRequest)
 				return
 			}
 		}
 
-		sub, err := rooms.SubscribeLive(r.Context(), roomID, user.ID)
+		subscribe := rooms.SubscribeLive
+		if slices.Contains(websocket.Subprotocols(r), "h5relayer") {
+			subscribe = rooms.SubscribeWithTranslations
+		}
+		var sub live.Subscription
+		if roomID != 0 {
+			sub, err = subscribe(r.Context(), roomID, user.ID)
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, live.ErrRoomNotFound):
@@ -130,20 +194,60 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 			}
 			return
 		}
-		defer sub.Unsubscribe()
+		if sub.Unsubscribe != nil {
+			defer sub.Unsubscribe()
+		}
 
+		switch cause := context.Cause(sessionCtx); {
+		case errors.Is(cause, auth.ErrSessionRevoked):
+			http.Error(w, "invalid token or signature", http.StatusForbidden)
+			return
+		case cause != nil:
+			http.Error(w, "session unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err == nil {
-			serve(r.Context(), conn, sub, accounts, rooms, roomID, user, conn.Subprotocol())
+			protocol := conn.Subprotocol()
+			var compatibility *rustSocket
+			if compatible != nil {
+				if protocol == "" {
+					protocol = "devicerelayer"
+				}
+				compatibility = &rustSocket{devices: &devices, tickets: rust, ticket: compatible}
+			}
+			stop := context.AfterFunc(sessionCtx, func() {
+				cause := context.Cause(sessionCtx)
+				switch {
+				case errors.Is(cause, auth.ErrSessionRevoked):
+					code, reason := websocket.ClosePolicyViolation, cause.Error()
+					if protocol == "h5relayer" || protocol == "devicerelayer" {
+						code, reason = websocket.CloseNormalClosure, "SERVICE_LOGOUT"
+					}
+					_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
+				case errors.Is(cause, auth.ErrSessionWatchUnavailable):
+					_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, cause.Error()), time.Now().Add(time.Second))
+				}
+				_ = conn.Close()
+			})
+			defer stop()
+			serve(sessionCtx, conn, sub, accounts, rooms, roomID, user, protocol, compatibility)
 		}
 	})
 }
 
-func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string) {
+type rustSocket struct {
+	devices *deviceHub
+	tickets *rustTickets
+	ticket  *rustTicket
+}
+
+func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string, compatibility *rustSocket) {
 	defer conn.Close()
 	commandCtx := live.WithRoomCommandScope(ctx, roomID, sub.LiveID)
 	var anchorPing <-chan time.Time
-	if protocol == "h5relayer" && roomID == user.ID {
+	isAnchor := protocol == "h5relayer" && roomID == user.ID && sub.LiveID != 0
+	if isAnchor {
 		connectionID := rand.Text()
 		if err := rooms.AnchorConnected(ctx, roomID, sub.LiveID, connectionID); err != nil {
 			conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "could not register anchor connection"), time.Now().Add(time.Second))
@@ -156,7 +260,8 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 				log.Printf("disconnect anchor in room %d: %v", roomID, err)
 			}
 		}()
-
+	}
+	if isAnchor || compatibility != nil {
 		const pongTimeout = 75 * time.Second
 		if err := conn.SetReadDeadline(time.Now().Add(pongTimeout)); err != nil {
 			return
@@ -170,19 +275,43 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 	}
 	if protocol == "h5relayer" || protocol == "devicerelayer" {
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		name := user.Account
+		if compatibility != nil {
+			name = ""
+		}
 		userCommand := map[string]any{"cmd": "user", "data": map[string]any{
-			"uid": strconv.FormatInt(user.ID, 10), "name": user.Account, "image": "", "debug": false,
+			"uid": strconv.FormatInt(user.ID, 10), "name": name, "image": "", "debug": false,
 		}}
 		if protocol == "h5relayer" {
+			var payload any = []any{userCommand}
+			if compatibility != nil {
+				payload = userCommand
+			}
 			if err := conn.WriteJSON(map[string]any{
 				"content": "control", "queue": strconv.FormatInt(user.ID, 10),
-				"payload": []any{userCommand},
+				"payload": payload,
 			}); err != nil {
 				return
 			}
 		} else if err := conn.WriteJSON(userCommand); err != nil {
 			return
 		}
+	}
+	var device *devicePeer
+	var deviceMessages <-chan any
+	var refreshTicks <-chan time.Time
+	if compatibility != nil {
+		device = compatibility.devices.join(ctx, user.ID, protocol == "devicerelayer")
+		defer device.close()
+		deviceMessages = device.messages
+		refreshInterval := min(time.Minute, max(time.Millisecond, compatibility.tickets.ttl/2))
+		ticker := time.NewTicker(refreshInterval)
+		defer ticker.Stop()
+		refreshTicks = ticker.C
+	}
+	parseH5 := parseH5Command
+	if compatibility != nil {
+		parseH5 = parseRustH5Command
 	}
 	done := make(chan struct{})
 	defer close(done)
@@ -195,7 +324,7 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 				if err := conn.ReadJSON(&raw); err != nil {
 					return
 				}
-				cmd, ok := parseH5Command(raw, roomID, user.ID)
+				cmd, ok := parseH5(raw, roomID, user.ID)
 				if !ok {
 					continue
 				}
@@ -237,14 +366,32 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 	for {
 		var response any
 		select {
+		case <-refreshTicks:
+			ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			compatibility.tickets.refresh(ctx, compatibility.ticket, time.Now())
+			cancel()
+			continue
+		case response = <-deviceMessages:
 		case <-anchorPing:
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
 				return
+			}
+			if device != nil && device.device {
+				device.hub.publishPresence(ctx, device.uid)
 			}
 			continue
 		case cmd, ok := <-commands:
 			if !ok {
 				return
+			}
+			if ctx.Err() != nil {
+				// The cancellation callback sends the close frame and ends the
+				// read loop. Drop commands received during that interval.
+				continue
+			}
+			if device != nil && cmd.Type == "device" {
+				device.publish(ctx, cmd.Payload)
+				continue
 			}
 			if err := cmd.apply(commandCtx, rooms, roomID, user.ID); err != nil {
 				response = map[string]string{"type": "error", "error": err.Error()}
@@ -265,13 +412,16 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 				conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
 				return
 			}
-			if event.Type == "room_status" && protocol != "h5relayer" {
+			if (event.Type == "room_status" || event.Type == "translate_change") && protocol != "h5relayer" {
 				continue
 			}
 			response = event
 			if protocol == "h5relayer" {
 				response = h5Event(ctx, accounts, roomID, event)
 			}
+		}
+		if ctx.Err() != nil {
+			continue
 		}
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := conn.WriteJSON(response); err != nil {
@@ -367,18 +517,23 @@ func parseDeviceCommand(raw json.RawMessage) (command, bool) {
 
 func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, event live.Event) any {
 	room := strconv.FormatInt(roomID, 10)
-	if event.Type == "close" || event.Type == "room_status" {
+	if event.Type == "close" || event.Type == "room_status" || event.Type == "translate_change" {
+		channel, messageType := "room_status", "O"
+		var message any = strconv.Itoa(int(event.RoomStatus))
+		if event.Type == "translate_change" {
+			channel, messageType, message = "translate_change", "T", json.RawMessage(event.Payload)
+		}
 		return h5RoomFrame(room, map[string]any{
 			"id":        strconv.FormatInt(event.CreatedAt.UnixNano(), 10),
-			"channel":   "room_status",
+			"channel":   channel,
 			"room":      room,
 			"priority":  0,
 			"sender":    strconv.FormatInt(event.UserID, 10),
 			"timestamp": strconv.FormatInt(event.CreatedAt.Unix(), 10),
 			"message": map[string]any{
 				"msgGroup": "chat",
-				"msgType":  "O",
-				"message":  strconv.Itoa(int(event.RoomStatus)),
+				"msgType":  messageType,
+				"message":  message,
 				"userInfo": map[string]any{
 					"uid": event.UserID, "role": 5, "avatar": nil, "searchName": nil,
 					"name": nil, "country": nil, "userLevel": nil, "fanLevel": nil,

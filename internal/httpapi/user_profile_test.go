@@ -34,6 +34,9 @@ func TestUserProfileHTTP(t *testing.T) {
 	}
 	other := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/user/"+itoa(viewer.User.ID), owner.Token, nil)
 	otherData := other.Body["data"].(map[string]any)
+	if _, ok := otherData["email"]; ok {
+		t.Fatal("public profile exposed account email")
+	}
 	if other.Code != http.StatusOK || otherData["id"] != itoa(viewer.User.ID) ||
 		otherData["displayName"] != "Profile Viewer" {
 		t.Fatalf("other = %d %+v", other.Code, other.Body)
@@ -96,13 +99,15 @@ func TestSetUserTranslationLanguageHTTP(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	updates := []struct {
-		body map[string]any
-		want string
+		body    map[string]any
+		want    string
+		enabled bool
 	}{
 		{body: map[string]any{"transLang": "fr"}, want: "fr"},
-		{body: map[string]any{"trans": true}, want: "fr"},
-		{body: map[string]any{"transLang": nil}, want: "fr"},
-		{body: map[string]any{"transLang": ""}, want: ""},
+		{body: map[string]any{"trans": true}, want: "fr", enabled: true},
+		{body: map[string]any{"transLang": nil}, want: "fr", enabled: true},
+		{body: map[string]any{"transLang": ""}, want: "", enabled: true},
+		{body: map[string]any{"trans": false}, want: ""},
 	}
 	for _, update := range updates {
 		set := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/user/set_info", viewer.Token, update.body)
@@ -111,7 +116,7 @@ func TestSetUserTranslationLanguageHTTP(t *testing.T) {
 		}
 		me := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/user/me", viewer.Token, nil)
 		profile := me.Body["data"].(map[string]any)
-		if profile["transLang"] != update.want || profile["trans"] != false {
+		if profile["transLang"] != update.want || profile["trans"] != update.enabled {
 			t.Fatalf("profile after set_info %v = %+v", update.body, profile)
 		}
 	}
