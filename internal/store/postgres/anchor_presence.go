@@ -137,9 +137,10 @@ func (s *Store) closeAnchorPresence() {
 
 func (s *Store) setAnchorAway(r *roomChange, owner int64, away bool) error {
 	var changedAt time.Time
+	var show bool
 	err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET anchor_away=$2,updated_at=statement_timestamp(),
 		anchor_away_until=CASE WHEN $2 THEN statement_timestamp()+make_interval(secs => $3) END
-		WHERE id=$1 AND anchor_away<>$2 RETURNING updated_at`, r.id, away, s.anchorAwayTimeout.Seconds()).Scan(&changedAt)
+		WHERE id=$1 AND anchor_away<>$2 RETURNING updated_at,live_show`, r.id, away, s.anchorAwayTimeout.Seconds()).Scan(&changedAt, &show)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -149,6 +150,8 @@ func (s *Store) setAnchorAway(r *roomChange, owner int64, away bool) error {
 	status := live.RoomOnline
 	if away {
 		status = live.RoomAnchorAway
+	} else if show {
+		status = live.RoomLiveShow
 	}
 	r.event = live.Event{Type: "room_status", UserID: owner, CreatedAt: changedAt, RoomStatus: status}
 	return nil

@@ -17,7 +17,8 @@ const subscriptionPlanColumns = `p.id,p.anchor_id,p.plan_type,p.published::int,p
 	p.bundles,p.promotion,p.promotion_ends_at`
 
 func (s *Store) EnsureFreePlan(ctx context.Context, anchorID int64) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO subscription_plans(anchor_id,plan_type,price) VALUES($1,2,0) ON CONFLICT DO NOTHING`, anchorID)
+	_, err := s.pool.Exec(ctx, `INSERT INTO subscription_plans(anchor_id,plan_type,price) SELECT $1,2,0
+		WHERE NOT EXISTS(SELECT 1 FROM subscription_plans WHERE anchor_id=$1 AND plan_type=2) ON CONFLICT DO NOTHING`, anchorID)
 	return err
 }
 
@@ -94,7 +95,8 @@ func (s *Store) CanCreatePlan(ctx context.Context, anchorID int64) (bool, error)
 }
 
 func (s *Store) Relationships(ctx context.Context, fanID, anchorID int64) ([]subscription.Relationship, error) {
-	rows, err := s.pool.Query(ctx, `SELECT m.fan_id,m.anchor_id,m.plan_id,p.name,p.price,p.plan_type-2,m.created_at,m.expires_at,m.cancelled_at,m.reason,m.promotion_redeemed,now()
+	rows, err := s.pool.Query(ctx, `SELECT m.fan_id,m.anchor_id,m.plan_id,p.name,p.price,COALESCE(m.legacy_level,p.plan_type-2),
+		m.created_at,m.expires_at,m.cancelled_at,m.reason,m.promotion_redeemed,now(),COALESCE(m.legacy_id,''),m.bundle,COALESCE(m.legacy_first,0)
 		FROM subscription_members m JOIN subscription_plans p ON p.id=m.plan_id
 		WHERE ($1::bigint=0 OR m.fan_id=$1) AND ($2::bigint=0 OR m.anchor_id=$2) ORDER BY m.created_at DESC,m.plan_id DESC`, fanID, anchorID)
 	if err != nil {
@@ -105,11 +107,17 @@ func (s *Store) Relationships(ctx context.Context, fanID, anchorID int64) ([]sub
 		var now time.Time
 		var promotion bool
 		err := row.Scan(&relationship.FanID, &relationship.AnchorID, &relationship.PlanID, &relationship.PlanName, &relationship.PlanPrice, &relationship.Level,
-			&relationship.CreatedAt, &relationship.ExpiresAt, &relationship.CancelledAt, &relationship.Reason, &promotion, &now)
+			&relationship.CreatedAt, &relationship.ExpiresAt, &relationship.CancelledAt, &relationship.Reason, &promotion, &now,
+			&relationship.ID, &relationship.Bundle, &relationship.First)
 		if promotion {
-			relationship.PromotionPurchased, relationship.First = 1, 2
+			relationship.PromotionPurchased = 1
+			if relationship.First == 0 {
+				relationship.First = 2
+			}
 		}
-		relationship.ID = subscription.RelationshipID(relationship.FanID, relationship.AnchorID, relationship.PlanID)
+		if relationship.ID == "" {
+			relationship.ID = subscription.RelationshipID(relationship.FanID, relationship.AnchorID, relationship.PlanID)
+		}
 		relationship.CreatedAt, relationship.ExpiresAt = relationship.CreatedAt.UTC(), relationship.ExpiresAt.UTC()
 		if relationship.CancelledAt != nil {
 			cancelledAt := relationship.CancelledAt.UTC()
@@ -149,7 +157,8 @@ func (s *Store) SubscribeFree(ctx context.Context, members dm.Metadata) error {
 			return err
 		}
 		var planID int64
-		err := tx.QueryRow(ctx, `SELECT id FROM subscription_plans WHERE anchor_id=$1 AND plan_type=2 AND published AND NOT deleted FOR SHARE`, anchorID).Scan(&planID)
+		err := tx.QueryRow(ctx, `SELECT id FROM subscription_plans WHERE anchor_id=$1 AND plan_type=2 AND published AND NOT deleted
+			ORDER BY created_at DESC,id DESC LIMIT 1 FOR SHARE`, anchorID).Scan(&planID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return subscription.ErrNotFound
 		}

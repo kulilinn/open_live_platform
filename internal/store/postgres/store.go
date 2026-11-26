@@ -14,6 +14,7 @@ import (
 )
 
 type Store struct {
+	bots                *roomBots
 	pool                *pgxpool.Pool
 	anchorAwayTimeout   time.Duration
 	eventChannel        string
@@ -123,7 +124,7 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1::bigint)", id); err != nil {
 			return err
 		}
-		r = roomChange{ctx: ctx, tx: tx, id: id}
+		r = roomChange{ctx: ctx, tx: tx, id: id, bots: s.bots}
 		if err := r.checkCommandScope(); err != nil {
 			return err
 		}
@@ -148,6 +149,7 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 }
 
 type roomChange struct {
+	bots              *roomBots
 	ctx               context.Context
 	tx                pgx.Tx
 	id                int64

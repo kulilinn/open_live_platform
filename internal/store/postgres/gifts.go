@@ -131,6 +131,7 @@ func (s *Store) FinishGift(ctx context.Context, roomID int64, order gift.Order, 
 		}
 		if online {
 			change.event = live.Event{Type: "gift", UserID: result.Input.SenderID, MessageID: result.ID, CreatedAt: result.PaidAt}
+			return change.queueBotGift(result.Input.SenderID, result.Cost, result.Item.GiftType)
 		}
 		return nil
 	})

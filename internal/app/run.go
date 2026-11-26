@@ -164,6 +164,11 @@ func (a *App) monitorAnchorAway(ctx context.Context) {
 		if err := a.Rooms.CloseExpiredAnchorRooms(ctx, time.Now()); err != nil && ctx.Err() == nil {
 			log.Printf("close expired anchor rooms: %v", err)
 		}
+		if len(a.Config.RoomBots.Accounts) > 0 {
+			if err := a.db.SweepRoomBots(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("update live room bots: %v", err)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return

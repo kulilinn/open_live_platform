@@ -44,7 +44,17 @@ func (s *Service) Start(ctx context.Context, actor int64) error {
 			host.Channel = NewChannel()
 		}
 		host.Accepting = true
+		host.AcceptUntil = now.Add(AcceptingLease)
 		host.Pending = nil
+		return nil
+	})
+}
+
+func (s *Service) RefreshOnline(ctx context.Context, anchor int64) error {
+	return s.Store.ChangeDateHost(ctx, anchor, func(host *Host, session *Session, now time.Time) error {
+		if host.Accepting && !host.Pending.Active(now) && !session.Active(now) {
+			host.AcceptUntil = now.Add(AcceptingLease)
+		}
 		return nil
 	})
 }
@@ -57,7 +67,7 @@ func (s *Service) CallIn(ctx context.Context, actor, anchor int64, candidate Inv
 		return Invitation{}, err
 	}
 	host, _, err := s.Store.DateHost(ctx, anchor)
-	if err != nil || !host.Accepting {
+	if err != nil || (!host.Listening(time.Now()) && !host.Pending.Active(time.Now())) {
 		if err != nil {
 			return Invitation{}, err
 		}
@@ -67,7 +77,7 @@ func (s *Service) CallIn(ctx context.Context, actor, anchor int64, candidate Inv
 		return Invitation{}, err
 	}
 	err = s.Store.ChangeDateHost(ctx, anchor, func(current *Host, session *Session, now time.Time) error {
-		if !current.Accepting || current.Channel != host.Channel || current.PricePerMin != host.PricePerMin || current.InitialMins != host.InitialMins {
+		if (!current.Listening(now) && !current.Pending.Active(now)) || current.Channel != host.Channel || current.PricePerMin != host.PricePerMin || current.InitialMins != host.InitialMins {
 			return ErrNotListening
 		}
 		if session.Active(now) {
@@ -126,6 +136,9 @@ func (s *Service) CancelInvitation(ctx context.Context, actor, anchor int64) (in
 		}
 		host.Cooldowns[audience] = now.Add(CallCooldown)
 		host.Pending = nil
+		if host.Accepting {
+			host.AcceptUntil = now.Add(AcceptingLease)
+		}
 		return nil
 	})
 	return audience, err
@@ -292,6 +305,9 @@ func (s *Service) Sweep(ctx context.Context, onEnd func(Session), onExpire func(
 			if host.Pending != nil && !host.Pending.Active(now) {
 				expired = host.Pending.UID
 				host.Pending = nil
+				if host.Accepting {
+					host.AcceptUntil = now.Add(AcceptingLease)
+				}
 			}
 			if session.Channel != 0 && session.EndedAt.IsZero() && !session.Active(now) {
 				End(host, session, now)

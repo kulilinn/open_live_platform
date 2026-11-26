@@ -119,7 +119,8 @@ func (s *Store) ConfirmPurchase(ctx context.Context, orderNo string, members dm.
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO subscription_members(fan_id,anchor_id,plan_id,expires_at) VALUES($1,$2,$3,$4)
-			ON CONFLICT (fan_id,plan_id) DO UPDATE SET expires_at=EXCLUDED.expires_at,cancelled_at=NULL,reason=0`,
+			ON CONFLICT (fan_id,plan_id) DO UPDATE SET expires_at=EXCLUDED.expires_at,cancelled_at=NULL,reason=0,
+				legacy_level=NULL,renewal_authorized=TRUE`,
 			fanID, anchorID, planID, subscription.PaidExpiry(start.UTC())); err != nil {
 			return err
 		}

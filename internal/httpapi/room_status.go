@@ -78,12 +78,32 @@ func (s server) checkPassword(w http.ResponseWriter, r *http.Request, _ int64) {
 }
 
 func (s server) online(w http.ResponseWriter, r *http.Request, userID int64) {
-	room, err := s.rooms.Info(r.Context(), userID)
+	var room live.Room
+	var err error
+	if raw, present := r.URL.Query()["status"]; present {
+		if len(raw) != 1 {
+			httpx.Error(w, http.StatusBadRequest, "invalid room status")
+			return
+		}
+		value, parseErr := strconv.ParseUint(raw[0], 10, 8)
+		if parseErr != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid room status")
+			return
+		}
+		if value > uint64(live.RoomAnchorAway) {
+			httpx.LiveError(w, live.ErrForbidden)
+			return
+		}
+		room, err = s.rooms.SetRoomStatus(r.Context(), userID, userID, live.RoomStatus(value))
+	} else {
+		room, err = s.rooms.Info(r.Context(), userID)
+	}
 	if err != nil {
 		roomStatusError(w, err)
 		return
 	}
 	durationSeconds := int64(room.Session.Duration(time.Now()) / time.Second)
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200", "data": map[string]any{"online": room.Status(), "duration": durationSeconds},
 	})

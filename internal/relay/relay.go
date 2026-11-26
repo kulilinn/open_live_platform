@@ -56,6 +56,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	if len(options) != 0 && options[0].AppKey != "" && options[0].AppSecret != "" {
 		rust = newRustTickets(options[0])
 		rust.registerControls(mux, accounts, &devices, publicURL)
+		mux.HandleFunc("POST /api/device/logs", rust.deviceLogs(accounts, options[0].DeviceLogs))
 		mux.HandleFunc("GET /relay/verify/{token}/{sig}", func(w http.ResponseWriter, r *http.Request) {
 			rust.verifyHTTP(accounts, w, r)
 		})

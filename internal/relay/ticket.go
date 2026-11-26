@@ -14,17 +14,19 @@ import (
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/transport/httpx"
+	"open_live_platform/internal/upload"
 )
 
 type RustOptions struct {
-	AppID     int64
-	AppKey    string
-	AppSecret string
-	AppUsers  []int64
-	TTL       time.Duration
-	Tickets   RustTicketStore
-	Devices   RustDeviceStore
-	Grants    RustControlStore
+	AppID      int64
+	AppKey     string
+	AppSecret  string
+	AppUsers   []int64
+	TTL        time.Duration
+	Tickets    RustTicketStore
+	Devices    RustDeviceStore
+	Grants     RustControlStore
+	DeviceLogs upload.Config
 }
 
 type RustTicketRecord struct {

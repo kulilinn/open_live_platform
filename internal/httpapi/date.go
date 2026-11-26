@@ -32,6 +32,7 @@ func (a *Dates) Register(mux *http.ServeMux) {
 	for pattern, handler := range map[string]userHandler{
 		"POST /api/live/base-setting": a.baseSetting, "POST /api/live/session-setting": a.sessionSetting,
 		"GET /api/live/state/{uid}": a.state, "POST /api/live/start": a.start, "POST /api/live/stop": a.stop,
+		"POST /api/live/online":          a.online,
 		"POST /api/live/callin/{anchor}": a.callin, "DELETE /api/live/callin/{anchor}": a.cancel,
 		"GET /api/live/callins/{anchor}": a.callins, "POST /api/live/tip/{anchor}": a.tip,
 		"POST /api/live/callout/{audience}": a.callout, "GET /api/live/duration/{channel}": a.duration,
@@ -136,7 +137,7 @@ func (a *Dates) writeState(w http.ResponseWriter, r *http.Request, anchor int64,
 	status := 0
 	var channel any
 	calls := []date.Invitation{}
-	if host.Accepting {
+	if host.Listening(time.Now()) || session.Active(time.Now()) || host.Pending.Active(time.Now()) {
 		status = 1
 		if session.Active(time.Now()) || host.Pending.Active(time.Now()) {
 			status = 2
@@ -155,6 +156,10 @@ func (a *Dates) writeState(w http.ResponseWriter, r *http.Request, anchor int64,
 			"avatar": avatar, "status": status, "channel": channel, "callIns": calls, "likes": 0},
 	}
 	dateResponse(w, nil, map[string]any{"result": result})
+}
+
+func (a *Dates) online(w http.ResponseWriter, r *http.Request, uid int64) {
+	dateResponse(w, a.Service.RefreshOnline(r.Context(), uid), nil)
 }
 
 func (a *Dates) start(w http.ResponseWriter, r *http.Request, uid int64) {

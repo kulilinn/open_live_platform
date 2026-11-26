@@ -265,4 +265,26 @@ func testGiftOrders(t *testing.T, config app.Config, acrossInstances bool) {
 	if string(total.Data) != `"14"` {
 		t.Fatalf("total income = %s", total.Data)
 	}
+	anchorQuery := "?date_type=2&anchor_id=" + roomID
+	request(api, http.MethodGet, "/anchor/api/stat_income_sometime"+anchorQuery, viewer, "", "", http.StatusForbidden, "403")
+	statement, _ := request(api, http.MethodGet, "/anchor/api/stat_income_sometime"+anchorQuery, host, "", "", http.StatusOK, "200")
+	var summary struct {
+		List []gift.EarningsBucket
+		Sum  int64
+	}
+	if err := json.Unmarshal(statement.Data, &summary); err != nil || summary.Sum != 14 ||
+		len(summary.List) != 1 || summary.List[0].Points != 14 {
+		t.Fatalf("anchor earnings statement = %s, err = %v", statement.Data, err)
+	}
+	details, _ := request(api, http.MethodGet, "/anchor/api/get_income_details"+anchorQuery+"&page=2&page_size=1",
+		host, "", "", http.StatusOK, "200")
+	var page struct {
+		List           []gift.EarningsLine
+		Current, Total int
+	}
+	if err := json.Unmarshal(details.Data, &page); err != nil || page.Current != 2 || page.Total != 2 ||
+		len(page.List) != 1 || page.List[0].Points != 7 || page.List[0].Description != "Flower" ||
+		page.List[0].GiverID != viewer.User.ID || page.List[0].Type != 2 {
+		t.Fatalf("anchor earnings page = %s, err = %v", details.Data, err)
+	}
 }

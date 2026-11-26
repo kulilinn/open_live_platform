@@ -11,6 +11,7 @@ type RoomStatus uint8
 const (
 	RoomOffline    RoomStatus = 0
 	RoomOnline     RoomStatus = 1
+	RoomLiveShow   RoomStatus = 2
 	RoomAnchorAway RoomStatus = 3
 	RoomLimited    RoomStatus = 4
 )
@@ -25,6 +26,9 @@ func (r Room) Status() RoomStatus {
 	}
 	if r.AnchorAway {
 		return RoomAnchorAway
+	}
+	if r.LiveShow {
+		return RoomLiveShow
 	}
 	return RoomOnline
 }

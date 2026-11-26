@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/transport/httpx"
 )
@@ -100,10 +101,20 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 	if p == nil {
 		p = &auth.Profile{Name: user.Account, SearchName: user.Account, ToyInfo: "{}", UserType: "normal"}
 	}
+	isMe := r.PathValue("user_id") == "me"
+	view := collectible.View{Equipped: map[string]collectible.Equipped{}}
+	photo := p.Photo
+	if s.collectibles != nil {
+		view, photo, err = s.collectibles.UserProfile(r.Context(), targetID, photo, isMe)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not read user adornments")
+			return
+		}
+	}
 	m := user.Moderation.Status()
 	data := map[string]any{
 		"id": strconv.FormatInt(user.ID, 10), "name": p.Name,
-		"gender": strconv.Itoa(p.Gender), "photo": p.Photo, "online": 0,
+		"gender": strconv.Itoa(p.Gender), "photo": photo, "online": 0,
 		"popularity": p.Popularity, "isAnchor": p.IsAnchor,
 		"toyInfo": p.ToyInfo, "anchorStatus": 0,
 		"displayName": user.Account, "searchName": p.SearchName,
@@ -112,12 +123,12 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 		"limitTotal": m.Total, "limitTime": m.Until, "limitReason": m.Reasons(),
 		"teacherLabel": "",
 	}
-	if r.PathValue("user_id") == "me" {
+	if isMe {
 		data["verified"], data["banner"], data["nsfw"], data["userType"] = p.Verified, p.Banner, p.NSFW, p.UserType
 		data["email"], data["language"], data["search_name"] = user.Email, user.Language, p.SearchName
-		data["pt"], data["fansTotal"], data["token_id"] = 0, 0, nil
+		data["pt"], data["fansTotal"], data["token_id"] = 0, 0, view.TokenID
 		data["xkey"], data["rkey"], data["promotion"] = "", "", ""
-		data["equipped_adorn"] = map[string]any{}
+		data["equipped_adorn"] = view.Equipped
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": data})
 }

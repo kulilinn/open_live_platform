@@ -16,7 +16,7 @@ const lastSubscriptionPoints = `(SELECT o.points FROM subscription_orders o WHER
 func (s *Store) RenewalCandidates(ctx context.Context, cutoff time.Time) ([]subscription.RenewalCandidate, error) {
 	rows, err := s.pool.Query(ctx, `SELECT m.fan_id,m.anchor_id,m.plan_id,m.expires_at FROM subscription_members m
 		JOIN subscription_plans p ON p.id=m.plan_id JOIN users u ON u.id=m.fan_id
-		WHERE m.cancelled_at IS NULL AND m.expires_at>now() AND m.expires_at<$1 AND p.published AND NOT p.deleted
+		WHERE m.renewal_authorized AND m.cancelled_at IS NULL AND m.expires_at>now() AND m.expires_at<$1 AND p.published AND NOT p.deleted
 			AND p.plan_type IN (3,4) AND p.price/10=`+lastSubscriptionPoints+` AND NOT (u.account_status=2 AND `+activeAccountLimit+`)
 			AND NOT EXISTS(SELECT 1 FROM users u WHERE u.id=m.anchor_id AND u.account_status=2 AND `+activeAccountLimit+`)
 			AND NOT EXISTS(SELECT 1 FROM subscription_orders o WHERE o.fan_id=m.fan_id AND o.plan_id=m.plan_id AND o.status=0)
@@ -30,7 +30,7 @@ func (s *Store) RenewalCandidates(ctx context.Context, cutoff time.Time) ([]subs
 func eligibleRenewal(ctx context.Context, tx pgx.Tx, fanID, anchorID, planID, points int64, from time.Time) (bool, error) {
 	var eligible bool
 	err := tx.QueryRow(ctx, `SELECT COALESCE($4=`+lastSubscriptionPoints+`,FALSE) FROM subscription_members m JOIN users u ON u.id=m.fan_id
-		WHERE m.fan_id=$1 AND m.anchor_id=$2 AND m.plan_id=$3 AND m.cancelled_at IS NULL AND m.expires_at=$5 AND m.expires_at>now()
+		WHERE m.fan_id=$1 AND m.anchor_id=$2 AND m.plan_id=$3 AND m.renewal_authorized AND m.cancelled_at IS NULL AND m.expires_at=$5 AND m.expires_at>now()
 		AND NOT (u.account_status=2 AND `+activeAccountLimit+`)
 		AND NOT EXISTS(SELECT 1 FROM users u WHERE u.id=m.anchor_id AND u.account_status=2 AND `+activeAccountLimit+`)`, fanID, anchorID, planID, points, from).Scan(&eligible)
 	if errors.Is(err, pgx.ErrNoRows) {

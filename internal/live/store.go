@@ -38,6 +38,7 @@ type Room struct {
 	IsLock              bool        `json:"isLock"`
 	Session             LiveSession `json:"-"`
 	AnchorAway          bool        `json:"-"`
+	LiveShow            bool        `json:"-"`
 	AnchorAwayUntil     time.Time   `json:"-"`
 	ViewerNID           uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
 	TranslationLanguage string      `json:"-"`
@@ -215,6 +216,7 @@ type RoomStore interface {
 	UpdateSettings(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error)
 	ConfigureRoom(ctx context.Context, ownerID int64, settings RoomSettings) (Room, error)
 	Close(ctx context.Context, roomID, actorID int64) error
+	SetRoomStatus(ctx context.Context, id, actor int64, status RoomStatus) (Room, error)
 	Info(ctx context.Context, roomID int64) (Room, error)
 	Rooms(ctx context.Context) ([]Room, error)
 	ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64, error)
@@ -341,6 +343,7 @@ func (s *Store) StartWithSettings(ctx context.Context, ownerID int64, settings R
 	info.Online = true
 	info.IsLock = len(passwordHash) != 0
 	info.AnchorAway = false
+	info.LiveShow = false
 	info.AnchorAwayUntil = time.Time{}
 	info.Session = LiveSession{LiveID: s.nextLiveID, AnchorNID: DefaultAnchorNID, StartedAt: time.Now().UTC()}
 	room := &roomState{
@@ -957,6 +960,7 @@ func (r *roomState) end() {
 	r.anchorLanguage = ""
 	r.anchorJoined = false
 	r.AnchorAway = false
+	r.LiveShow = false
 	r.AnchorAwayUntil = time.Time{}
 	r.anchorConnections = nil
 	r.viewerNIDs = nil

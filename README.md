@@ -44,6 +44,8 @@ go run .\cmd\platform
 - `GET /api/gift/list` 读取已配置的礼物目录
 - `POST /api/date/1vN/give/gifts` 赠送普通直播礼物，`GET /api/payment/points/get` 查询积分
 - `GET|POST /api/live/room/rank/{room}` 查看礼物榜，`GET /api/date/anchor/income/log` 与 `/api/date/anchor/total/income` 查看主播礼物收益
+- `GET /anchor/api/stat_fans_income`、`/anchor/api/stat_income_sometime` 与 `/anchor/api/get_income_details` 查看本账号的粉丝与结算收益
+- `/api/nft/creation_card` 提供创世卡目录、权益、签名挑战及绑定，`/api/adorn` 提供装扮目录与装备管理
 - `/api/dm` 查看私信会话、分页读取消息、标记已读、隐藏会话及发送私信
 - `GET /api/admin/rooms`、`GET /api/admin/users`
 - `POST /api/edge/events`
@@ -72,13 +74,19 @@ go run .\cmd\platform
 
 `GET /pass/{pass_key}` 读取现有的 Apple Wallet 签名包。用 `uv run scripts/export_legacy_wallet_passes.py --app <原 APP_NAME>` 从各旧 Redis 分片导出 `pass_key|pkpass|APP_NAME` 条目，并合并为 `WALLET_PASS_INDEX_FILE` 指向的 JSONL 文件。导出记录保留原对象路径和绝对到期时间。配置 `AWS_PASSES_S3_BUCKET` 及现有 S3 访问配置后，Go 从原 bucket 读取 `/passes/{uid}/{pass_key}.pkpass`。应用启动时载入索引，已过期或缺失的链接返回业务码 `4005`。签发仍依赖原 Apple 证书与打包流程。
 
+配置 `NFT_CATALOG_FILE` 指向包含 `cards`、`privileges`、`adorns` 数组的可信 JSON 目录。各项使用相应 API 的驼峰字段名，装扮目录另可配置 `effectTime` 和 `floatingScreenTime`。公共卡目录按状态筛选并隐藏大部分购买钱包地址。设置 `WEB3_HTTP` 和 `WEB3_CONTRACT_ADDRESS` 后，绑定核验以太坊签名及链上所有者。挑战绑定当前登录账号，五分钟有效，成功后只能使用一次。绑定状态和装扮保存到配置的 PostgreSQL，用户自查资料返回自己的绑定和装备。未上传头像的用户沿用 `USER_PHOTO_DEFAULT` 或 `USER_NFT_PHOTO_DEFAULT`。查询个人绑定或尝试装备时复核链上转移。
+
+旧绑定可在导入账号后用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL`、`WEB3_HTTP`、`WEB3_CONTRACT_ADDRESS` 运行 `go run ./cmd/import-live-nft`。导入会核验原钱包仍持有对应卡片、保留有效装备，并尊重新库已经发生的解绑或转移。配置库存钱包地址 `WEB3_ACCOUNT` 和 `NFT_SYNC_TOKEN` 后，部署调度器可用该 Bearer 凭证调用 `/api/nft/creation_card/schedule_refresh`。只有在同一最终确认区块上同时确认卡片离开库存钱包并核实新所有者，服务才更新出售状态。可信目录另可包含 `inventory` 元数据数组，`/api/nft/creation_card/init_data_20250523` 从中加入链上已持有但尚未列出的卡片。两个入口均只读取区块链。
+
+主播收益以已确认的普通直播礼物和导入的原 `settle_orders` 为来源。使用 `LIVEMEDIA_MYSQL_DSN`、`DATABASE_URL` 运行 `go run ./cmd/import-live-settlements` 可读取原 MySQL 的结算记录，多次导入同一记录不会重复计入。新增的订阅、付费帖子等交易要在有实际结算记录后才能计入。收益接口仅允许登录用户读取自己的账目。内部 `GET /api/earning/living_anchor_list` 要求 `EDGE_TOKEN` 的 Bearer 凭证，以及 `admin`、`mcn` 或 `innow` 的 `X-Inner-Service`。
+
 ## 管理后台
 
 运营后台和 MCN 后台沿用各自的 Rust 路径。它们需要通过 `PLATFORM_ADMIN_ADDR` 和 `PLATFORM_MCN_ADMIN_ADDR` 显式设置各自的监听地址，并配置 `DATABASE_URL` 及 `ADMIN_ACCOUNTS_FILE`。例如各自监听回环地址并由部署网关接入。主业务监听不会注册兼容后台路径。原 Go `/api/admin` 查询接口只接受显式设置的 `ADMIN_TOKEN`。
 
 `ADMIN_ACCOUNTS_FILE` 是由部署者从现有后台权限数据导出的 JSON 数组。条目包含 `id`、`area`、`passwordHash`、`admin`、`roles`、`permissions` 和 `routes`。`id` 是十进制字符串，`passwordHash` 是原 Rust Argon2id PHC 字符串。`area` 为 `admin` 时用 `username`、`nickName` 和 `tenant` 登录。运营接口要求 `operation-admin` 租户。`area` 为 `mcn` 时用 `email` 登录，`mcnId` 是十进制字符串，`manager` 代表只可查看本人的主播归属。菜单和权限来自导出文件，改动后重启服务。账号文件含凭据哈希，按凭据权限保管。旧后台 JWT 需重新登录，Go 后台会话的 access 和 refresh 分别有效两小时和七天。
 
-运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。MCN 提供限定在当前机构的主播列表和分页，数据来自导入的 `backoffice_mcn_streamers`。历史后台权限和机构归属由部署者迁移，登录历史筛选、主播警告投递及独立财务后台仍依赖未迁移的服务。
+运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。礼物列表与分页读取当前礼物目录，`finance-admin` 租户可分页查询已确认的普通直播礼物流水。MCN 提供限定在当前机构的主播列表和分页，数据来自导入的 `backoffice_mcn_streamers`。历史后台权限和机构归属由部署者迁移。登录历史筛选、主播警告投递、其他结算类别和财务写操作仍依赖原后台服务。
 
 ## 内部 gRPC
 
@@ -138,7 +146,11 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 
 `/api/sub/anchor` 下的接口管理主播自己的免费、付费和一对一计划。`get_anchor_plan` 查看公开计划，`anchor_id: "0"` 查看自己的全部计划。`free_sub` 订阅主播的公开免费计划，`cancel_sub` 使用 `anchor_id`、`plan_id` 和 `reason` 退订。`get_sub`、`get_my_sub`、`sub_list` 及粉丝、订阅分页接口返回已保存的订阅关系。
 
-免费订阅开通双方私信。付费订阅需要 PostgreSQL 和 `PAYMENT_HOST`、`PAYMENT_APPID`。Go 服务向原点数接口请求扣款，验证返回订单后保存付款凭据和订阅，并在同一数据库事务开通私信。仍有有效订阅时保留私信权限，最后一条订阅退订或到期后停止发送。上游结果不明确时保留待核对订单，同一计划的重试复用该订单号。自动续费、订阅促销和捆绑购买需额外的业务接入。
+免费订阅开通双方私信。付费订阅需要 PostgreSQL 和 `PAYMENT_HOST`、`PAYMENT_APPID`。Go 服务向原点数接口请求扣款，验证返回订单后保存付款凭据和订阅，并在同一数据库事务开通私信。仍有有效订阅时保留私信权限，最后一条订阅退订或到期后停止发送。上游结果不明确时保留待核对订单，同一计划的重试复用该订单号。
+
+主播用 `anchor/promote` 和 `anchor/unpromote` 管理计划的限时促销。`pay_sub` 的 `promotion: 1` 保留旧服务的免费体验流程，限初次订阅者领取，体验期结束后停止对应权限。`anchor/create_buddle` 和 `anchor/del_buddle` 管理计划中的套餐展示。套餐付款需要独立的计价和结算能力。
+
+设置 `SUBSCRIPTION_RENEW_TOKEN` 后，调度服务可持该 Bearer 令牌调用 `POST /api/sub/renew_sub`。每次检查最多 100 笔将在 UTC 后天零点前到期的有效订阅。续期要求先前已有验证通过的付费订单，且当前点数价格和最近一次实际扣款相同。点数不足时记录续费失败并取消续期。上游结果不明确时保留订单号供核对，并在结果确定前返回待核对状态。
 
 ## 从 LiveMedia 导入账号
 
@@ -147,6 +159,8 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 导入保留原有 64 位 ID、昵称、搜索名、头像、主播标记、语言、Argon2id 密码、封禁和禁言及其处罚记录。目标库中有相同 ID 或邮箱的本地账号时整批回滚。重复执行保留迁移后修改的密码和资料，并同步源处罚状态。输出中的 `restricted` 和 `without_email` 分别统计有处罚状态和没有邮箱的用户。没有邮箱的账号保留身份和匹配的旧 JWT 会话，可继续关联历史记录。
 
 账号数据导入后，`go run ./cmd/import-live-interactions` 使用相同连接配置导入私信和通知。命令保留原有 ID、时间、每个会话成员的隐藏状态及已读状态。若旧会话允许发送且源 `subscription_user_sub` 中有对应的未取消、未过期权益，则保留发送权限直至该权益到期。输出统计成功导入、已存在和跳过的记录。跳过群聊、逻辑删除或缺少目标账号的记录。相同 ID 或成员对的本地数据冲突时回滚该次导入。
+
+`go run ./cmd/import-live-subscriptions` 使用同一连接配置导入历史订阅计划、套餐展示、订阅期限、取消状态及历史结算记录。只有旧 `settle_orders` 与 `point_transactions` 能通过买家、主播、点数、交易引用和计划 ID 逐一对应时，才关联结算记录的 `verified_plan_id`。其余记录保留为可核对的历史数据。导入的历史订阅保留已有期限，后续由新 Go 订单验证付款后才具备自动续期资格。旧 Redis 促销的历史配置保留，重新开放限时体验需由该计划主播发布。
 
 ## 站内通知
 
@@ -198,9 +212,13 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 
 自动测试覆盖两实例领票、验证、重启、过期和注销，并用模拟 WebSocket 设备验证跨实例状态、24 KB 波形、账号隔离、应用绑定和远程授权的同意、过期与撤销。真实设备执行和前端联调仍待验证。
 
+`POST /api/device/logs` 接受 `file`、`token`、`sig` 和 `data` 四个 multipart 字段。服务验证仍可使用的 Rust relay 票据，允许最多 5 MiB 写入 `toylogs/{appKey}/{用户 ID}/{file}`。日志复用上传接口的 S3 配置，测试覆盖跨实例票据、对象键、SigV4、过期和注销。
+
 直播中最后一个主播 H5 连接断开时，观众收到同格式的状态值 `"3"`，已有连接、`liveId` 与聊天历史继续可用。主播重新进房或重连本场 H5 后，观众收到状态值 `"1"`。兼容房间详情和 `GET /api/live/room/online` 会返回相应的数字状态。
 
 主播连续暂离 5 分钟后，服务自动关播并发送状态值 `"0"`。可用 `TEMP_OFFLINE_TIMEOUT` 设置正整数秒数，默认 `300`。每次重新进入暂离都重新计时。PostgreSQL 模式会持久化截止时间，服务重启后继续检查。主播连接登记每 5 秒续期，30 秒租约过期时，其他实例在确认同一场直播没有剩余主播连接后进入暂离。升级前的连接登记有 30 秒重连时间，升级时已经暂离的房间从迁移时刻起获得 5 分钟。
+
+房主可通过 `GET /api/live/room/online?status=2` 进入 Rust 的门票房状态，通过 `status=1` 恢复普通直播。主播暂离后恢复原场时也会恢复状态 `2`，新开播从状态 `1` 开始。状态 `4` 来自后台封禁，房主接口不能自行设置或解除。普通请求不带 `status`，只查询当前状态。门票订单和核销依赖支付业务的独立授权流程。
 
 房间状态接口沿用 Rust 的 `status/data` 包装。`kicked` 和 `banned` 的 `data` 是布尔值，`limited` 返回 `limit_ty`、`limit_reason`、`limit_allow`、`limit_duration`、`limit_total`。观众接口返回字符串形式的用户 ID，并提供昵称、管理员和禁言状态。
 
@@ -223,7 +241,15 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 - `POST /api/live/room/stt-update/{room}` 使用 `X-Lr-Stt-Lang` 更新语言。
 - `POST /api/live/room/stt-stop/{room}` 停止任务。开始、更新和停止仅限房主。
 
-PostgreSQL 保存字幕任务和所属 `liveId`。关播后后台清理旧任务，两实例可以查询同一个任务。设置 `AGORA_STT_CALLBACK_SECRET` 后，可在 Agora Notifications 配置 `POST /api/live/stt/callback`，让已签名的 v7 结束通知清理对应的 agent。字幕文本通过 Agora RTC 数据流传输。自动测试使用本地 Agora 服务模拟及真实 PostgreSQL，覆盖新旧 REST 协议、任务状态、房主权限、重启、回调和关播。真实 Agora 项目、字幕前端和私聊 1v1 语音场次仍待验证或迁移。[Agora STT REST 快速入门](https://github.com/AgoraIO/docs-portal/blob/main/content/docs/en/realtime-media/speech-to-text/get-started/quickstart.md) · [Agora STT 数据流](https://github.com/AgoraIO/docs-portal/blob/main/content/docs/en/realtime-media/speech-to-text/build/process-transcription-data/parse-data.mdx)
+PostgreSQL 保存字幕任务和所属直播或约会场次。关播后后台清理旧任务，两实例可以查询同一个任务。设置 `AGORA_STT_CALLBACK_SECRET` 后，可在 Agora Notifications 配置 `POST /api/live/stt/callback`，让已签名的 v7 结束通知清理对应的 agent。字幕文本通过 Agora RTC 数据流传输。自动测试使用本地 Agora 服务模拟及真实 PostgreSQL，覆盖新旧 REST 协议、任务状态、房主或约会双方权限、重启、回调和关播。真实 Agora 项目与字幕前端仍待验证。[Agora STT REST 快速入门](https://github.com/AgoraIO/docs-portal/blob/main/content/docs/en/realtime-media/speech-to-text/get-started/quickstart.md) · [Agora STT 数据流](https://github.com/AgoraIO/docs-portal/blob/main/content/docs/en/realtime-media/speech-to-text/build/process-transcription-data/parse-data.mdx)
+
+## 1v1 约会和多人直播
+
+主播通过 `POST /api/live/start` 开启接听，使用原 `POST /api/live/online` 刷新接听状态。粉丝通过 `POST /api/live/callin/{anchor}` 邀请主播，主播通过 `POST /api/live/callout/{audience}` 接听。Go 服务复用 Advanced 订阅授予和支付余额查询，按主播约会费率记录场次点数。与当前 Rust 路径一致，余额校验和场次点数记录不发起支付扣款。H5 私有推送只向对应用户发送邀请、接听、加入、离开和字幕语言。
+
+1v1 主播和观众使用固定 RTC NID `100001` 和 `100002`。接听时双方各收到自己的 RTC 票据。`GET /api/live/token/{channel}/{role}` 仅为当前场次参与者续签。双方用 `/api/live/duration/{channel}` 刷新连线并查询时长，使用 `POST /api/live/leave/{channel}` 结束场次，可通过 `/api/live/checkout/{channel}` 查看结算摘要。每次新通话使用新频道，主播的多人直播继续走 `/api/live/room/*`。
+
+1v1 字幕使用 `/api/live/stt-start/{channel}`、`stt-query`、`stt-update` 和 `stt-stop`，仅双方可访问。真实 PostgreSQL 测试覆盖大整数 ID、跨实例邀请和签发、订阅与余额校验、字幕、挂断及重启后场次记录，加密签发和外部服务使用本地模拟验证。
 
 ## 聊天记录
 
@@ -235,6 +261,21 @@ PostgreSQL 保存字幕任务和所属 `liveId`。关播后后台清理旧任务
 
 - Go 格式 `{"room_id":42,"text":"你好"}` 成功返回 HTTP 204。WebSocket 发送的聊天也可从历史接口读取。
 - Rust 格式 `{"room":"42","channel":"chat","priority":0,"message":{"msgType":"C","msgGroup":"chat","userInfo":{"uid":"7","name":"小林"},"message":"你好"}}` 返回 `status`、布尔值 `data` 和数值 `msgId`。历史保留原消息体及其扩展字段，外层 `sender` 取自登录身份，`id`、`room`、`sender` 和 Unix 秒 `timestamp` 均为字符串。
+
+## 直播间陪聊机器人
+
+PostgreSQL 模式可通过 `USE_LIVEROOM_BOT` 与 `LIVEROOM_BOT_FILE` 开启陪聊。预先建好专用账号，并在配置文件中填写账号 ID 和语言。所有服务实例使用同一份配置。下面是一份最小示例。
+
+```json
+{
+  "accounts": [{"id":"200001","locale":"ja"}],
+  "scripts": {"ja":{"welcome":["ようこそ"],"gifts":{"1":["プレゼントありがとう"]}}}
+}
+```
+
+机器人在公开房间开播后加入，每房间最多一个，账号一次只在一个房间中。持有已绑定创世神卡的观众进房时触发欢迎语。本场礼物成功结算且总点数达到 `BOT_GIFT_PRICE`（默认 100）时按礼物类型触发回复。机器人用自己的账号发送普通房间聊天，消息进入直播推送和历史。
+
+文件可设置 `room_population`（加机器人前的观众上限，默认 20），以及 `entry_seconds`、`stay_seconds`、`welcome_delay_seconds`、`gift_delay_seconds`（分别默认 30、600、180、1 秒）。关播、踢出机器人或机器人离房会清理该账号的待发消息。Go 读取本地账号和脚本配置，自动点赞、日常闲聊和原 etcd/Redis 加权配置仍需迁移。
 
 ## 礼物目录
 
@@ -268,6 +309,10 @@ PG 模式下，账号、登录会话、房间、成员、管理员、禁言、�
 `GET /api/guid` 和 `POST /api/upload` 沿用编号从 0 开始的分片协议。分片可乱序到达。启用 PostgreSQL 后可跨实例接续，最后一个缺片到达后合并并签名写入对象存储。配置 `AWS_S3_BUCKET`、`AWS_S3_REGION`、`AWS_S3_ACCESS_KEY_ID`、`AWS_S3_SECRET_ACCESS_KEY` 和公开访问前缀 `BASE_STATIC_URL`。兼容 S3 的私有服务可设置 `AWS_S3_ENDPOINT_URL`。
 
 `POST /api/auth/verifygoogle` 接受原有的 `{"token":"…"}`。配置 `GOOGLE_CLIENT_ID` 后，服务向 Google 核实 access token 所属应用、有效期和邮箱，使用稳定的 Google 用户标识关联本地账号。首次关联第三方托管邮箱时需要通过平台邮箱验证码，已有绑定可直接登录。启用 `JWT_SECRET` 后返回与邮箱登录相同的 refresh JWT。
+
+分享发布、更新和删除沿用 `/api/shares/*` 与 5 MiB 图片上传，公开列表返回 CDN 图片地址和下一页偏移量。更新和删除要求登录账号是分享作者。用户反馈在 `/api/feedback/submit` 保存，可选附件存入 S3；`FEEDBACK_HOOK_URL` 配置通知接收方。每位用户每分钟可提交一次。
+
+旧应用目录、版本、国家、帮助分类/问答、跑马灯及 PWA 主播清单通过 `go run ./cmd/import-live-catalog` 迁入 PostgreSQL。命令读取 `LIVEMEDIA_MYSQL_DSN` 和 `DATABASE_URL`，每次成功导入会在同一事务中替换整套公开资料。导入只选用公开列，应用密钥留在源库。
 
 ## 检查
 

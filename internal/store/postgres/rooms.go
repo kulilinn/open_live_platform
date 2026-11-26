@@ -15,7 +15,7 @@ const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
     (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
     live_id, live_started_at, live_ended_at, trans_lang, anchor_away, anchor_away_until,
     banner, tag, description, offline_info, plan::text, gifts::text, trans_enabled,
-    moderation_until, moderation_total, moderation_reason`
+    moderation_until, moderation_total, moderation_reason, live_show`
 
 const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
@@ -27,7 +27,7 @@ func scanRoom(row pgx.Row) (live.Room, error) {
 	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
 		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway, &awayUntil,
 		&room.Banner, &room.Tag, &room.Description, &room.OfflineInfo, &room.Plan, &room.Gifts, &room.TranslationEnabled,
-		&room.ModerationUntil, &room.ModerationTotal, &room.ModerationReason)
+		&room.ModerationUntil, &room.ModerationTotal, &room.ModerationReason, &room.LiveShow)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
 	}
@@ -233,7 +233,7 @@ func (r *roomChange) writeSettings(room live.Room, hash []byte, replacePassword,
 		trans_lang=$5,banner=$6,tag=$7,description=$8,offline_info=$9,plan=$10,gifts=$11,trans_enabled=$12,
 		updated_at=statement_timestamp()`
 	if start {
-		query += `,online=true,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,
+		query += `,online=true,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,live_show=false,
 			live_id=nextval('room_live_id_seq'),live_started_at=statement_timestamp(),live_ended_at=NULL,` + advanceHistoryBoundary
 	}
 	return scanRoom(r.tx.QueryRow(r.ctx, query+" WHERE id=$1 RETURNING "+roomFields,
@@ -257,7 +257,7 @@ func (r *roomChange) close(actor int64) error {
 		return nil
 	}
 	var endedAt time.Time
-	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,
+	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,anchor_trans_lang='',anchor_away=false,anchor_away_until=NULL,live_show=false,
 		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+
 		" WHERE id=$1 RETURNING live_ended_at", r.id).Scan(&endedAt); err != nil {
 		return err
@@ -394,11 +394,14 @@ func (s *Store) joinRoom(ctx context.Context, id, uid int64, password string, la
 			return err
 		}
 		joined, err := r.relation("room_members", uid, true)
-		if joined {
-			r.event = live.Event{Type: "join", UserID: uid}
-		}
 		if err != nil {
 			return err
+		}
+		if joined {
+			r.event = live.Event{Type: "join", UserID: uid}
+			if err := r.queueBotWelcome(uid); err != nil {
+				return err
+			}
 		}
 		if _, err := r.tx.Exec(ctx, `UPDATE room_members SET trans_lang=COALESCE(NULLIF(COALESCE($3,u.trans_lang),''),'en')
 			FROM users u WHERE room_members.room_id=$1 AND room_members.user_id=$2 AND u.id=$2`, id, uid, language); err != nil {
@@ -650,26 +653,34 @@ func (s *Store) Send(ctx context.Context, id, uid int64, text string) error {
 func (s *Store) SendChat(ctx context.Context, msg live.ChatMessage) (int64, error) {
 	var messageID int64
 	err := s.change(ctx, msg.RoomID, func(r *roomChange) error {
-		if _, err := r.memberLiveID(msg.UserID); err != nil {
-			return err
-		}
-		var muted bool
-		if err := r.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM room_mutes WHERE room_id=$1 AND user_id=$2 AND expires_at>now())
-			OR COALESCE((SELECT u.account_status IN (1,2) AND `+activeAccountLimit+` FROM users u WHERE u.id=$2 FOR SHARE),FALSE)`, msg.RoomID, msg.UserID).Scan(&muted); err != nil {
-			return err
-		}
-		if muted {
-			return live.ErrMuted
-		}
-		err := r.tx.QueryRow(ctx, `INSERT INTO room_messages(room_id,user_id,text,payload)
-			VALUES($1,$2,$3,$4) RETURNING id`, msg.RoomID, msg.UserID, msg.Text, msg.Payload).Scan(&messageID)
-		r.event = live.Event{Type: "chat", UserID: msg.UserID, MessageID: messageID}
+		var err error
+		messageID, err = r.sendChat(msg)
 		return err
 	})
 	if err != nil {
 		return 0, err
 	}
 	return messageID, nil
+}
+
+func (r *roomChange) sendChat(msg live.ChatMessage) (int64, error) {
+	if _, err := r.memberLiveID(msg.UserID); err != nil {
+		return 0, err
+	}
+	var muted bool
+	if err := r.tx.QueryRow(r.ctx, `SELECT EXISTS(SELECT 1 FROM room_mutes WHERE room_id=$1 AND user_id=$2 AND expires_at>now())
+		OR COALESCE((SELECT u.account_status IN (1,2) AND `+activeAccountLimit+` FROM users u WHERE u.id=$2 FOR SHARE),FALSE)`,
+		r.id, msg.UserID).Scan(&muted); err != nil {
+		return 0, err
+	}
+	if muted {
+		return 0, live.ErrMuted
+	}
+	var messageID int64
+	err := r.tx.QueryRow(r.ctx, `INSERT INTO room_messages(room_id,user_id,text,payload)
+		VALUES($1,$2,$3,$4) RETURNING id`, r.id, msg.UserID, msg.Text, msg.Payload).Scan(&messageID)
+	r.event = live.Event{Type: "chat", UserID: msg.UserID, MessageID: messageID}
+	return messageID, err
 }
 
 func (s *Store) ChatHistory(ctx context.Context, roomID, userID int64, page, size uint64) ([]live.ChatMessage, error) {

@@ -43,6 +43,7 @@ type AccountStore interface {
 	Refresh(ctx context.Context, token string) (Session, bool, error)
 	Revoke(ctx context.Context, token string) error
 	Find(ctx context.Context, id int64) (User, bool, error)
+	FindBySearchName(ctx context.Context, name string) (int64, bool, error)
 	SetLanguage(ctx context.Context, id int64, language string) error
 	// TranslationLanguages returns stored preferences for existing accounts. An empty preference means the default.
 	TranslationLanguages(ctx context.Context, ids []int64) (map[int64]string, error)
@@ -219,6 +220,22 @@ func (s *Store) Find(ctx context.Context, id int64) (User, bool, error) {
 		}
 	}
 	return User{}, false, nil
+}
+func (s *Store) FindBySearchName(ctx context.Context, name string) (int64, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best int64
+	for _, login := range s.users {
+		u := login.user
+		n := u.Account
+		if u.Profile != nil {
+			n = u.Profile.SearchName
+		}
+		if strings.EqualFold(name, n) && (best == 0 || u.ID < best) {
+			best = u.ID
+		}
+	}
+	return best, best != 0, ctx.Err()
 }
 
 func (s *Store) SetLanguage(ctx context.Context, id int64, language string) error {

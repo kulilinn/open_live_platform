@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/stt"
@@ -18,6 +19,7 @@ type server struct {
 	rtc               rtc.Signer
 	subtitles         *stt.Service
 	dates             *Dates
+	collectibles      *collectible.Service
 	recentChats       *sync.Map
 	emailVerification *auth.EmailVerification
 }
@@ -31,8 +33,9 @@ func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.
 }
 
 type LiveServices struct {
-	Subtitles *stt.Service
-	Dates     *Dates
+	Subtitles   *stt.Service
+	Dates       *Dates
+	Collectible *collectible.Service
 }
 
 func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer, email *auth.EmailVerification, services ...LiveServices) {
@@ -40,7 +43,9 @@ func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms liv
 	if len(services) > 0 {
 		s.subtitles = services[0].Subtitles
 		s.dates = services[0].Dates
+		s.collectibles = services[0].Collectible
 	}
+	s.registerCollectibles(mux)
 
 	mux.HandleFunc("GET /healthchecker", health)
 	mux.HandleFunc("GET /health", health)

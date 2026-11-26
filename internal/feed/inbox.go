@@ -20,6 +20,7 @@ type Entry struct {
 	Updated time.Time
 }
 type Store interface {
+	ShareStore
 	FeedConfig(context.Context, int64) (Config, error)
 	SetFeedConfig(context.Context, int64, Config) error
 	SetFeedWelcome(context.Context, int64, string) error
@@ -34,9 +35,11 @@ type row struct {
 	hidden bool
 }
 type Memory struct {
-	mu     sync.RWMutex
-	config map[int64]Config
-	rows   map[[2]int64]row
+	shares    map[int64]Share
+	nextShare int64
+	mu        sync.RWMutex
+	config    map[int64]Config
+	rows      map[[2]int64]row
 }
 
 func (m *Memory) FeedConfig(_ context.Context, id int64) (Config, error) {

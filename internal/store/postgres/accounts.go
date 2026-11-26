@@ -174,6 +174,14 @@ func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
 	}
 	return user, err == nil, err
 }
+func (s *Store) FindBySearchName(ctx context.Context, name string) (int64, bool, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, "SELECT id FROM users WHERE lower(coalesce(profile->>'SearchName',account))=lower($1) ORDER BY id LIMIT 1", name).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return id, err == nil, err
+}
 
 func (s *Store) SetLanguage(ctx context.Context, id int64, language string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE users SET language = $2 WHERE id = $1`, id, language)

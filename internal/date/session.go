@@ -19,6 +19,7 @@ const (
 	InviteLifetime          = time.Minute
 	CallCooldown            = 10 * time.Second
 	ParticipantLease        = 10 * time.Second
+	AcceptingLease          = 5 * time.Second
 )
 
 var (
@@ -35,6 +36,7 @@ var (
 type Host struct {
 	Channel      int64
 	Accepting    bool
+	AcceptUntil  time.Time
 	BaseSettings json.RawMessage
 	Settings     json.RawMessage
 	PricePerMin  int64
@@ -42,6 +44,8 @@ type Host struct {
 	Pending      *Invitation
 	Cooldowns    map[int64]time.Time
 }
+
+func (h Host) Listening(now time.Time) bool { return h.Accepting && now.Before(h.AcceptUntil) }
 
 type Invitation struct {
 	UID         int64  `json:"uid,string"`
@@ -116,6 +120,9 @@ func End(host *Host, s *Session, now time.Time) {
 	s.EndedAt = now
 	if host.Channel == s.Channel {
 		host.Channel = NewChannel()
+	}
+	if host.Accepting {
+		host.AcceptUntil = now.Add(AcceptingLease)
 	}
 }
 

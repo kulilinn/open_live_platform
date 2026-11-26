@@ -12,15 +12,20 @@ import (
 
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/catalog"
+	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/date"
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/edge"
 	"open_live_platform/internal/feed"
+	"open_live_platform/internal/feedback"
 	"open_live_platform/internal/gift"
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/livebot"
 	"open_live_platform/internal/notice"
 	"open_live_platform/internal/payment"
+	"open_live_platform/internal/posts"
 	"open_live_platform/internal/relay"
 	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/store/postgres"
@@ -31,6 +36,15 @@ import (
 )
 
 type Config struct {
+	PostAuditURL           string
+	PostAuditToken         string
+	PostAuditRequired      bool
+	PostReviewToken        string
+	RoomBots               livebot.Config
+	roomBotsConfigError    error
+	FeedbackHook           string
+	PublicCatalog          catalog.Snapshot
+	Collectibles           collectible.Config
 	Google                 auth.GoogleConfig
 	Upload                 upload.Config
 	WalletPasses           upload.PassConfig
@@ -74,7 +88,17 @@ type Config struct {
 
 func ConfigFromEnv() Config {
 	adminToken := os.Getenv("ADMIN_TOKEN")
+	bots, botConfigErr := livebot.LoadFromEnv()
+	postAuditRequired, _ := strconv.ParseBool(os.Getenv("POST_AUDIT_REQUIRED"))
 	return Config{
+		PostAuditURL:           os.Getenv("POST_AUDIT_URL"),
+		PostAuditToken:         os.Getenv("POST_AUDIT_TOKEN"),
+		PostAuditRequired:      postAuditRequired,
+		PostReviewToken:        os.Getenv("POST_REVIEW_TOKEN"),
+		RoomBots:               bots,
+		roomBotsConfigError:    botConfigErr,
+		FeedbackHook:           os.Getenv("FEEDBACK_HOOK_URL"),
+		Collectibles:           collectible.ConfigFromEnv(),
 		Google:                 auth.GoogleConfig{ClientID: os.Getenv("GOOGLE_CLIENT_ID")},
 		Upload:                 uploadFromEnv(),
 		WalletPasses:           walletPassesFromEnv(),
@@ -130,6 +154,12 @@ type App struct {
 }
 
 func New(ctx context.Context, config Config) (*App, error) {
+	if config.roomBotsConfigError != nil {
+		return nil, fmt.Errorf("live room bots: %w", config.roomBotsConfigError)
+	}
+	if len(config.RoomBots.Accounts) > 0 && config.DatabaseURL == "" {
+		return nil, fmt.Errorf("live room bots require DATABASE_URL")
+	}
 	config.GRPCAddr = cmp.Or(config.GRPCAddr, "127.0.0.1:9090")
 	if config.AnchorAwayTimeout <= 0 {
 		config.AnchorAwayTimeout = live.DefaultAnchorAwayTimeout
@@ -161,6 +191,10 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	postReviewer, err := posts.NewHTTPReviewer(config.PostAuditURL, config.PostAuditToken)
+	if err != nil {
+		return nil, err
+	}
 	paymentProxy, err := payment.NewProxy(billing, config.PaymentBorrowAppID, config.PaymentProxyRoutes)
 	if err != nil {
 		return nil, err
@@ -188,26 +222,40 @@ func New(ctx context.Context, config Config) (*App, error) {
 	var notices notice.Store
 	var uploads upload.Store
 	var inbox feed.Store
+	var feedbacks feedback.Store = &feedback.Memory{}
+	var reference catalog.Store = config.PublicCatalog
 	var messages dm.Store
 	var giftOrders gift.OrderStore
+	var earnings gift.EarningsStore
+	var collectibleStore collectible.Store
 	var payments payment.Store
 	var subscriptions subscription.Store
+	var anchorPosts posts.Store
 	var db *postgres.Store
 	if config.DatabaseURL == "" {
 		memoryRooms := live.NewStoreWithAnchorTimeout(config.AnchorAwayTimeout)
 		backend, rooms, giftOrders = auth.NewStore(), memoryRooms, memoryRooms
+		earnings = memoryRooms
 		notices = &notice.Memory{}
 		uploads = &upload.Memory{}
 		inbox = &feed.Memory{}
 		memoryMessages := &dm.Memory{}
 		messages = memoryMessages
 		subscriptions = subscription.NewMemory(memoryMessages)
+		anchorPosts = posts.NewMemory(subscriptions)
 		payments = &payment.MemoryChecks{}
+		collectibleStore = collectible.NewMemory()
 	} else {
 		var err error
 		db, err = postgres.OpenWithAnchorTimeout(ctx, config.DatabaseURL, config.AnchorAwayTimeout)
 		if err != nil {
 			return nil, err
+		}
+		if len(config.RoomBots.Accounts) > 0 {
+			if err := db.ConfigureRoomBots(config.RoomBots); err != nil {
+				db.Shutdown()
+				return nil, err
+			}
 		}
 		backend, rooms = db, db
 		config.RelayRust.Tickets = db
@@ -216,10 +264,22 @@ func New(ctx context.Context, config Config) (*App, error) {
 		notices = db
 		uploads = db
 		inbox = db
+		feedbacks = db
+		reference = db
 		messages = db
 		giftOrders = db
+		earnings = db
 		subscriptions = db
+		anchorPosts = db
 		payments = db
+		collectibleStore = db
+	}
+	collectibles, err := collectible.New(config.Collectibles, collectibleStore)
+	if err != nil {
+		if db != nil {
+			db.Shutdown()
+		}
+		return nil, err
 	}
 	accounts := auth.WithJWT(backend, config.JWTSecret)
 	emailVerification, err := auth.NewEmailVerification(accounts, mailSender, cmp.Or(config.MailCodeSecret, config.JWTSecret), config.MailCodeTTL)
@@ -250,12 +310,14 @@ func New(ctx context.Context, config Config) (*App, error) {
 	}
 	subtitles := stt.New(config.Subtitles, signer, rooms, taskStore)
 	dateSubtitles := stt.New(config.Subtitles, signer, rooms, dateStore.DateSubtitles())
+	config.RelayRust.DeviceLogs = config.Upload
 	push := relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL, config.RelayRust)
 	dates := &httpapi.Dates{Accounts: accounts, Service: date.New(dateStore, accounts, subscriptions, billing),
 		Signer: signer, Subtitles: dateSubtitles, Push: push}
 	dates.Register(mux)
 
-	httpapi.RegisterWithEmail(mux, accounts, rooms, signer, emailVerification, httpapi.LiveServices{Subtitles: subtitles, Dates: dates})
+	httpapi.RegisterWithEmail(mux, accounts, rooms, signer, emailVerification,
+		httpapi.LiveServices{Subtitles: subtitles, Dates: dates, Collectible: collectibles})
 	httpapi.RegisterSTT(mux, accounts, subtitles, dateSubtitles)
 	httpapi.RegisterTranslate(mux, accounts, translate.New(config.TextTranslation))
 	httpapi.RegisterGoogle(mux, auth.GoogleLogin{Config: config.Google, Accounts: accounts, Backend: backend, Mail: emailVerification})
@@ -264,11 +326,19 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterPayment(mux, accounts, payments, paymentProxy, largeOrders)
 	httpapi.RegisterWalletPass(mux, passes)
 	httpapi.RegisterGiftOrders(mux, accounts, rooms, giftOrders, billing, gifts)
+	httpapi.RegisterEarnings(mux, accounts, rooms, earnings, subscriptions, config.EdgeToken)
 	httpapi.RegisterSubscriptions(mux, accounts, rooms, subscriptions, billing, inbox, config.SubscriptionRenewToken)
+	httpapi.RegisterPosts(mux, accounts, rooms, anchorPosts, subscriptions, billing, httpapi.PostOptions{
+		Reviewer: postReviewer, AuditRequired: config.PostAuditRequired, ReviewToken: config.PostReviewToken,
+	})
 	admin.Register(mux, accounts, rooms, config.AdminToken)
 	httpapi.RegisterNotices(mux, accounts, notices)
 	httpapi.RegisterFeed(mux, accounts, rooms, subscriptions, inbox, messages, config.DMModerator)
 	httpapi.RegisterUploads(mux, accounts, config.Upload, uploads)
+	httpapi.RegisterPublicCatalog(mux, reference)
+	httpapi.RegisterPWA(mux, accounts, rooms, subscriptions, inbox, reference)
+	httpapi.RegisterShares(mux, accounts, inbox, config.Upload)
+	httpapi.RegisterFeedback(mux, accounts, feedbacks, config.Upload, config.FeedbackHook)
 	httpapi.RegisterDirectMessages(mux, accounts, messages, config.DMModerator, push)
 	edge.Register(mux, rooms, notices, config.EdgeToken)
 

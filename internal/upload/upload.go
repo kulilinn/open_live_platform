@@ -58,6 +58,11 @@ var ErrLimit = errors.New("uploaded file too large")
 
 type Parts = iter.Seq2[[]byte, error]
 type Finish func(context.Context, string, Parts) error
+
+func (c Config) PutBytes(ctx context.Context, key string, data []byte) error {
+	return c.Put(ctx, key, func(yield func([]byte, error) bool) { yield(data, nil) })
+}
+
 type Store interface {
 	StageUpload(context.Context, Part, Finish) error
 }
