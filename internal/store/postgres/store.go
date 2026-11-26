@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	_ "embed"
 	"sync"
 	"sync/atomic"
 
@@ -11,24 +10,6 @@ import (
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
 )
-
-//go:embed migrations/001_core.sql
-var schema string
-
-//go:embed migrations/002_room_passwords.sql
-var roomPasswordsSchema string
-
-//go:embed migrations/003_room_chat_history.sql
-var roomChatHistorySchema string
-
-//go:embed migrations/004_user_language.sql
-var userLanguageSchema string
-
-//go:embed migrations/005_live_session.sql
-var liveSessionSchema string
-
-//go:embed migrations/006_auth_sessions.sql
-var jwtSessionsSchema string
 
 type Store struct {
 	pool         *pgxpool.Pool
@@ -59,19 +40,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Serialize schema creation and upgrades on this database.
-	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(733516, 1)"); err != nil {
-			return err
-		}
-		for _, migration := range []string{schema, roomPasswordsSchema, roomChatHistorySchema, userLanguageSchema, liveSessionSchema, jwtSessionsSchema} {
-			if _, err := tx.Exec(ctx, migration); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	if err := migrate(ctx, pool); err != nil {
 		pool.Close()
 		return nil, err
 	}
