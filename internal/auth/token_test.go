@@ -9,7 +9,7 @@ import (
 )
 
 func TestJWTExchange(t *testing.T) {
-	const userID = 78591199061446656
+	const userID = 78591199061446657
 	const issuer = "viewer@example.org"
 	s := NewJWTService("example-secret")
 	now := time.Unix(1760000000, 0)
@@ -53,6 +53,9 @@ func TestJWTExchange(t *testing.T) {
 	if _, err := s.VerifyAccess(access); !errors.Is(err, ErrTokenExpired) {
 		t.Fatalf("access at expiry = %v", err)
 	}
+	if _, err := s.VerifyRefresh(access); !errors.Is(err, ErrTokenType) {
+		t.Fatalf("expired access verified as refresh = %v", err)
+	}
 	if _, _, err := s.ExchangeRefresh(refresh); err != nil {
 		t.Fatalf("refresh after access expiry: %v", err)
 	}
@@ -66,7 +69,8 @@ func TestJWTRustSignature(t *testing.T) {
 	// Built independently with the original decimal subject and hex MD5
 	// secret derivation. The second fixture has a valid HMAC for another alg.
 	const payload = "eyJzdWIiOjc4NTkxMTk5MDYxNDQ2NjU2LCJpYXQiOjE3NjAwMDAwMDAsImV4cCI6MTc2MDA4NjQwMCwidHlwIjoiUkVGUkVTSCIsImF1ZCI6IjQyNDIiLCJqdGkiOjQyNDIsImlzcyI6InZpZXdlckBleGFtcGxlLm9yZyJ9"
-	const valid = jwtHeader + "." + payload + ".7DzOQYosEY_HxuOqD9L6cdpWqCLfMu3cx3kme9pKSEg"
+	const header = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9"
+	const valid = header + "." + payload + ".7DzOQYosEY_HxuOqD9L6cdpWqCLfMu3cx3kme9pKSEg"
 	const otherAlgorithm = "eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0." + payload + ".t5npnWQXBbYy9_2gkFcsqCLuqg3YuzdESMaRe928pOo"
 	s := NewJWTService("example-secret")
 	s.now = func() time.Time { return time.Unix(1760000001, 0) }
@@ -77,6 +81,10 @@ func TestJWTRustSignature(t *testing.T) {
 	}
 	if _, err := s.VerifyRefresh(otherAlgorithm); !errors.Is(err, ErrTokenInvalid) {
 		t.Fatalf("wrong algorithm verified: %v", err)
+	}
+	// The last character must have zero trailing bits in unpadded base64url.
+	if _, err := s.VerifyRefresh(valid[:len(valid)-1] + "h"); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("noncanonical signature verified: %v", err)
 	}
 	if _, err := NewJWTService("").VerifyRefresh(valid); !errors.Is(err, ErrTokenInvalid) {
 		t.Fatalf("missing secret accepted: %v", err)

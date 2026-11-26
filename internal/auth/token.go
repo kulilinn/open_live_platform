@@ -1,18 +1,15 @@
 package auth
 
 import (
-	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -21,8 +18,6 @@ const (
 
 	refreshTTL = 24 * time.Hour
 	accessTTL  = 30 * time.Minute
-
-	jwtHeader = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9" // {"typ":"JWT","alg":"HS256"}
 )
 
 var (
@@ -40,6 +35,24 @@ type TokenClaims struct {
 	Aud string `json:"aud"`
 	JTI int64  `json:"jti"`
 	Iss string `json:"iss"`
+}
+
+// jwtClaims implements jwt.Claims with LiveMedia's JSON field types.
+type jwtClaims TokenClaims
+
+func (c jwtClaims) GetExpirationTime() (*jwt.NumericDate, error) {
+	return jwt.NewNumericDate(time.Unix(c.Exp, 0)), nil
+}
+
+func (c jwtClaims) GetIssuedAt() (*jwt.NumericDate, error) {
+	return jwt.NewNumericDate(time.Unix(c.Iat, 0)), nil
+}
+
+func (jwtClaims) GetNotBefore() (*jwt.NumericDate, error) { return nil, nil }
+func (c jwtClaims) GetIssuer() (string, error)            { return c.Iss, nil }
+func (c jwtClaims) GetSubject() (string, error)           { return strconv.FormatInt(c.Sub, 10), nil }
+func (c jwtClaims) GetAudience() (jwt.ClaimStrings, error) {
+	return jwt.ClaimStrings{c.Aud}, nil
 }
 
 // JWTService signs and verifies tokens. Callers use the refresh JTI for
@@ -94,41 +107,30 @@ func (s *JWTService) issue(userID int64, issuer, typ, audience string, ttl time.
 		JTI: jti,
 		Iss: issuer,
 	}
-	payload, err := json.Marshal(claims)
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtClaims(claims)).SignedString(s.signingKey(userID))
 	if err != nil {
 		return "", TokenClaims{}, err
 	}
-	message := jwtHeader + "." + base64.RawURLEncoding.EncodeToString(payload)
-	signature := base64.RawURLEncoding.EncodeToString(s.signature(message, userID))
-	return message + "." + signature, claims, nil
+	return token, claims, nil
 }
 
 func (s *JWTService) verify(token, expectedType string) (TokenClaims, error) {
-	header, rest, found := strings.Cut(token, ".")
-	payload, signature, hasSignature := strings.Cut(rest, ".")
-	if s.secret == "" || !found || !hasSignature {
+	if s.secret == "" {
 		return TokenClaims{}, ErrTokenInvalid
 	}
-	headerJSON, err := base64.RawURLEncoding.Strict().DecodeString(header)
+	parser := jwt.NewParser(
+		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithStrictDecoding(),
+		jwt.WithoutClaimsValidation(), // Apply LiveMedia's claim checks after signature verification.
+	)
+	var claims jwtClaims
+	_, err := parser.ParseWithClaims(token, &claims, func(_ *jwt.Token) (any, error) {
+		if claims.Sub < 1 {
+			return nil, ErrTokenInvalid
+		}
+		return s.signingKey(claims.Sub), nil
+	})
 	if err != nil {
-		return TokenClaims{}, ErrTokenInvalid
-	}
-	var metadata struct {
-		Algorithm string `json:"alg"`
-	}
-	if err := json.Unmarshal(headerJSON, &metadata); err != nil || metadata.Algorithm != "HS256" {
-		return TokenClaims{}, ErrTokenInvalid
-	}
-	payloadJSON, err := base64.RawURLEncoding.Strict().DecodeString(payload)
-	if err != nil {
-		return TokenClaims{}, ErrTokenInvalid
-	}
-	var claims TokenClaims
-	if err := json.Unmarshal(payloadJSON, &claims); err != nil || claims.Sub < 1 {
-		return TokenClaims{}, ErrTokenInvalid
-	}
-	actual, err := base64.RawURLEncoding.Strict().DecodeString(signature)
-	if err != nil || !hmac.Equal(actual, s.signature(header+"."+payload, claims.Sub)) {
 		return TokenClaims{}, ErrTokenInvalid
 	}
 	if claims.Typ != expectedType {
@@ -142,15 +144,13 @@ func (s *JWTService) verify(token, expectedType string) (TokenClaims, error) {
 	if s.now().Unix() >= claims.Exp {
 		return TokenClaims{}, ErrTokenExpired
 	}
-	return claims, nil
+	return TokenClaims(claims), nil
 }
 
-func (s *JWTService) signature(message string, userID int64) []byte {
+func (s *JWTService) signingKey(userID int64) []byte {
 	// LiveMedia uses the lowercase ASCII hex digest as its HS256 key.
 	digest := md5.Sum([]byte(s.secret + ":" + strconv.FormatInt(userID, 10)))
 	var key [2 * md5.Size]byte
 	hex.Encode(key[:], digest[:])
-	mac := hmac.New(sha256.New, key[:])
-	mac.Write([]byte(message))
-	return mac.Sum(nil)
+	return key[:]
 }
