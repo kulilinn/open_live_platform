@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -121,7 +122,7 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 		"groupRoom": p.GroupRoom, "level": 0, "exp": 0, "maxExp": 0,
 		"trans": user.TranslationEnabled, "transLang": user.TranslationLanguage, "limitTy": m.Type, "limitAllow": !m.ActiveAt(time.Now()),
 		"limitTotal": m.Total, "limitTime": m.Until, "limitReason": m.Reasons(),
-		"teacherLabel": "",
+		"teacherLabel": s.teacherLabel(r.Context(), p.GroupRoom),
 	}
 	if isMe {
 		data["verified"], data["banner"], data["nsfw"], data["userType"] = p.Verified, p.Banner, p.NSFW, p.UserType
@@ -131,4 +132,16 @@ func (s server) userProfile(w http.ResponseWriter, r *http.Request, currentID in
 		data["equipped_adorn"] = view.Equipped
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": data})
+}
+
+func (s server) teacherLabel(ctx context.Context, groupRoom string) string {
+	id, err := strconv.ParseInt(groupRoom, 10, 64)
+	if err != nil || id <= 0 || s.rooms == nil {
+		return ""
+	}
+	room, err := s.rooms.Info(ctx, id)
+	if err != nil {
+		return ""
+	}
+	return room.TeacherLabel
 }

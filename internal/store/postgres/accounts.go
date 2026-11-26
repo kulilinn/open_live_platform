@@ -36,8 +36,8 @@ func (s *Store) SignUp(ctx context.Context, email, password, account string) (au
 	err = tx.QueryRow(ctx, `
 		INSERT INTO users (email, account, password_salt, password_hash)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, email, account, language`, email, account, salt, key).
-		Scan(&user.ID, &user.Email, &user.Account, &user.Language)
+		RETURNING id, email, account, language, profile`, email, account, salt, key).
+		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.Profile)
 	if isUniqueViolation(err) {
 		return auth.Session{}, auth.ErrEmailInUse
 	}
@@ -91,9 +91,9 @@ func (s *Store) VerifyPassword(ctx context.Context, email, password string) (aut
 	var user auth.User
 	var salt, storedKey []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.email, u.account, u.language, u.password_salt, u.password_hash, `+accountModerationColumns+`
+		SELECT u.id, u.email, u.account, u.language, u.profile, u.password_salt, u.password_hash, `+accountModerationColumns+`
 		FROM users u`+accountModerationJoin+`WHERE u.email=$1`, auth.NormalizeEmail(email)).
-		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &salt, &storedKey, &user.Moderation.Type, &user.Moderation.Until, &user.Moderation.Total, &user.Moderation.Reason)
+		Scan(&user.ID, &user.Email, &user.Account, &user.Language, &user.Profile, &salt, &storedKey, &user.Moderation.Type, &user.Moderation.Until, &user.Moderation.Total, &user.Moderation.Reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.User{}, auth.ErrInvalidCredentials
 	}

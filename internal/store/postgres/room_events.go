@@ -86,7 +86,7 @@ func (s *Store) notifyRoomChange(r *roomChange) error {
 	case "room_status":
 		signal.CreatedAt = r.event.CreatedAt
 		signal.RoomStatus = r.event.RoomStatus
-	case "gift":
+	case "gift", "rocket_refuel", "rocket_final":
 		signal.CreatedAt = r.event.CreatedAt
 	case "room_like":
 		signal.CreatedAt = r.event.CreatedAt
@@ -294,6 +294,27 @@ func (s *Store) deliverRoomSignal(ctx context.Context, conn *pgx.Conn, signal ro
 			return err
 		}
 		event.Type, event.Payload, event.CreatedAt = "gift", string(frame), effect.Start
+	case "rocket_refuel":
+		frames, err := rocketRefuelFrames(ctx, conn, signal)
+		if err != nil {
+			return err
+		}
+		event.Type, event.CreatedAt = "gift", signal.CreatedAt
+		for _, frame := range frames {
+			event.Payload = string(frame)
+			stream.publish(event)
+		}
+		return nil
+	case "rocket_final":
+		var payload []byte
+		err := conn.QueryRow(ctx, `SELECT final_result FROM room_gift_effects WHERE room_id=$1 AND order_id=$2`, signal.RoomID, signal.MessageID).Scan(&payload)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		event.Type, event.Payload, event.CreatedAt = "gift", string(payload), signal.CreatedAt
 	}
 	stream.publish(event)
 	return nil

@@ -80,6 +80,12 @@ type Interactions struct {
 	Promotions []Promotion `json:"promotions"`
 	Limits     []Limit     `json:"limits"`
 	Boxes      []Box       `json:"boxes"`
+	QuickGifts []QuickGift `json:"quick_gifts"`
+}
+
+type QuickGift struct {
+	ID      int64 `json:"id,string"`
+	LimitID int64 `json:"limit_id,string"`
 }
 
 type PromotionView struct {

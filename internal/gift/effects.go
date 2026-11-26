@@ -43,6 +43,9 @@ type RoomEffect struct {
 	Ended       time.Time
 	Speed       int32
 	FinalResult []byte
+	MotionAt    time.Time
+	Distance    int64
+	Attenuation int32
 }
 
 type RocketContribution struct {
@@ -54,6 +57,46 @@ type RocketContribution struct {
 
 func (e RoomEffect) Active(now time.Time) bool {
 	return e.Ended.IsZero() && now.Before(e.End)
+}
+
+func (e RoomEffect) Motion(at time.Time) (int32, int64, time.Time) {
+	motionAt := e.MotionAt
+	if motionAt.IsZero() {
+		motionAt = e.Start
+	}
+	at = minTime(at, e.End)
+	seconds := max(0, int64(at.Sub(motionAt)/time.Second))
+	next := motionAt.Add(time.Duration(seconds) * time.Second)
+	speed, loss := int64(e.Speed), int64(e.Attenuation)
+	if loss == 0 {
+		return e.Speed, e.Distance + speed*seconds, next
+	}
+	distance := e.Distance
+	// The source subtracts once per second, resetting to 10 when the next
+	// subtraction would reach zero. Sum whole cycles for long idle periods.
+	steps := min(seconds, max(0, (speed-1)/loss))
+	distance += steps*speed - loss*steps*(steps+1)/2
+	speed -= steps * loss
+	seconds -= steps
+	if seconds == 0 {
+		return int32(speed), distance, next
+	}
+	speed = 10
+	distance += speed
+	seconds--
+	cycle := int64(9)/loss + 1
+	falls := cycle - 1
+	distance += (seconds / cycle) * (cycle*speed - loss*falls*(falls+1)/2)
+	seconds %= cycle
+	distance += seconds*speed - loss*seconds*(seconds+1)/2
+	return int32(speed - seconds*loss), distance, next
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 func (e RoomEffect) HardwareView() map[string]any {

@@ -20,10 +20,10 @@ type dateGiftsAPI struct {
 	dates   *Dates
 	store   date.GiftStore
 	billing *payment.Client
-	catalog []gift.Gift
+	catalog *gift.Catalog
 }
 
-func RegisterDateGiftOrders(mux *http.ServeMux, dates *Dates, billing *payment.Client, catalog []gift.Gift) {
+func RegisterDateGiftOrders(mux *http.ServeMux, dates *Dates, billing *payment.Client, catalog *gift.Catalog) {
 	store, ok := dates.Service.Store.(date.GiftStore)
 	if !ok {
 		return
@@ -71,7 +71,8 @@ func dateGiftResult(w http.ResponseWriter, data any, err error) {
 		writeGiftError(w, http.StatusOK, "4028", err.Error())
 	case errors.Is(err, payment.ErrInsufficientPoints):
 		writeGiftError(w, http.StatusOK, "4027", err.Error())
-	case errors.Is(err, gift.ErrPending), errors.Is(err, gift.ErrOrderConflict), errors.Is(err, gift.ErrUnsupported), errors.Is(err, payment.ErrUnavailable):
+	case errors.Is(err, gift.ErrPending), errors.Is(err, gift.ErrOrderConflict), errors.Is(err, gift.ErrCatalogConflict),
+		errors.Is(err, gift.ErrUnsupported), errors.Is(err, payment.ErrUnavailable):
 		giftOrderResponse(w, gift.Order{}, err)
 	default:
 		dateResponse(w, err, map[string]any{"data": data})
@@ -140,18 +141,16 @@ func (a dateGiftsAPI) give(w http.ResponseWriter, r *http.Request, actor int64) 
 		dateGiftResult(w, nil, err)
 		return
 	}
-	var item *gift.Gift
-	for i := range a.catalog {
-		if a.catalog[i].ID == input.GiftID {
-			item = &a.catalog[i]
-			break
-		}
+	item, found, err := a.catalog.Lookup(ctx, input.GiftID)
+	if err != nil {
+		dateGiftResult(w, nil, err)
+		return
 	}
-	if item == nil {
+	if !found {
 		dateGiftResult(w, nil, gift.ErrOrderNotFound)
 		return
 	}
-	cost, err := date.GiftCost(input, *item)
+	cost, err := date.GiftCost(input, item)
 	if err != nil || cost > 0 && a.billing == nil {
 		if err == nil {
 			err = payment.ErrUnavailable
@@ -184,7 +183,7 @@ func (a dateGiftsAPI) give(w http.ResponseWriter, r *http.Request, actor int64) 
 		}
 	}
 	order, created, err := a.store.ReserveDateGift(ctx, date.GiftOrder{
-		ID: date.NewChannel(), Input: input, Cost: cost, Income: cost, State: state, Item: *item,
+		ID: date.NewChannel(), Input: input, Cost: cost, Income: cost, State: state, Item: item,
 		Key: key, PaymentNo: "date-gift-" + rand.Text(), Sender: giftUser(audience), Receiver: giftUser(anchor),
 	})
 	if err != nil {
@@ -349,7 +348,12 @@ func (a dateGiftsAPI) giftCatalog(ctx context.Context, w http.ResponseWriter, ch
 		}
 	}
 	groups := make([][]gift.Gift, 4)
-	for _, item := range a.catalog {
+	items, err := a.catalog.Items(ctx)
+	if err != nil {
+		dateGiftResult(w, nil, err)
+		return
+	}
+	for _, item := range items {
 		if _, excluded := blocked[item.ID]; excluded {
 			continue
 		}

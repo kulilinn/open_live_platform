@@ -19,6 +19,7 @@ import (
 	"open_live_platform/internal/date"
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/edge"
+	"open_live_platform/internal/etcdlive"
 	"open_live_platform/internal/feed"
 	"open_live_platform/internal/feedback"
 	"open_live_platform/internal/geo"
@@ -27,6 +28,7 @@ import (
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/livebot"
 	"open_live_platform/internal/notice"
+	"open_live_platform/internal/observability"
 	"open_live_platform/internal/payment"
 	"open_live_platform/internal/posts"
 	"open_live_platform/internal/relay"
@@ -40,9 +42,16 @@ import (
 )
 
 type Config struct {
+	Etcd                       etcdlive.Config
+	LubanRoomBots              bool
+	MetricsAddr                string
+	MaintenanceToken           string
+	DemoItemsFile              string
+	AnchorTaskToken            string
 	CORSOrigins                []string
 	RateLimit                  bool
 	RocketLikeSpeedCoefficient float64
+	RocketConfigFile           string
 	Geo                        geo.Config
 	TelegramBotToken           string
 	KYC                        anchor.KYCConfig
@@ -70,6 +79,7 @@ type Config struct {
 	AdminToken                 string
 	AdminAddr                  string
 	MCNAdminAddr               string
+	MCNJoinURL                 string
 	AdminAccountsFile          string
 	EdgeToken                  string
 	RelaySecret                string
@@ -109,6 +119,11 @@ func ConfigFromEnv() Config {
 	postAuditRequired, _ := strconv.ParseBool(os.Getenv("POST_AUDIT_REQUIRED"))
 	testMode, _ := strconv.ParseBool(os.Getenv("TEST_MODE"))
 	return Config{
+		Etcd:                       etcdlive.FromEnv(),
+		LubanRoomBots:              livebot.WantsLuban(),
+		MetricsAddr:                metricsAddress(),
+		MaintenanceToken:           os.Getenv("MAINTENANCE_TOKEN"),
+		DemoItemsFile:              os.Getenv("DEMO_ITEMS_FILE"),
 		CORSOrigins:                strings.FieldsFunc(os.Getenv("CORS_ORIGIN"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }),
 		RateLimit:                  !testMode,
 		Geo:                        geo.FromEnv(),
@@ -120,11 +135,13 @@ func ConfigFromEnv() Config {
 		PreloginEnd:                os.Getenv("PRELOGIN_END"),
 		WebPush:                    httpapi.WebPushConfig{Host: os.Getenv("LOVEROSE_PUSH_HOST"), KeyPath: os.Getenv("LOVEROSE_PUSH_KEY_PATH"), SubPath: os.Getenv("LOVEROSE_PUSH_SUB_PATH")},
 		PostAuditURL:               os.Getenv("POST_AUDIT_URL"),
+		AnchorTaskToken:            os.Getenv("ANCHOR_TASK_TOKEN"),
 		PostAuditToken:             os.Getenv("POST_AUDIT_TOKEN"),
 		PostAuditRequired:          postAuditRequired,
 		PostReviewToken:            os.Getenv("POST_REVIEW_TOKEN"),
 		RoomBots:                   bots,
 		RocketLikeSpeedCoefficient: rocketSpeed,
+		RocketConfigFile:           os.Getenv("ROCKET_CONFIG_FILE"),
 		roomBotsConfigError:        botConfigErr,
 		FeedbackHook:               os.Getenv("FEEDBACK_HOOK_URL"),
 		Collectibles:               collectible.ConfigFromEnv(),
@@ -138,6 +155,7 @@ func ConfigFromEnv() Config {
 		AdminToken:                 adminToken,
 		AdminAddr:                  os.Getenv("PLATFORM_ADMIN_ADDR"),
 		MCNAdminAddr:               os.Getenv("PLATFORM_MCN_ADMIN_ADDR"),
+		MCNJoinURL:                 os.Getenv("MCN_STREAMER_JOIN_URL"),
 		AdminAccountsFile:          os.Getenv("ADMIN_ACCOUNTS_FILE"),
 		EdgeToken:                  env("EDGE_TOKEN", adminToken),
 		RelaySecret:                env("RELAY_SECRET", "dev-secret"),
@@ -170,9 +188,12 @@ func ConfigFromEnv() Config {
 }
 
 type App struct {
+	cluster       *appCluster
+	metrics       *observability.Metrics
 	geoDB         *geo.DB
 	push          relay.PushPrivate
 	dates         *httpapi.Dates
+	mcnMailer     admin.MCNMailSender
 	Config        Config
 	Accounts      auth.AccountStore
 	Rooms         live.RoomStore
@@ -188,9 +209,19 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if config.roomBotsConfigError != nil {
 		return nil, fmt.Errorf("live room bots: %w", config.roomBotsConfigError)
 	}
-	if len(config.RoomBots.Accounts) > 0 && config.DatabaseURL == "" {
+	if (len(config.RoomBots.Accounts) > 0 || config.LubanRoomBots) && config.DatabaseURL == "" {
 		return nil, fmt.Errorf("live room bots require DATABASE_URL")
 	}
+	cluster, err := initCluster(ctx, &config)
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			cluster.close()
+		}
+	}()
 	config.GRPCAddr = cmp.Or(config.GRPCAddr, "127.0.0.1:9090")
 	if config.AnchorAwayTimeout <= 0 {
 		config.AnchorAwayTimeout = live.DefaultAnchorAwayTimeout
@@ -207,9 +238,14 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	mcnMailer, _ := mailSender.(admin.MCNMailSender)
 	gifts, err := gift.Load(config.GiftCatalogFile)
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
+	}
+	rocketRules, err := gift.LoadRocketRules(config.RocketConfigFile, gifts)
+	if err != nil {
+		return nil, fmt.Errorf("rocket rewards: %w", err)
 	}
 	interactions, err := gift.LoadInteractions(config.GiftInteractionFile)
 	if err != nil {
@@ -246,10 +282,6 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	passes, err := upload.NewPasses(config.WalletPasses)
-	if err != nil {
-		return nil, err
-	}
 	var principals admin.Principals
 	if config.AdminAddr != "" || config.MCNAdminAddr != "" {
 		if config.DatabaseURL == "" || config.AdminAccountsFile == "" {
@@ -276,6 +308,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	var subscriptions subscription.Store
 	var anchorPosts posts.Store
 	var anchorProfiles anchor.Store
+	var anchorTasks anchor.TaskStore
 	var channelReports anchor.ChannelStore
 	var db *postgres.Store
 	if config.DatabaseURL == "" {
@@ -297,6 +330,10 @@ func New(ctx context.Context, config Config) (*App, error) {
 		var err error
 		db, err = postgres.OpenWithAnchorTimeout(ctx, config.DatabaseURL, config.AnchorAwayTimeout)
 		if err != nil {
+			return nil, err
+		}
+		if err := db.ConfigureRocketRewards(ctx, rocketRules); err != nil {
+			db.Shutdown()
 			return nil, err
 		}
 		if len(config.RoomBots.Accounts) > 0 {
@@ -321,11 +358,22 @@ func New(ctx context.Context, config Config) (*App, error) {
 		subscriptions = db
 		anchorPosts = db
 		anchorProfiles = db
+		anchorTasks = db
 		channelReports = db
 		payments = db
 		collectibleStore = db
 	}
 	collectibles, err := collectible.New(config.Collectibles, collectibleStore)
+	if err != nil {
+		if db != nil {
+			db.Shutdown()
+		}
+		return nil, err
+	}
+	if db != nil && config.WalletPasses.Storage.Bucket != "" {
+		config.WalletPasses.Issued = db
+	}
+	passes, err := upload.NewPasses(config.WalletPasses)
 	if err != nil {
 		if db != nil {
 			db.Shutdown()
@@ -340,7 +388,12 @@ func New(ctx context.Context, config Config) (*App, error) {
 		}
 		return nil, err
 	}
-	backoffice, err := managementServer(config, db, principals, config.AdminAddr, admin.OperationArea, gifts)
+	var giftOverrides gift.Overrides
+	if db != nil {
+		giftOverrides = db
+	}
+	giftCatalog := gift.NewCatalog(gifts, giftOverrides)
+	backoffice, err := managementServer(config, db, principals, config.AdminAddr, admin.OperationArea, giftCatalog)
 	if err != nil {
 		db.Shutdown()
 		return nil, err
@@ -374,7 +427,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	dates := &httpapi.Dates{Accounts: accounts, Service: date.New(dateStore, accounts, subscriptions, billing),
 		Signer: signer, Subtitles: dateSubtitles, Push: push}
 	dates.Register(mux)
-	httpapi.RegisterDateGiftOrders(mux, dates, billing, gifts)
+	httpapi.RegisterDateGiftOrders(mux, dates, billing, giftCatalog)
 	httpapi.RegisterWheel(mux, accounts, rooms, billing)
 	httpapi.RegisterRoomGiftEffects(mux, accounts, rooms, config.RocketLikeSpeedCoefficient)
 
@@ -384,14 +437,15 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterTranslate(mux, accounts, translate.New(config.TextTranslation))
 	httpapi.RegisterGoogle(mux, auth.GoogleLogin{Config: config.Google, Accounts: accounts, Backend: backend, Mail: emailVerification})
 	httpapi.RegisterTelegram(mux, accounts, backend, config.TelegramBotToken)
-	httpapi.RegisterGiftCatalog(mux, accounts, gifts)
-	httpapi.RegisterGiftInteractions(mux, dates, gifts, interactions, billing)
+	httpapi.RegisterGiftCatalog(mux, accounts, giftCatalog)
+	httpapi.RegisterGiftInteractions(mux, dates, giftCatalog, interactions, billing)
 	httpapi.RegisterPoints(mux, accounts, billing)
 	httpapi.RegisterPayment(mux, accounts, payments, paymentProxy, largeOrders)
 	httpapi.RegisterWalletPass(mux, passes)
-	httpapi.RegisterGiftOrders(mux, accounts, rooms, giftOrders, billing, gifts)
+	httpapi.RegisterGiftOrders(mux, accounts, rooms, giftOrders, billing, giftCatalog)
 	httpapi.RegisterEarnings(mux, accounts, rooms, earnings, subscriptions, config.EdgeToken)
 	httpapi.RegisterAnchorProfiles(mux, accounts, rooms, anchorProfiles, subscriptions, collectibles, postReviewer, kyc)
+	httpapi.RegisterAnchorTasks(mux, accounts, rooms, anchorProfiles, anchorTasks, config.AnchorTaskToken)
 	httpapi.RegisterAnchorChannelReports(mux, channelAuth, channelReports)
 	httpapi.RegisterSubscriptions(mux, accounts, rooms, subscriptions, billing, inbox, config.SubscriptionRenewToken)
 	httpapi.RegisterPosts(mux, accounts, rooms, anchorPosts, subscriptions, billing, httpapi.PostOptions{
@@ -408,12 +462,29 @@ func New(ctx context.Context, config Config) (*App, error) {
 	httpapi.RegisterFeedback(mux, accounts, feedbacks, config.Upload, config.FeedbackHook)
 	httpapi.RegisterDirectMessages(mux, accounts, messages, config.DMModerator, push)
 	httpapi.RegisterBotChat(mux, accounts, botMessages, push)
+	if err := registerMaintenance(mux, config, db, rooms, signer); err != nil {
+		if db != nil {
+			db.Shutdown()
+		}
+		geoDB.Close()
+		return nil, err
+	}
 	edge.Register(mux, rooms, notices, config.EdgeToken)
 
+	var metrics *observability.Metrics
+	handler := httpx.BrowserHandler(mux, httpx.BrowserConfig{Origins: config.CORSOrigins, RateLimit: config.RateLimit, TrustedProxies: config.Geo.TrustedProxies})
+	if config.MetricsAddr != "" {
+		metrics = observability.New()
+		handler = metrics.Observe(handler, mux)
+	}
+	opened = true
 	return &App{
+		cluster:       cluster,
+		metrics:       metrics,
 		geoDB:         geoDB,
 		push:          push,
 		dates:         dates,
+		mcnMailer:     mcnMailer,
 		db:            db,
 		Config:        config,
 		Accounts:      accounts,
@@ -424,7 +495,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		Subtitles:     subtitles,
 		Server: &http.Server{
 			Addr:              config.Addr,
-			Handler:           httpx.BrowserHandler(mux, httpx.BrowserConfig{Origins: config.CORSOrigins, RateLimit: config.RateLimit, TrustedProxies: config.Geo.TrustedProxies}),
+			Handler:           handler,
 			ReadTimeout:       config.ReadTimeout,
 			ReadHeaderTimeout: config.ReadHeaderTimeout,
 			WriteTimeout:      config.WriteTimeout,
@@ -433,11 +504,11 @@ func New(ctx context.Context, config Config) (*App, error) {
 	}, nil
 }
 
-func managementServer(config Config, db *postgres.Store, principals admin.Principals, address, area string, catalog []gift.Gift) (*http.Server, error) {
+func managementServer(config Config, db *postgres.Store, principals admin.Principals, address, area string, catalog *gift.Catalog) (*http.Server, error) {
 	if address == "" {
 		return nil, nil
 	}
-	handler, err := admin.BackofficeHandler(area, principals, db, catalog)
+	handler, err := admin.BackofficeHandler(area, principals, db, catalog, admin.BackofficeOptions{MCNJoinURL: config.MCNJoinURL})
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +585,7 @@ func mailCodeTTLFromEnv() time.Duration {
 }
 
 func (a *App) Close() {
+	a.cluster.close()
 	a.geoDB.Close()
 	if a.db != nil {
 		a.db.Shutdown()

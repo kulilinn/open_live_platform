@@ -68,7 +68,7 @@ func roomInfoFields(userID int64, room live.Room, ownerName string, members []in
 		"chatId": roomIDText, "liveId": strconv.FormatInt(room.Session.LiveID, 10), "gifts": room.Gifts, "plan": room.Plan,
 		"offlineInfo": room.OfflineInfo, "limited": limited, "limitedTime": limitedTime, "fans": []any{},
 		"area": "", "toyLabel": false, "hotLabel": "0", "systemMessages": []any{},
-		"teacherLabel": "", "ticketLabel": "", "role": role, "silence": muted,
+		"teacherLabel": room.TeacherLabel, "ticketLabel": "", "role": role, "silence": muted,
 		"subLevel": -1, "freePlanId": "0", "toyInfo": "{}",
 		"trans": room.TranslationEnabled, "transLang": room.TranslationLanguage, "promptOpen": nil,
 		"searchName": ownerName, "isLock": room.IsLock,

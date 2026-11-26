@@ -165,7 +165,8 @@ func (s *Store) EditAnchorSocial(ctx context.Context, id int64, social anchor.So
 }
 
 const anchorReviewColumns = `a.user_id,u.account,COALESCE(u.email,u.legacy_profile_email,''),COALESCE(u.profile->>'Photo',''),
-	COALESCE(a.details->>'Country',''),a.state,a.kyc_status,` + backofficeAccountStatus + `,COALESCE(a.details->>'Label',''),
+	COALESCE(a.details->>'Country',''),a.state,a.kyc_status,` + backofficeAccountStatus + `,
+	COALESCE((SELECT teacher_label FROM rooms WHERE id=a.user_id),''),
 	a.reason,a.created_at,(SELECT count(DISTINCT fan_id) FROM subscription_members m WHERE m.anchor_id=a.user_id
 		AND m.expires_at>statement_timestamp()),COALESCE((SELECT sum(income) FROM gift_orders WHERE receiver_id=a.user_id AND state=1),0)
 		+COALESCE((SELECT sum(points) FROM legacy_settlements WHERE anchor_id=a.user_id),0)`
@@ -206,12 +207,7 @@ func (s *Store) ReviewAnchor(ctx context.Context, actor admin.Principal, path st
 		profile.GroupRoom = ""
 		if profile.IsAnchor {
 			profile.GroupRoom = strconv.FormatInt(id, 10)
-			if err := ensureFreePlan(ctx, tx, id); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `INSERT INTO subscription_plans(anchor_id,plan_type,price)
-				SELECT $1,3,$2 WHERE NOT EXISTS(SELECT 1 FROM subscription_plans WHERE anchor_id=$1 AND plan_type=3 AND NOT deleted)`,
-				id, price); err != nil {
+			if err := ensureAnchorPlans(ctx, tx, id, price); err != nil {
 				return err
 			}
 		}
@@ -230,4 +226,20 @@ func (s *Store) ReviewAnchor(ctx context.Context, actor admin.Principal, path st
 		return err
 	})
 	return result, err
+}
+
+func (s *Store) EditTeacherLabel(ctx context.Context, actor admin.Principal, path string, id int64, label string) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE rooms SET teacher_label=$2 WHERE id=$1 AND owner_id=$1`, id, label)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return admin.ErrBackofficeNotFound
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO backoffice_logs(area,tenant,operator_id,operator_name,path,target,action,reason)
+			VALUES($1,$2,$3,$4,$5,$6,'anchor_teacher_label',$7)`, actor.Area, actor.Scope(), actor.ID, actor.Name(), path,
+			strconv.FormatInt(id, 10), label)
+		return err
+	})
 }

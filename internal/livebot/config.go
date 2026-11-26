@@ -22,14 +22,20 @@ type Script struct {
 }
 
 type Config struct {
-	Accounts            []Account         `json:"accounts"`
-	Scripts             map[string]Script `json:"scripts"`
-	RoomPopulation      int               `json:"room_population"`
-	EntrySeconds        int               `json:"entry_seconds"`
-	StaySeconds         int               `json:"stay_seconds"`
-	WelcomeDelaySeconds int               `json:"welcome_delay_seconds"`
-	GiftDelaySeconds    int               `json:"gift_delay_seconds"`
-	MinimumGiftPoints   int64             `json:"-"`
+	Accounts                               []Account         `json:"accounts"`
+	Scripts                                map[string]Script `json:"scripts"`
+	RoomPopulation                         int               `json:"room_population"`
+	EntrySeconds                           int               `json:"entry_seconds"`
+	StaySeconds                            int               `json:"stay_seconds"`
+	WelcomeDelaySeconds                    int               `json:"welcome_delay_seconds"`
+	GiftDelaySeconds                       int               `json:"gift_delay_seconds"`
+	MinimumGiftPoints                      int64             `json:"-"`
+	population, entry, stay, welcome, gift []weightedValue
+}
+
+func WantsLuban() bool {
+	_, enabled := os.LookupEnv("USE_LIVEROOM_BOT")
+	return enabled && os.Getenv("LIVEROOM_BOT_FILE") == "" && os.Getenv("ETCD_CONFIG_PREFIX") != ""
 }
 
 func LoadFromEnv() (Config, error) {
@@ -37,28 +43,37 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, nil
 	}
 	file := os.Getenv("LIVEROOM_BOT_FILE")
+	cfg, err := defaults()
+	if err != nil {
+		return Config{}, err
+	}
 	if file == "" {
+		if WantsLuban() {
+			return cfg, nil
+		}
 		return Config{}, fmt.Errorf("USE_LIVEROOM_BOT requires LIVEROOM_BOT_FILE")
 	}
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{
-		RoomPopulation: 20, EntrySeconds: 30, StaySeconds: 600,
-		WelcomeDelaySeconds: 180, GiftDelaySeconds: 1, MinimumGiftPoints: 100,
-	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return Config{}, err
 	}
+	if len(cfg.Accounts) == 0 {
+		return Config{}, fmt.Errorf("live room bots require at least one account")
+	}
+	return cfg, nil
+}
+
+func defaults() (Config, error) {
+	cfg := Config{RoomPopulation: 20, EntrySeconds: 30, StaySeconds: 600, WelcomeDelaySeconds: 180, GiftDelaySeconds: 1, MinimumGiftPoints: 100}
 	if value, supplied := os.LookupEnv("BOT_GIFT_PRICE"); supplied {
-		cfg.MinimumGiftPoints, err = strconv.ParseInt(value, 10, 64)
+		points, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
 			return Config{}, fmt.Errorf("invalid BOT_GIFT_PRICE: %w", err)
 		}
-	}
-	if len(cfg.Accounts) == 0 {
-		return Config{}, fmt.Errorf("live room bots require at least one account")
+		cfg.MinimumGiftPoints = points
 	}
 	return cfg, nil
 }
@@ -109,7 +124,9 @@ func (c Config) Reply(accountID int64, giftType *int8) (string, time.Duration) {
 		script := c.Scripts[locale]
 		lines, delay := script.Welcome, c.WelcomeDelaySeconds
 		if giftType != nil {
-			lines, delay = script.Gifts[*giftType], c.GiftDelaySeconds
+			lines, delay = script.Gifts[*giftType], pickWeighted(c.gift, c.GiftDelaySeconds, rand.Uint64())
+		} else {
+			delay = pickWeighted(c.welcome, delay, rand.Uint64())
 		}
 		if len(lines) > 0 {
 			return lines[rand.IntN(len(lines))], time.Duration(delay) * time.Second

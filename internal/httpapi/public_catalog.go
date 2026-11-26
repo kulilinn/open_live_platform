@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"open_live_platform/internal/catalog"
@@ -113,7 +114,7 @@ func RegisterPublicCatalog(mux *http.ServeMux, store catalog.Store) {
 	question := func(v catalog.Row) map[string]any {
 		return map[string]any{"id": string(v["id"]), "isHot": v.Int("is_hot") != 0, "question": v["question"]}
 	}
-	mux.HandleFunc("GET /api/help/{action}", func(w http.ResponseWriter, r *http.Request) {
+	help := func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		lang := q.Get("language")
 		if lang == "" {
@@ -128,7 +129,7 @@ func RegisterPublicCatalog(mux *http.ServeMux, store catalog.Store) {
 			return v, err == nil
 		}
 		classes := []catalog.Row{}
-		action := r.PathValue("action")
+		action := strings.TrimPrefix(r.URL.Path, "/api/help/")
 		if action != "hotquestionlist" {
 			rows, ok := read(w, r, "classify")
 			if !ok {
@@ -236,5 +237,8 @@ func RegisterPublicCatalog(mux *http.ServeMux, store catalog.Store) {
 		default:
 			http.NotFound(w, r)
 		}
-	})
+	}
+	for _, action := range []string{"classifylist", "classifydetail", "hotquestionlist", "getanswer"} {
+		mux.HandleFunc("GET /api/help/"+action, help)
+	}
 }

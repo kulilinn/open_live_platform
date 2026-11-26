@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/transport/httpx"
@@ -45,6 +46,17 @@ type AnchorReviewRow struct {
 type AnchorReviewStore interface {
 	BackofficeAnchorReviews(context.Context, AnchorReviewQuery) ([]AnchorReviewRow, int64, error)
 	ReviewAnchor(context.Context, Principal, string, int64, int, string, int64) (AnchorReviewRow, error)
+	EditTeacherLabel(context.Context, Principal, string, int64, string) error
+}
+
+func DefaultPayPrice() int64 {
+	price := int64(2990)
+	if raw := os.Getenv("DEFAULT_PAY_PRICE"); raw != "" {
+		if configured, err := strconv.ParseInt(raw, 10, 32); err == nil && configured > 0 {
+			price = configured
+		}
+	}
+	return price
 }
 
 func (b backoffice) registerAnchorReviews(mux *http.ServeMux) {
@@ -52,12 +64,22 @@ func (b backoffice) registerAnchorReviews(mux *http.ServeMux) {
 	if !ok {
 		return
 	}
-	price := int64(2990)
-	if raw := os.Getenv("DEFAULT_PAY_PRICE"); raw != "" {
-		if configured, err := strconv.ParseInt(raw, 10, 32); err == nil && configured > 0 {
-			price = configured
-		}
-	}
+	price := DefaultPayPrice()
+	mux.HandleFunc("POST "+anchorReviewPath+"edit_teacher_label", b.authorized(false, true,
+		func(w http.ResponseWriter, r *http.Request, actor Principal, _ [sha256.Size]byte) {
+			var input struct {
+				ID    int64   `json:"id,string"`
+				Label *string `json:"teacherLabel"`
+			}
+			if !httpx.Decode(w, r, &input) {
+				return
+			}
+			if input.ID <= 0 || input.Label == nil || utf8.RuneCountInString(*input.Label) > 150 {
+				backofficeError(w, http.StatusBadRequest, "400", "Invalid teacher label")
+				return
+			}
+			backofficeReply(w, nil, store.EditTeacherLabel(r.Context(), actor, r.URL.Path, input.ID, *input.Label))
+		}))
 	mux.HandleFunc("POST "+anchorReviewPath+"page", b.authorized(false, true,
 		func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
 			var query AnchorReviewQuery

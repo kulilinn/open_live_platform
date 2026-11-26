@@ -17,12 +17,8 @@ import (
 	"open_live_platform/internal/transport/httpx"
 )
 
-func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, store gift.OrderStore, billing *payment.Client, catalog []gift.Gift) {
+func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, store gift.OrderStore, billing *payment.Client, catalog *gift.Catalog) {
 	s := server{accounts: accounts, rooms: rooms}
-	items := make(map[int64]gift.Gift, len(catalog))
-	for _, item := range catalog {
-		items[item.ID] = item
-	}
 	_, effectsAvailable := store.(gift.RoomEffectsStore)
 	give := func(rocketOnly bool) http.HandlerFunc {
 		return s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {
@@ -62,12 +58,17 @@ func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms li
 				giftOrderResponse(w, gift.Order{}, err)
 				return
 			}
-			item, exists := items[input.GiftID]
+			item, exists, err := catalog.Lookup(r.Context(), input.GiftID)
+			if err != nil {
+				giftOrderResponse(w, gift.Order{}, err)
+				return
+			}
 			if !exists {
 				writeGiftError(w, http.StatusOK, "4005", "gift:"+strconv.FormatInt(input.GiftID, 10)+" not found")
 				return
 			}
-			if (rocketOnly && item.EffectControlType != gift.RocketEffect) || (item.QueuesEffect() && !effectsAvailable) {
+			if (rocketOnly && item.EffectControlType != gift.RocketEffect) ||
+				((item.QueuesEffect() || item.EffectControlType == gift.RefuelingEffect) && !effectsAvailable) {
 				giftOrderResponse(w, gift.Order{}, gift.ErrUnsupported)
 				return
 			}
@@ -279,10 +280,14 @@ func giftOrderResponse(w http.ResponseWriter, order gift.Order, err error) {
 		writeGiftError(w, http.StatusForbidden, "403", "Operation not allowed")
 	case errors.Is(err, live.ErrRoomClosed):
 		writeGiftError(w, http.StatusConflict, "409", "broadcast is no longer active")
-	case errors.Is(err, gift.ErrOrderConflict):
+	case errors.Is(err, gift.ErrOrderConflict), errors.Is(err, gift.ErrCatalogConflict):
 		writeGiftError(w, http.StatusConflict, "409", err.Error())
 	case errors.Is(err, gift.ErrEffectBusy):
 		writeGiftError(w, http.StatusConflict, "409", err.Error())
+	case errors.Is(err, gift.ErrRocketUnavailable):
+		writeGiftError(w, http.StatusServiceUnavailable, "503", err.Error())
+	case errors.Is(err, gift.ErrCannotRefuel):
+		writeGiftError(w, http.StatusOK, "4086", err.Error())
 	case errors.Is(err, gift.ErrUnsupported):
 		writeGiftError(w, http.StatusUnprocessableEntity, "422", err.Error())
 	case errors.Is(err, gift.ErrPending):

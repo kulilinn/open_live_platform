@@ -35,11 +35,16 @@ type PurchaseRow struct {
 	Created   time.Time `json:"createTime"`
 }
 
-func (b backoffice) registerCatalogAndFinance(mux *http.ServeMux, catalog []gift.Gift) {
+func (b backoffice) registerCatalogAndFinance(mux *http.ServeMux, catalog *gift.Catalog) {
 	const base = "POST /api/operation/gifts/gift/"
-	mux.HandleFunc(base+"list", b.authorized(false, true, func(w http.ResponseWriter, _ *http.Request, _ Principal, _ [sha256.Size]byte) {
-		list := make([]map[string]string, 0, len(catalog))
-		for _, item := range catalog {
+	mux.HandleFunc(base+"list", b.authorized(false, true, func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
+		items, err := catalog.Items(r.Context())
+		if err != nil {
+			backofficeReply(w, nil, err)
+			return
+		}
+		list := make([]map[string]string, 0, len(items))
+		for _, item := range items {
 			list = append(list, map[string]string{"id": strconv.FormatInt(item.ID, 10), "name": item.Name})
 		}
 		backofficeReply(w, list, nil)
@@ -54,8 +59,13 @@ func (b backoffice) registerCatalogAndFinance(mux *http.ServeMux, catalog []gift
 		if !httpx.Decode(w, r, &query) {
 			return
 		}
+		items, err := catalog.Items(r.Context())
+		if err != nil {
+			backofficeReply(w, nil, err)
+			return
+		}
 		matched := make([]map[string]any, 0)
-		for _, item := range catalog {
+		for _, item := range items {
 			if (query.ID != nil && item.ID != *query.ID) || (query.Type != nil && item.GiftType != *query.Type) ||
 				(query.Name != nil && item.Name != *query.Name) {
 				continue

@@ -140,6 +140,7 @@ type backoffice struct {
 	store      BackofficeStore
 	area       string
 	principals Principals
+	options    BackofficeOptions
 }
 
 type tokens struct {
@@ -157,11 +158,14 @@ func newBackofficeSession(p Principal) (BackofficeSession, tokens) {
 		AccessExpires: now.Add(AccessTTL), RefreshExpires: now.Add(RefreshTTL)}, t
 }
 
-func BackofficeHandler(area string, principals Principals, store BackofficeStore, catalog []gift.Gift) (http.Handler, error) {
+func BackofficeHandler(area string, principals Principals, store BackofficeStore, catalog *gift.Catalog, options ...BackofficeOptions) (http.Handler, error) {
 	if !slices.ContainsFunc(principals, func(p Principal) bool { return p.Area == area && !p.Disabled }) {
 		return nil, fmt.Errorf("no active %s principals in the configured credential file", area)
 	}
-	b := backoffice{store, area, principals}
+	b := backoffice{store: store, area: area, principals: principals}
+	if len(options) > 0 {
+		b.options = options[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthchecker", func(w http.ResponseWriter, _ *http.Request) { backofficeReply(w, nil, nil) })
 	login, logout := "POST /api/auth/accountlogin", "POST /api/auth/logout"
@@ -181,11 +185,18 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		}
 	}))
 	if area == MCNArea {
+		if err := validateMCNInviteURL(b.options.MCNJoinURL); err != nil {
+			return nil, err
+		}
 		b.registerMCN(mux)
+		b.registerMCNOnboarding(mux)
 	} else {
 		b.registerOperations(mux)
+		b.registerUserHistory(mux)
 		b.registerCatalogAndFinance(mux, catalog)
+		b.registerGiftMutations(mux, catalog)
 		b.registerAnchorReviews(mux)
+		b.registerPostReviews(mux)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)

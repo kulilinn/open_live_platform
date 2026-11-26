@@ -85,11 +85,14 @@ type OrderStore interface {
 }
 
 func (g Gift) Cost(quantity int32, limitID int64) (int64, int64, error) {
-	if limitID != 0 || (g.EffectControlType != 0 && !g.QueuesEffect()) || quantity <= 0 ||
-		(g.QueuesEffect() && quantity != 1) || g.Price < 0 || g.Price > math.MaxInt64/int64(quantity) {
+	if limitID != 0 || (g.EffectControlType != 0 && !g.QueuesEffect() && g.EffectControlType != RefuelingEffect) ||
+		quantity <= 0 || g.Price < 0 || g.Price > math.MaxInt64/int64(quantity) {
 		return 0, 0, ErrUnsupported
 	}
 	cost, income := g.Price*int64(quantity), int64(g.IncomeStream)
+	if g.EffectControlType == RefuelingEffect {
+		income = 0 // The awarded gifts each have their own settlement.
+	}
 	if income < 0 || income > cost {
 		return 0, 0, ErrUnsupported
 	}
@@ -123,6 +126,9 @@ func (o Order) BuildResult() (Result, error) {
 	successType := 1
 	if item.EffectControlType == RocketEffect {
 		successType = 4
+	}
+	if item.EffectControlType == RefuelingEffect {
+		return Result{}, nil
 	}
 	success, err := o.payload(successType, o.ID*2, timestamp, map[string]any{
 		"gift_id": item.ID, "gift_name": item.Name, "gift_icon": item.Icon, "gift_type": item.GiftType,

@@ -3,9 +3,11 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/subscription"
 )
@@ -109,6 +111,14 @@ func (s *Store) ConfirmPurchase(ctx context.Context, orderNo string, members dm.
 		if status != 0 || points != charge.TotalPoints {
 			return subscription.ErrPurchaseReview
 		}
+		var joinedPaid bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM subscription_orders o JOIN subscription_plans p ON p.id=o.plan_id
+			WHERE o.fan_id=$1 AND p.anchor_id=$2 AND o.status=1)
+			OR EXISTS(SELECT 1 FROM subscription_members m JOIN subscription_plans p ON p.id=m.plan_id
+			WHERE m.fan_id=$1 AND m.anchor_id=$2 AND p.plan_type>=3 AND m.legacy_id IS NOT NULL AND NOT m.promotion_redeemed)`,
+			fanID, anchorID).Scan(&joinedPaid); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE subscription_orders SET status=1,provider_order_id=$2,provider_order_no=$3,provider_points=$4,
 			provider_bad_debt=$5,confirmed_at=now() WHERE order_no=$1`, orderNo, charge.OrderID, charge.OrderNo, charge.TotalPoints, charge.BadDebtPoints); err != nil {
 			return err
@@ -123,6 +133,11 @@ func (s *Store) ConfirmPurchase(ctx context.Context, orderNo string, members dm.
 				legacy_level=NULL,renewal_authorized=TRUE`,
 			fanID, anchorID, planID, subscription.PaidExpiry(start.UTC())); err != nil {
 			return err
+		}
+		if !joinedPaid {
+			if err := recordAnchorTask(ctx, tx, anchorID, time.Now().UTC(), taskEvent{target: anchor.TaskPaidFan, key: strconv.FormatInt(fanID, 10), count: 1}); err != nil {
+				return err
+			}
 		}
 		return syncSubscriptionDM(ctx, tx, members)
 	})

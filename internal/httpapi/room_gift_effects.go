@@ -150,9 +150,10 @@ func (a roomGiftEffectsAPI) rocket(kind string) userHandler {
 		case "state":
 			if active {
 				encoded, _ := json.Marshal(rank)
+				speed, _, _ := effect.Motion(now)
 				result = map[string]any{
 					"departure_time": effect.Start, "flight_duration": int64(effect.End.Sub(effect.Start) / time.Second),
-					"flight_remaining_time": max(0, effect.End.Unix()-now.Unix()), "vibration_intensity": effect.Speed,
+					"flight_remaining_time": max(0, effect.End.Unix()-now.Unix()), "vibration_intensity": speed,
 					"contribute_rank": string(encoded), "sender_name": effect.Order.Sender.Name, "sender_photo": effect.Order.Sender.Photo,
 					"rocket_end_time": strconv.FormatInt(effect.End.Unix(), 10),
 				}

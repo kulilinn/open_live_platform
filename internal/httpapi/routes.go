@@ -67,7 +67,7 @@ func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms liv
 	mux.HandleFunc("POST /api/auth/signup", s.signUpCompat)
 	mux.HandleFunc("POST /api/auth/signin", s.signInCompat)
 	mux.HandleFunc("GET /api/auth/session", s.sessionCompat)
-	mux.HandleFunc("GET /api/apptoken/{appid}",s.authenticated(s.appToken))
+	mux.HandleFunc("GET /api/apptoken/{appid}", s.authenticated(s.appToken))
 	mux.HandleFunc("POST /api/auth/signout", s.authenticated(s.signOut))
 	mux.HandleFunc("POST /api/auth/changepassword", s.authenticated(s.changePassword))
 	mux.HandleFunc("POST /api/auth/code", s.emailCode)
@@ -76,6 +76,9 @@ func RegisterWithEmail(mux *http.ServeMux, accounts auth.AccountStore, rooms liv
 	mux.HandleFunc("POST /api/auth/exchange_code", s.exchangeCode)
 	mux.HandleFunc("POST /api/auth/exchange_token", s.exchangeToken)
 	mux.HandleFunc("GET /api/user/{user_id}", s.authenticated(s.userProfile))
+	mux.HandleFunc("GET /api/user/platform_info", s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {
+		httpx.JSON(w, 200, map[string]any{"status": "200", "data": map[string]int{"pt": 0}})
+	}))
 	mux.HandleFunc("POST /api/user/set_language", s.authenticated(s.setLanguage))
 	mux.HandleFunc("POST /api/user/set_info", s.authenticated(s.setUserInfo))
 	mux.HandleFunc("POST /api/user/check_user_status", s.authenticated(s.checkUserStatus))

@@ -54,10 +54,10 @@ func (s *Store) RoomSettlement(ctx context.Context, liveID, ownerID int64) (live
 	err := s.pool.QueryRow(ctx, `SELECT r.owner_id,
 		(EXTRACT(EPOCH FROM date_trunc('second',COALESCE(b.ended_at,statement_timestamp())))-
 		 EXTRACT(EPOCH FROM date_trunc('second',b.started_at)))::bigint,
-		COALESCE(g.income,0),b.max_audience, COALESCE(f.new_fans,0),COALESCE(g.senders,0),r.banner
+		COALESCE(b.legacy_income,g.income,0),b.max_audience, COALESCE(b.legacy_new_fans,f.new_fans,0),COALESCE(b.legacy_gift_fans,g.senders,0),r.banner
 		FROM room_broadcast_metrics b JOIN rooms r ON b.room_id=r.id
 		LEFT JOIN LATERAL (SELECT SUM(income)::bigint AS income,count(DISTINCT sender_id) AS senders
-			FROM gift_orders WHERE live_id=b.live_id AND state=1 AND room_id=b.room_id) g ON r.owner_id=$2
+			FROM room_gift_income WHERE live_id=b.live_id AND room_id=b.room_id) g ON r.owner_id=$2
 		LEFT JOIN LATERAL (SELECT count(*) AS new_fans FROM
 			(SELECT min(created_at) AS first FROM subscription_members WHERE anchor_id=r.owner_id GROUP BY fan_id) m
 			WHERE m.first>=b.started_at AND m.first<=COALESCE(b.ended_at,statement_timestamp())) f ON r.owner_id=$2

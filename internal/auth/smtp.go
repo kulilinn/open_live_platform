@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,15 @@ func NewSMTPSender(config SMTPConfig) (VerificationSender, error) {
 }
 
 func (s smtpSender) SendVerificationCode(ctx context.Context, address, code string, validity time.Duration) error {
+	return s.SendPlainText(ctx, address, "LiveMedia verification code",
+		fmt.Sprintf("Your verification code is %s. It expires in %d seconds.", code, int(validity.Seconds())))
+}
+
+func (s smtpSender) SendPlainText(ctx context.Context, address, subject, body string) error {
+	address, err := verificationEmail(address)
+	if err != nil || subject == "" || strings.ContainsAny(subject, "\r\n") || len(body) > 65536 {
+		return errors.New("invalid plain text mail")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", s.config.Address)
@@ -73,8 +83,8 @@ func (s smtpSender) SendVerificationCode(ctx context.Context, address, code stri
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(message, "From: %s\r\nTo: %s\r\nSubject: LiveMedia verification code\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYour verification code is %s. It expires in %d seconds.\r\n",
-		s.config.From, address, code, int(validity.Seconds())); err != nil {
+	if _, err := fmt.Fprintf(message, "From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
+		s.config.From, address, subject, body); err != nil {
 		return err
 	}
 	// DATA acceptance is the delivery handoff. Closure of the transport then

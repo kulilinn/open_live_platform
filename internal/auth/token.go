@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	RefreshType = "REFRESH"
-	AccessType  = "ACCESS"
+	RefreshType    = "REFRESH"
+	AccessType     = "ACCESS"
+	WalletPassType = "PASS"
 
 	refreshTTL = 24 * time.Hour
 	accessTTL  = 30 * time.Minute
@@ -86,6 +87,14 @@ func (s *JWTService) VerifyAccess(token string) (TokenClaims, error) {
 	return s.verify(token, AccessType)
 }
 
+// IssueWalletPass creates the token embedded in the original Wallet pass.
+func (s *JWTService) IssueWalletPass(userID int64, issuer string, ttl time.Duration) (string, TokenClaims, error) {
+	if ttl < time.Second {
+		return "", TokenClaims{}, ErrTokenInvalid
+	}
+	return s.issue(userID, issuer, WalletPassType, "", ttl)
+}
+
 func (s *JWTService) issue(userID int64, issuer, typ, audience string, ttl time.Duration) (string, TokenClaims, error) {
 	if s.secret == "" || userID < 1 {
 		return "", TokenClaims{}, ErrTokenInvalid
@@ -93,7 +102,7 @@ func (s *JWTService) issue(userID int64, issuer, typ, audience string, ttl time.
 	var random [8]byte
 	rand.Read(random[:])
 	jti := int64(binary.BigEndian.Uint64(random[:])&(1<<62-1)) + 1
-	if audience == "" {
+	if audience == "" && typ != WalletPassType {
 		audience = strconv.FormatInt(jti, 10)
 	}
 

@@ -1,0 +1,1 @@
+ALTER TABLE rooms ADD COLUMN teacher_label TEXT NOT NULL DEFAULT '';

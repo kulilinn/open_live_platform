@@ -144,14 +144,7 @@ func (s *Store) deletePostComment(ctx context.Context, actor, id int64, expected
 		if expected != nil && (author != actor || content != *expected || request == "" || manualRequest != request) {
 			return posts.ErrNotFound
 		}
-		tag, err := tx.Exec(ctx, `WITH RECURSIVE branch AS (
-			SELECT id FROM anchor_post_comments WHERE id=$1 AND NOT deleted
-			UNION ALL SELECT c.id FROM anchor_post_comments c JOIN branch b ON c.parent_id=b.id WHERE c.post_id=$2 AND NOT c.deleted
-		) UPDATE anchor_post_comments SET deleted=TRUE WHERE id IN (SELECT id FROM branch)`, id, postID)
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `UPDATE anchor_posts SET comment_count=comment_count-$2 WHERE id=$1`, postID, tag.RowsAffected())
+		err = softDeletePostCommentBranch(ctx, tx, id, postID)
 		if err == nil && expected != nil {
 			err = addPostRejectionNotice(ctx, tx, posts.NoticeCommentRejection, author, "post:comment-rejected:"+strconv.FormatInt(id, 10))
 		}
@@ -159,6 +152,17 @@ func (s *Store) deletePostComment(ctx context.Context, actor, id int64, expected
 	})
 }
 
+func softDeletePostCommentBranch(ctx context.Context, tx pgx.Tx, id, postID int64) error {
+	tag, err := tx.Exec(ctx, `WITH RECURSIVE branch AS (
+			SELECT id FROM anchor_post_comments WHERE id=$1 AND post_id=$2 AND NOT deleted
+			UNION ALL SELECT c.id FROM anchor_post_comments c JOIN branch b ON c.parent_id=b.id WHERE c.post_id=$2 AND NOT c.deleted
+		) UPDATE anchor_post_comments SET deleted=TRUE WHERE id IN (SELECT id FROM branch)`, id, postID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE anchor_posts SET comment_count=comment_count-$2 WHERE id=$1`, postID, tag.RowsAffected())
+	return err
+}
 func (s *Store) LikePost(ctx context.Context, actor, id int64, liked bool) (int64, error) {
 	var count int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {

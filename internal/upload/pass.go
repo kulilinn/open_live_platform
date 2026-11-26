@@ -26,12 +26,32 @@ var ErrPassNotFound = errors.New("wallet pass not found")
 type PassConfig struct {
 	IndexFile, AppName string
 	Storage            Config
+	Issued             PassLookup
 }
 
 type Passes struct {
 	index   map[string]passRecord
 	storage Config
 	client  *http.Client
+	issued  PassLookup
+}
+
+type PassLookup interface {
+	FindIssuedPass(context.Context, int64) (PassIssue, error)
+}
+
+type PassIssue struct {
+	ID, UserID                          int64
+	IssuedAt, ExpiresAt, TokenExpiresAt time.Time
+}
+
+func (p PassIssue) Object() string {
+	return fmt.Sprintf("/passes/%d/%d.pkpass", p.UserID, p.ID)
+}
+
+type PassIssuerStore interface {
+	ReserveIssuedPass(context.Context, PassIssue) (bool, error)
+	PublishIssuedPass(context.Context, int64) error
 }
 
 type passRecord struct {
@@ -41,21 +61,24 @@ type passRecord struct {
 }
 
 func NewPasses(config PassConfig) (*Passes, error) {
-	if config.IndexFile == "" {
+	if config.IndexFile == "" && config.Issued == nil {
 		return nil, nil
 	}
 	if !config.Storage.Ready() {
 		return nil, errors.New("wallet pass index requires AWS_PASSES_S3_BUCKET and S3 credentials")
+	}
+	passes := &Passes{index: make(map[string]passRecord), storage: config.Storage, issued: config.Issued, client: &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+	if config.IndexFile == "" {
+		return passes, nil
 	}
 	index, err := os.Open(config.IndexFile)
 	if err != nil {
 		return nil, err
 	}
 	defer index.Close()
-	passes := &Passes{index: make(map[string]passRecord), storage: config.Storage, client: &http.Client{
-		Timeout:       10 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
 	suffix := "|pkpass|" + cmp.Or(config.AppName, "unknown")
 	scanner := bufio.NewScanner(index)
 	for line := 1; scanner.Scan(); line++ {
@@ -97,6 +120,20 @@ func (p *Passes) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, ErrPassNotFound
 	}
 	record, found := p.index[key]
+	if !found && p.issued != nil {
+		id, err := strconv.ParseInt(key, 10, 64)
+		if err != nil || id < 1 || strconv.FormatInt(id, 10) != key {
+			return nil, ErrPassNotFound
+		}
+		issue, err := p.issued.FindIssuedPass(ctx, id)
+		switch {
+		case err == nil:
+			record, found = passRecord{Object: issue.Object(), ExpiresAt: issue.ExpiresAt}, true
+		case errors.Is(err, ErrPassNotFound):
+		default:
+			return nil, err
+		}
+	}
 	if !found || !time.Now().Before(record.ExpiresAt) {
 		return nil, ErrPassNotFound
 	}

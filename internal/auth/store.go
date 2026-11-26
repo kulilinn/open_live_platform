@@ -35,6 +35,13 @@ type Session struct {
 	User  User   `json:"user"`
 }
 
+type ProvisionUser struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	DisplayName string `json:"displayName"`
+	IsAnchor    bool   `json:"isAnchor"`
+}
+
 type AccountStore interface {
 	SignUp(ctx context.Context, email, password, account string) (Session, error)
 	SignIn(ctx context.Context, email, password string) (Session, error)

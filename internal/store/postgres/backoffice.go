@@ -242,7 +242,7 @@ func (s *Store) ApplyBackofficeAction(ctx context.Context, actor admin.Principal
 }
 
 func (s *Store) BackofficeStreamers(ctx context.Context, p admin.Principal, query admin.StreamerQuery) ([]admin.StreamerRow, int64, error) {
-	const relation = `FROM backoffice_mcn_streamers WHERE mcn_id=$1 AND ($2::bigint IS NULL OR manager_id=$2)
+	const relation = `FROM backoffice_mcn_streamers WHERE mcn_id=$1 AND NOT superseded AND ($2::bigint IS NULL OR manager_id=$2)
 		AND ($3::text IS NULL OR strpos(lower(name),lower($3))>0) AND ($4::text IS NULL OR strpos(lower(email),lower($4))>0)
 		AND ($5::smallint[] IS NULL OR status=ANY($5)) AND ($6::text IS NULL OR (create_time AT TIME ZONE 'UTC')::date=$6::text::date)`
 	const columns = `id,streamer_id,manager_id,email,name,manager_name,ratio::text,manager_ratio::text,agency_ratio::text,fan_num,status,create_time`

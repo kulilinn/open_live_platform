@@ -57,6 +57,9 @@ func (s *Store) ReserveDateGift(ctx context.Context, candidate date.GiftOrder) (
 		if blocked {
 			return gift.ErrBlocked
 		}
+		if err := verifyGiftCatalogQuote(ctx, tx, candidate.Item); err != nil {
+			return err
+		}
 		if candidate.State == date.GiftWaiting {
 			var waiting bool
 			err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM date_gift_orders WHERE channel=$1 AND state=3)`, session.Channel).Scan(&waiting)
@@ -145,6 +148,12 @@ func (s *Store) FinishDateGift(ctx context.Context, candidate date.GiftOrder, re
 			order.ID, order.State, order, providerID, paidAt)
 		if err != nil {
 			return err
+		}
+		if providerID != nil {
+			if err := recordAnchorTaskGift(ctx, tx, order.Input.Receiver, order.Input.Sender,
+				"date:"+order.PaymentNo, order.Item.EffectControlType == gift.RocketEffect, order.PaidAt); err != nil {
+				return err
+			}
 		}
 		changed = true
 		if order.State != date.GiftPaid || order.Item.GiftType != 2 {

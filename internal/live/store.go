@@ -52,6 +52,7 @@ type Room struct {
 	ModerationUntil     int64       `json:"-"`
 	ModerationTotal     int64       `json:"-"`
 	ModerationReason    string      `json:"-"`
+	TeacherLabel        string      `json:"-"`
 }
 
 type JoinedRoom struct {

@@ -10,11 +10,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"open_live_platform/internal/auth"
+	"open_live_platform/internal/gift"
 	"open_live_platform/internal/live"
 )
 
 type Store struct {
-	bots                *roomBots
+	rocketRules         *gift.RocketRules
+	bots                atomic.Pointer[roomBots]
 	pool                *pgxpool.Pool
 	anchorAwayTimeout   time.Duration
 	eventChannel        string
@@ -124,7 +126,7 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1::bigint)", id); err != nil {
 			return err
 		}
-		r = roomChange{ctx: ctx, tx: tx, id: id, bots: s.bots}
+		r = roomChange{ctx: ctx, tx: tx, id: id, bots: s.bots.Load(), rocketRules: s.rocketRules}
 		if err := r.checkCommandScope(); err != nil {
 			return err
 		}
@@ -149,6 +151,7 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 }
 
 type roomChange struct {
+	rocketRules       *gift.RocketRules
 	bots              *roomBots
 	ctx               context.Context
 	tx                pgx.Tx

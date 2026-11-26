@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/live"
 )
 
@@ -15,7 +17,7 @@ const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
     (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
     live_id, live_started_at, live_ended_at, trans_lang, anchor_away, anchor_away_until,
     banner, tag, description, offline_info, plan::text, gifts::text, trans_enabled,
-    moderation_until, moderation_total, moderation_reason, live_show`
+    moderation_until, moderation_total, moderation_reason, live_show, teacher_label`
 
 const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
@@ -27,7 +29,7 @@ func scanRoom(row pgx.Row) (live.Room, error) {
 	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
 		&room.Session.LiveID, &startedAt, &endedAt, &room.TranslationLanguage, &room.AnchorAway, &awayUntil,
 		&room.Banner, &room.Tag, &room.Description, &room.OfflineInfo, &room.Plan, &room.Gifts, &room.TranslationEnabled,
-		&room.ModerationUntil, &room.ModerationTotal, &room.ModerationReason, &room.LiveShow)
+		&room.ModerationUntil, &room.ModerationTotal, &room.ModerationReason, &room.LiveShow, &room.TeacherLabel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
 	}
@@ -269,6 +271,12 @@ func (r *roomChange) close(actor int64) error {
 	}
 	if _, err := r.tx.Exec(r.ctx, `UPDATE room_broadcast_metrics SET ended_at=$2 WHERE live_id=$1`, room.Session.LiveID, endedAt); err != nil {
 		return err
+	}
+	minutes := int64(endedAt.Sub(room.Session.StartedAt) / time.Minute)
+	if room.Session.LiveID > 0 && !room.Session.StartedAt.IsZero() && minutes > 0 {
+		if err := recordAnchorTask(r.ctx, r.tx, actor, endedAt, taskEvent{target: anchor.TaskLiveMinutes, key: strconv.FormatInt(room.Session.LiveID, 10), count: minutes}); err != nil {
+			return err
+		}
 	}
 	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_members WHERE room_id=$1", r.id); err != nil {
 		return err

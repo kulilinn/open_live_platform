@@ -40,6 +40,7 @@ type Gift struct {
 	AnnouncementOne        *string `json:"announcement1"`
 	AnnouncementTwo        *string `json:"announcement2"`
 	AnnouncementThree      *string `json:"announcement3"`
+	BroadcastConfigID      *int64  `json:"broadcastConfigId,string,omitempty"`
 }
 
 // Load reads the active catalog. An unset path represents an empty catalog.

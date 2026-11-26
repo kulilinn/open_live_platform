@@ -176,11 +176,18 @@ func TestPostgresAnchorOnboarding(t *testing.T) {
 	post(ops, adminAPI+"pass", readonly, reviewRequest, 403, "403")
 	post(ops, adminAPI+"pass", operator, reviewRequest, 200, "200")
 	post(ops, adminAPI+"pass", operator, reviewRequest, 200, "200")
+	if _, err := platform.Rooms.Start(ctx, alice.User.ID, "Anchor room", ""); err != nil {
+		t.Fatal(err)
+	}
+	label := fmt.Sprintf(`{"id":%q,"teacherLabel":"Featured creator"}`, id)
+	post(ops, adminAPI+"edit_teacher_label", readonly, label, 403, "403")
+	post(ops, adminAPI+"edit_teacher_label", operator, label, 200, "200")
 	if raw := post(public, api+"is_anchor", alice.Token, "", 200, "200").Result; !strings.Contains(string(raw), `"is_anchor":true`) {
 		t.Fatalf("approved status = %s", raw)
 	}
 	if result := post(public, api+"get_info", bob.Token, profileRequest, 200, "200").Result; strings.Contains(string(result), "Hidden") ||
-		strings.Contains(string(result), "Private") || !strings.Contains(string(result), `"country":"JP"`) {
+		strings.Contains(string(result), "Private") || !strings.Contains(string(result), `"country":"JP"`) ||
+		!strings.Contains(string(result), `"teacher_label":"Featured creator"`) {
 		t.Fatalf("unsafe profile %s", result)
 	}
 	post(public, api+"set_info", alice.Token, `{"display_name":"Anchor Alice","search_name":"takenname"}`, 200, "4032")

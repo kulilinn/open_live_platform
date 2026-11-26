@@ -70,6 +70,9 @@ func (s *Store) ReserveGift(ctx context.Context, id int64, order gift.Order) (gi
 		if admin {
 			order.SenderRole = 4
 		}
+		if err := verifyGiftCatalogQuote(ctx, change.tx, order.Item); err != nil {
+			return err
+		}
 		result, err = scanGiftOrder(change.tx.QueryRow(ctx, `INSERT INTO gift_orders
 			(room_id,live_id,sender_id,receiver_id,request_key,payment_order,request,item,sender_info,receiver_info,sender_role,cost,income)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -106,6 +109,9 @@ func (s *Store) FinishGift(ctx context.Context, roomID int64, order gift.Order, 
 		if declined {
 			result.State = gift.Declined
 			_, err = change.tx.Exec(ctx, `UPDATE gift_orders SET state=$2 WHERE id=$1`, result.ID, result.State)
+			if err == nil && result.Item.EffectControlType == gift.RefuelingEffect {
+				err = change.releaseRocketRefuel(result.ID)
+			}
 			return err
 		}
 		var providerID *int64
@@ -120,16 +126,38 @@ func (s *Store) FinishGift(ctx context.Context, roomID int64, order gift.Order, 
 		if err != nil {
 			return err
 		}
+		var launch int64
+		switch result.Item.EffectControlType {
+		case gift.RocketEffect:
+			if err := change.settleRocketLaunch(result); err != nil {
+				return err
+			}
+		case gift.RefuelingEffect:
+			launch, err = change.settleRocketRefuel(result)
+			if err != nil {
+				return err
+			}
+		}
 		_, err = change.tx.Exec(ctx, `UPDATE gift_orders SET state=$2,paid_at=$3,provider_order_id=$4,receipt=$5,result=$6 WHERE id=$1`,
 			result.ID, result.State, result.PaidAt, providerID, result.Receipt, result.Result)
 		if err != nil {
 			return err
+		}
+		if providerID != nil {
+			if err := recordAnchorTaskGift(ctx, change.tx, result.Input.ReceiverID, result.Input.SenderID,
+				"live:"+result.PaymentOrder, result.Item.EffectControlType == gift.RocketEffect, result.PaidAt); err != nil {
+				return err
+			}
 		}
 		var online bool
 		if err = change.tx.QueryRow(ctx, `SELECT online AND live_id=$2 FROM rooms WHERE id=$1`, roomID, result.Input.LiveID).Scan(&online); err != nil {
 			return err
 		}
 		if online {
+			if launch > 0 {
+				change.event = live.Event{Type: "rocket_refuel", UserID: result.Input.SenderID, MessageID: result.ID, CreatedAt: result.PaidAt}
+				return nil
+			}
 			if err := change.startGiftEffect(result); err != nil {
 				return err
 			}
@@ -142,8 +170,8 @@ func (s *Store) FinishGift(ctx context.Context, roomID int64, order gift.Order, 
 }
 
 func (s *Store) GiftIncome(ctx context.Context, roomID, liveID int64) ([]gift.Income, error) {
-	rows, err := s.pool.Query(ctx, `SELECT paid_at,(request->>'gift_id')::bigint,item->>'name',item->>'icon',income,sender_info->>'name',sender_id
-		FROM gift_orders WHERE room_id=$1 AND live_id=$2 AND state=1 ORDER BY paid_at DESC,id DESC`, roomID, liveID)
+	rows, err := s.pool.Query(ctx, `SELECT paid_at,gift_id,gift_name,gift_icon,income,sender_name,sender_id
+		FROM room_gift_income WHERE room_id=$1 AND live_id=$2 ORDER BY paid_at DESC,id DESC`, roomID, liveID)
 	if err != nil {
 		return nil, err
 	}
@@ -156,8 +184,8 @@ func (s *Store) GiftIncome(ctx context.Context, roomID, liveID int64) ([]gift.In
 }
 
 func (s *Store) GiftRank(ctx context.Context, anchorID int64, since time.Time) ([]gift.Rank, error) {
-	rows, err := s.pool.Query(ctx, `SELECT sender_id,sum(income)::bigint AS total FROM gift_orders
-		WHERE receiver_id=$1 AND paid_at>$2 AND state=1 AND income>0 GROUP BY sender_id ORDER BY total DESC,sender_id LIMIT 100`, anchorID, since)
+	rows, err := s.pool.Query(ctx, `SELECT sender_id,sum(income)::bigint AS total FROM room_gift_income
+		WHERE receiver_id=$1 AND paid_at>$2 AND income>0 GROUP BY sender_id ORDER BY total DESC,sender_id LIMIT 100`, anchorID, since)
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +198,6 @@ func (s *Store) GiftRank(ctx context.Context, anchorID int64, since time.Time) (
 
 func (s *Store) GiftTotalIncome(ctx context.Context, roomID int64) (*int64, error) {
 	var total *int64
-	err := s.pool.QueryRow(ctx, `SELECT sum(income)::bigint FROM gift_orders WHERE room_id=$1 AND state=1`, roomID).Scan(&total)
+	err := s.pool.QueryRow(ctx, `SELECT sum(income)::bigint FROM room_gift_income WHERE room_id=$1`, roomID).Scan(&total)
 	return total, err
 }

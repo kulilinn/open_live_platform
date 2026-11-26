@@ -79,6 +79,15 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read gift_box: %w", err)
 	}
+	catalog.QuickGifts, err = readRows(ctx, snapshot, `SELECT gift_id,limit_id FROM quick_gift_config
+		WHERE del_flag=0 AND limit_id IS NOT NULL ORDER BY gift_id`, func(r *sql.Rows) (gift.QuickGift, error) {
+		var entry gift.QuickGift
+		err := r.Scan(&entry.ID, &entry.LimitID)
+		return entry, err
+	})
+	if err != nil {
+		return fmt.Errorf("read quick_gift_config: %w", err)
+	}
 	return json.NewEncoder(os.Stdout).Encode(catalog)
 }
 

@@ -35,6 +35,9 @@ func (s *Store) GiftDurationReduction(ctx context.Context, roomID int64) (float6
 }
 
 func (r *roomChange) reserveGiftEffect(order gift.Order) error {
+	if order.Item.EffectControlType == gift.RefuelingEffect {
+		return r.reserveRocketRefuel(order)
+	}
 	if !order.Item.QueuesEffect() {
 		return nil
 	}
@@ -48,6 +51,9 @@ func (r *roomChange) reserveGiftEffect(order gift.Order) error {
 		}
 		if busy {
 			return gift.ErrEffectBusy
+		}
+		if err := r.reserveRocketLaunch(order); err != nil {
+			return err
 		}
 	}
 	_, err := r.tx.Exec(r.ctx, `INSERT INTO room_gift_effects(order_id,room_id,live_id,effect) VALUES($1,$2,$3,$4)`,
@@ -82,19 +88,26 @@ func (r *roomChange) startGiftEffect(order gift.Order) error {
 		}
 		speed = min(speed, 100)
 	}
-	_, err := r.tx.Exec(r.ctx, `UPDATE room_gift_effects SET start_at=$2,end_at=$3,speed=$4 WHERE order_id=$1`, order.ID, start, end, speed)
+	_, err := r.tx.Exec(r.ctx, `UPDATE room_gift_effects SET start_at=$2,end_at=$3,speed=$4,motion_at=$2,
+		attenuation=COALESCE((SELECT attenuation FROM rocket_launch_amounts WHERE order_id=$1),0) WHERE order_id=$1`,
+		order.ID, start, end, speed)
 	return err
 }
 
 func scanRoomEffect(row pgx.CollectableRow) (gift.RoomEffect, error) {
 	var result gift.RoomEffect
 	var ended *time.Time
+	var motion *time.Time
 	var paidAt *time.Time
-	err := row.Scan(&result.Start, &result.End, &ended, &result.Speed, &result.FinalResult, &result.Order.ID, &result.Order.Input, &result.Order.Key,
+	err := row.Scan(&result.Start, &result.End, &ended, &result.Speed, &result.FinalResult, &motion, &result.Distance, &result.Attenuation,
+		&result.Order.ID, &result.Order.Input, &result.Order.Key,
 		&result.Order.PaymentOrder, &result.Order.Item, &result.Order.Sender, &result.Order.Receiver, &result.Order.SenderRole,
 		&result.Order.Cost, &result.Order.Income, &result.Order.State, &paidAt, &result.Order.Receipt, &result.Order.Result)
 	if ended != nil {
 		result.Ended = *ended
+	}
+	if motion != nil {
+		result.MotionAt = *motion
 	}
 	if paidAt != nil {
 		result.Order.PaidAt = paidAt.UTC()
@@ -102,7 +115,8 @@ func scanRoomEffect(row pgx.CollectableRow) (gift.RoomEffect, error) {
 	return result, err
 }
 
-const selectRoomEffects = `SELECT e.start_at,e.end_at,e.ended_at,e.speed,e.final_result,o.id,o.request,o.request_key,o.payment_order,o.item,
+const selectRoomEffects = `SELECT e.start_at,e.end_at,e.ended_at,e.speed,e.final_result,e.motion_at,e.distance,e.attenuation,
+	o.id,o.request,o.request_key,o.payment_order,o.item,
 	o.sender_info,o.receiver_info,o.sender_role,o.cost,o.income,o.state,o.paid_at,o.receipt,o.result
 	FROM room_gift_effects e JOIN gift_orders o ON o.id=e.order_id WHERE e.room_id=$1 AND e.live_id=$2 AND e.start_at IS NOT NULL`
 
@@ -141,7 +155,7 @@ func (s *Store) SweepRoomGiftEffects(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.finishExpiredRockets(ctx)
 }
 
 func (s *Store) RoomHardware(ctx context.Context, roomID, liveID int64) ([]gift.RoomEffect, error) {
@@ -186,7 +200,15 @@ func (s *Store) EndRoomEffect(ctx context.Context, roomID, actor int64, rocket b
 }
 
 func (s *Store) RocketRank(ctx context.Context, orderID int64) ([]gift.RocketContribution, error) {
-	rows, err := s.pool.Query(ctx, `SELECT c.user_id,u.account,COALESCE(u.profile->>'Photo',''),c.score
+	return readRocketRank(ctx, s.pool, orderID)
+}
+
+type rocketRankQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func readRocketRank(ctx context.Context, db rocketRankQueryer, orderID int64) ([]gift.RocketContribution, error) {
+	rows, err := db.Query(ctx, `SELECT c.user_id,u.account,COALESCE(u.profile->>'Photo',''),c.score
 		FROM room_rocket_contributions c JOIN users u ON u.id=c.user_id WHERE c.order_id=$1
 		ORDER BY c.score DESC,c.user_id LIMIT 5`, orderID)
 	if err != nil {
@@ -222,15 +244,18 @@ func (s *Store) IncreaseRocketSpeed(ctx context.Context, roomID, anchor, user in
 			return err
 		}
 		var id int64
-		var speed int32
-		err = r.tx.QueryRow(ctx, `SELECT order_id,speed FROM room_gift_effects WHERE room_id=$1 AND live_id=$2 AND effect=6
-			AND ended_at IS NULL AND end_at>statement_timestamp() ORDER BY start_at DESC LIMIT 1`, roomID, info.Session.LiveID).Scan(&id, &speed)
+		var flight gift.RoomEffect
+		err = r.tx.QueryRow(ctx, `SELECT order_id,speed,start_at,end_at,motion_at,distance,attenuation
+			FROM room_gift_effects WHERE room_id=$1 AND live_id=$2 AND effect=6
+			AND ended_at IS NULL AND end_at>statement_timestamp() ORDER BY start_at DESC LIMIT 1`, roomID, info.Session.LiveID).
+			Scan(&id, &flight.Speed, &flight.Start, &flight.End, &flight.MotionAt, &flight.Distance, &flight.Attenuation)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
+		speed, distance, motionAt := flight.Motion(time.Now())
 		if coefficient <= 0 || speed <= 0 {
 			return nil
 		}
@@ -238,7 +263,8 @@ func (s *Store) IncreaseRocketSpeed(ctx context.Context, roomID, anchor, user in
 		if increase <= 0 {
 			return nil
 		}
-		_, err = r.tx.Exec(ctx, `UPDATE room_gift_effects SET speed=speed+$2 WHERE order_id=$1`, id, increase)
+		_, err = r.tx.Exec(ctx, `UPDATE room_gift_effects SET speed=$2,distance=$3,motion_at=$4 WHERE order_id=$1`,
+			id, speed+increase, distance, motionAt)
 		return err
 	})
 }

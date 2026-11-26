@@ -156,6 +156,9 @@ func claimGiftGameOrder(ctx context.Context, tx pgx.Tx, game *date.GiftGame, can
 			return date.ErrGameWaiting
 		}
 		order = candidate
+		if err := verifyGiftCatalogQuote(ctx, tx, order.Item); err != nil {
+			return err
+		}
 		order.State = date.GiftWaiting
 		if _, err := tx.Exec(ctx, `INSERT INTO date_gift_orders(id,channel,anchor_id,sender_id,request_key,state,order_data)
 			VALUES($1,$2,$3,$4,$5,$6,$7)`, order.ID, game.Channel, game.Anchor, game.Audience, order.Key, order.State, order); err != nil {

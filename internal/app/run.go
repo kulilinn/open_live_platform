@@ -10,8 +10,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	"open_live_platform/internal/admin"
 	"open_live_platform/internal/edge"
+	"open_live_platform/internal/etcdlive"
 	"open_live_platform/internal/platformgrpc"
 )
 
@@ -43,6 +47,16 @@ func (a *App) Run(ctx context.Context) error {
 		defer listener.Close()
 		management = append(management, managementListener{server, listener})
 	}
+	if a.metrics != nil {
+		listener, err := net.Listen("tcp", a.Config.MetricsAddr)
+		if err != nil {
+			return fmt.Errorf("listen Prometheus metrics: %w", err)
+		}
+		defer listener.Close()
+		management = append(management, managementListener{
+			server: &http.Server{Handler: a.metrics.Handler(), ReadHeaderTimeout: 5 * time.Second}, listener: listener,
+		})
+	}
 	return a.serve(ctx, public, internal, management...)
 }
 
@@ -71,9 +85,22 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 	} else {
 		close(dateDone)
 	}
+	mailDone := make(chan struct{})
+	if a.MCNBackoffice != nil && a.db != nil && a.mcnMailer != nil {
+		go func() {
+			defer close(mailDone)
+			a.monitorMCNInviteMail(monitorCtx)
+		}()
+	} else {
+		close(mailDone)
+	}
 
 	rpcServer := grpc.NewServer()
 	platformgrpc.Register(rpcServer, a.Accounts, a.Rooms)
+	rpcHealth := health.NewServer()
+	rpcHealth.SetServingStatus(etcdlive.PlatformService, healthpb.HealthCheckResponse_SERVING)
+	healthpb.RegisterHealthServer(rpcServer, rpcHealth)
+	clusterDone := a.monitorCluster(monitorCtx, internal)
 	served := make(chan error, 3+len(management))
 	kafkaDone := make(chan struct{})
 	if len(a.Config.Kafka.Topics) > 0 {
@@ -101,6 +128,7 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 		}
 	}
 	stopMonitor()
+	rpcHealth.Shutdown()
 
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -123,8 +151,25 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 	<-monitorDone
 	<-sttDone
 	<-dateDone
+	<-mailDone
 	<-kafkaDone
+	clusterDone.Wait()
 	return serveErr
+}
+
+func (a *App) monitorMCNInviteMail(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := admin.DeliverMCNInviteMail(ctx, a.db, a.mcnMailer); err != nil && ctx.Err() == nil {
+			log.Print("MCN invitation could not be delivered")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (a *App) monitorDates(ctx context.Context) {

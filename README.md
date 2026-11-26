@@ -62,7 +62,7 @@ go run .\cmd\platform
 
 配置 `GIFT_CATALOG_FILE`、`PAYMENT_HOST` 和 `PAYMENT_APPID` 后，普通直播礼物按服务端目录价格向原积分服务扣款。发送者必须已进入该直播场次，收件人必须是主播。扣款确认后保存订单和收益，向 H5 连接发送礼物消息。活动折扣、火箭、设备控制和私聊礼物依赖各自的配置或队列，当前普通礼物入口不处理这些购买。
 
-一对一约会的主播可用 `/api/gift/block` 屏蔽本场礼物，或通过 `/api/gift/recommend/{channel}` 向同场观众发送 H5 推荐。小游戏通过双方实名会话确认，只有同意后才走原积分服务的礼物扣款。划拳和猜题根据服务端保存的双方选择结算，猜题每题一分。使用 `GIFT_INTERACTION_FILE` 加载题库、活动和礼盒，或以 `LIVEMEDIA_MYSQL_DSN` 运行 `go run ./cmd/export-live-gift-interactions` 输出原 MySQL 目录。盒项有上限时，从可信快照提供相应的 `usedByUser` 或 `usedPlatform` 计数。只有具备所需计数且仍有额度的限量盒项会显示。
+一对一约会的主播可用 `/api/gift/block` 屏蔽本场礼物，或通过 `/api/gift/recommend/{channel}` 向同场观众发送 H5 推荐。小游戏由双方登录账号确认，只有同意后才走原积分服务的礼物扣款。划拳和猜题根据服务端保存的双方选择结算，猜题每题一分。使用 `GIFT_INTERACTION_FILE` 加载题库、活动和礼盒，或以 `LIVEMEDIA_MYSQL_DSN` 运行 `go run ./cmd/export-live-gift-interactions` 输出原 MySQL 目录。盒项有上限时，从可信快照提供相应的 `usedByUser` 或 `usedPlatform` 计数。只有具备所需计数且仍有额度的限量盒项会显示。
 
 需要可重试时，客户端给每次有意购买发送一个唯一的 `Idempotency-Key`，重试沿用同一键和请求。省略该头会按每次请求生成新订单。响应包含订单键及 `X-Payment-Order`，扣款结果未能确认时保留待核对订单，并返回 HTTP 409。对照积分服务确认该订单后再决定后续处理。生产扣款使用 PostgreSQL，内存模式仅用于单进程开发，其订单和重试记录在重启后失效。
 
@@ -74,7 +74,13 @@ go run .\cmd\platform
 
 启用 `POST /api/payment/large_order/apply` 时，设置可信部署地区 `PAYMENT_LARGE_ORDER_REGION`，并按地区设置对应的 `PAYMENT_LARGE_ORDER_TEMPLATE_JA_JP`、`_ZH_CN`、`_ZH_TW` 或 `_EN_US`。通知服务沿用 `LOVEROSE_PUSH_HOST`、`LOVEROSE_PUSH_PATH`、`LOVEROSE_PUSH_EMAIL` 和 `LOVEROSE_PUSH_EMAIL_NAME`。服务确认零积分订单及通知请求后返回原有响应。使用 `Idempotency-Key` 重试时会读取已保存的结果，未确认的订单需与支付及通知服务对账。当前地区来自部署配置，IP 地区库需要单独接入。
 
-`GET /pass/{pass_key}` 读取现有的 Apple Wallet 签名包。用 `uv run scripts/export_legacy_wallet_passes.py --app <原 APP_NAME>` 从各旧 Redis 分片导出 `pass_key|pkpass|APP_NAME` 条目，并合并为 `WALLET_PASS_INDEX_FILE` 指向的 JSONL 文件。导出记录保留原对象路径和绝对到期时间。配置 `AWS_PASSES_S3_BUCKET` 及现有 S3 访问配置后，Go 从原 bucket 读取 `/passes/{uid}/{pass_key}.pkpass`。应用启动时载入索引，已过期或缺失的链接返回业务码 `4005`。签发仍依赖原 Apple 证书与打包流程。
+`GET /pass/{pass_key}` 提供 Apple Wallet 签名包。运行 `go run ./cmd/platform create_pass <user_id> <email>` 在可信机器上签发。命令校验 PostgreSQL 账号与邮箱，生成签名包，写入 `AWS_PASSES_S3_BUCKET` 的 `/passes/{uid}/{pass_key}.pkpass`，上传成功后发布 PostgreSQL 领取索引并输出链接。领取链接自发布起有效 24 小时。二维码的 `PASS` 凭据默认有效 180 天，可通过 `PASS_TOKEN_EXPIRED` 指定秒数。Rust 和 Go 的会话认证继续使用 `ACCESS` 和 `REFRESH` 凭据。
+
+签发配置包括 `DATABASE_URL`、`JWT_SECRET`、HTTPS 的 `BASE_URL` 和 S3 访问配置。通过 `APPLE_PASS_CERT`、`APPLE_PASS_KEY`、`APPLE_PASS_WWDR_CERT` 指定签名证书、PEM 私钥和 WWDR 中间证书。证书身份对应 `APPLE_PASS_TYPE_IDENTIFIER` 和 `APPLE_PASS_TEAM_IDENTIFIER`，默认沿用原值。 `APPLE_PASS_ASSET_DIR` 提供 `icon.png`、`icon@2x.png`、`icon@3x.png`、`logo.png`、`logo@2x.png`。可使用 `APPLE_PASS_LOGIN_URL` 配置二维码的网站地址，动态更新服务由 `APPLE_PASS_WEB_SERVICE_URL` 指向部署者的服务。
+
+证书及 WWDR 中间证书封装在对 `manifest.json` 的分离式 CMS 签名中。 [Apple Wallet 打包规范](https://developer.apple.com/documentation/walletpasses/building-a-pass)
+
+用 `uv run scripts/export_legacy_wallet_passes.py --app <原 APP_NAME>` 从各旧 Redis 分片导出 `pass_key|pkpass|APP_NAME` 条目，并合并为 `WALLET_PASS_INDEX_FILE` 指向的 JSONL 文件。导出记录保留旧对象路径和绝对到期时间。新旧签名包共用领取路由，已过期或缺失的链接返回业务码 `4005`。
 
 配置 `NFT_CATALOG_FILE` 指向包含 `cards`、`privileges`、`adorns` 数组的可信 JSON 目录。各项使用相应 API 的驼峰字段名，装扮目录另可配置 `effectTime` 和 `floatingScreenTime`。公共卡目录按状态筛选并隐藏大部分购买钱包地址。设置 `WEB3_HTTP` 和 `WEB3_CONTRACT_ADDRESS` 后，绑定核验以太坊签名及链上所有者。挑战绑定当前登录账号，五分钟有效，成功后只能使用一次。绑定状态和装扮保存到配置的 PostgreSQL，用户自查资料返回自己的绑定和装备。未上传头像的用户沿用 `USER_PHOTO_DEFAULT` 或 `USER_NFT_PHOTO_DEFAULT`。查询个人绑定或尝试装备时复核链上转移。
 
@@ -92,7 +98,13 @@ go run .\cmd\platform
 
 `ADMIN_ACCOUNTS_FILE` 是由部署者从现有后台权限数据导出的 JSON 数组。条目包含 `id`、`area`、`passwordHash`、`admin`、`roles`、`permissions` 和 `routes`。`id` 是十进制字符串，`passwordHash` 是原 Rust Argon2id PHC 字符串。`area` 为 `admin` 时用 `username`、`nickName` 和 `tenant` 登录。运营接口要求 `operation-admin` 租户。`area` 为 `mcn` 时用 `email` 登录，`mcnId` 是十进制字符串，`manager` 代表只可查看本人的主播归属。菜单和权限来自导出文件，改动后重启服务。账号文件含凭据哈希，按凭据权限保管。旧后台 JWT 需重新登录，Go 后台会话的 access 和 refresh 分别有效两小时和七天。
 
-运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。礼物列表与分页读取当前礼物目录，`finance-admin` 租户可分页查询已确认的普通直播礼物流水。MCN 提供限定在当前机构的主播列表和分页，数据来自导入的 `backoffice_mcn_streamers`。历史后台权限和机构归属由部署者迁移。登录历史筛选、主播警告投递、其他结算类别和财务写操作仍依赖原后台服务。
+运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。运营可编辑主播房间的标签，业务侧房间和主播资料立即读取新标签。礼物列表、详情、新增、编辑及下架共用 PostgreSQL 目录覆盖，公开目录和后续礼物购买读取已保存的版本，已保留订单继续按原报价处理。`finance-admin` 租户可分页查询已确认的普通直播礼物流水。登录历史筛选、主播警告投递、其他结算类别和财务写操作仍依赖原后台服务。
+
+MCN 的主播申请、编辑、审核与开通按机构隔离，经纪人只能修改自己负责的申请。配置 `MCN_STREAMER_JOIN_URL` 为 MCN 监听或网关上的 `/api/mcn/streamer/join` 链接前缀后，审核通过会向主播发站内邀请。配置 `MAIL_SMTP_*` 后，由服务通过 SMTP 发送同一邀请链接。主播使用七天内的一次性链接同意后，机构管理员可开通账号。开通保存机构归属和审计记录。
+
+机构管理员可调用 `/api/streamer/no_renewal` 结束有效合约。服务按开通后的已确认凭证核对礼物、转盘、订阅和帖子等结算账目，保存结算流水及订单凭证后解除归属。缺凭证或结果未定的扣款会阻止结束合约。解约完成后的重试读取既有结果。该操作对应旧服务的最终记账和确认流程，提现仍走独立财务系统。在导入用户账号后，`go run ./cmd/import-live-mcn-settlements` 使用 `LIVEMEDIA_MYSQL_DSN`、`LIVEMEDIA_MCN_MYSQL_DSN` 和 `DATABASE_URL` 核对并导入旧的有效合约及其结算凭证。
+
+可用 `python scripts/audit_rust_backoffice_routes.py <LiveMedia目录> --verbose` 核对 Rust 后台路由。原源码的两个独立服务在 `/api` 下分别注册 143 个运营路径及 60 个 MCN 路径。当前 Go 对应 25 个运营路径及 13 个 MCN 路径。系统管理、平台配置、帮助、活动、独立财务管理、机构模板和 MCN 财务统计仍有未迁移模块。
 
 ## 内部 gRPC
 
@@ -173,6 +185,12 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 已发布的帖子会在符合可见条件的有效订阅者的站内列表中生成通知。顶层评论、有效点赞和确认后的打赏会通知作者，审核拒绝通知对应内容的作者。相同审核回调、点赞和订单重试沿用已保存的通知。部署可通过原站内通知列表查看，外部 Web Push 仍需另接。
 
 单帖解锁和打赏需要 PostgreSQL 及点数服务配置 `PAYMENT_HOST`、`PAYMENT_APPID`。通过付款确认后才开放单帖权限、刷新打赏榜单及计入主播收益。上游结果不明时返回订单号供核对，相同解锁重试不会重复扣款。打赏可用 `Idempotency-Key` 标记同一笔请求。
+
+## 主播任务与星币
+
+PostgreSQL 模式支持 `GET /anchor/api/query_task_progress`，按原有六项日常任务返回主播自己的进度和星币余额。任务以日本时间每日零点重置。首次关注、首笔确认的付费订阅、不同用户确认的付费礼物、确认后的火箭和已关播场次的分钟数分别计入对应任务。同一主播、任务和日期只结算一次。首笔星币后满 180 天停止新增奖励，历史余额继续保留。
+
+配置 `ANCHOR_TASK_TOKEN` 后，运维可在当前主播的 Bearer 会话上附加 `X-Anchor-Task-Token` 调用原 `GET /anchor/api/test_task`。该入口根据服务已记录的业务事件重新核对奖励，客户端提交的进度数值与用户 ID 不参与计算。
 
 ## 从 LiveMedia 导入账号
 
@@ -312,6 +330,32 @@ PostgreSQL 模式可通过 `USE_LIVEROOM_BOT` 与 `LIVEROOM_BOT_FILE` 开启陪�
 
 将 `GIFT_CATALOG_FILE` 设为礼物 JSON 文件的路径，例如内容为 `[{"id":"101","name":"花束","price":20,"giftSort":1}]`。服务在启动时加载目录。登录后请求 `GET /api/gift/list` 会得到 `status/data`，礼物按 `giftSort` 升序排列。没有配置目录或请求带有 `?all=false` 时，`data` 为空数组。
 
+### 约会送礼、直播转盘和硬件队列
+
+PostgreSQL 模式支持旧的 `POST /api/date/give/gifts`。只有当前约会的观众可向该场主播购买礼物。普通礼物直接结算，游戏礼物先进入 `GET /api/gift/requests/{channel}`，由主播通过 `POST /api/gift/accept` 决定是否扣款。`GET /api/date/gifts/transaction/{channel}` 返回已成交记录。硬件礼物在本场队列依序运行，参与者可从 `/api/date/gift/executing/{channel}` 或 `/api/date/gift/list/executing/{channel}` 查询，开始执行时向双方推送 `give_gifts_toy`。
+
+主播可存储转盘价格、选项和开关。直播成员通过 `POST /api/date/play_wheel` 按主播设置付款，可通过 `GET /api/date/get/wheel/result` 分页读取本场结果。加播硬件礼物时，房间时长设置从 `/api/date/gift/hardware/set` 写入，队列从 `/api/date/hardware/queue/get/{room_id}` 读取。Go 广播转盘的 H5 礼物帧 12 至 14 和队列开始帧 8。实际设备执行依赖客户端和设备授权，物理执行仍待验证。
+
+### 火箭奖池与加油
+
+配置 `ROCKET_CONFIG_FILE` 启用付费加油。各服务实例使用同一份运营文件。文件提供原平台收入比例、初次导入时的奖池余额、`gift_jackpot` 的奖品权重表和 `rocket_time_config` 的时长系数。奖品必须对应当前目录里价格为 0 的普通配置礼物。以下数字是本地测试示意。
+
+```json
+{
+  "initial_jackpot": 30,
+  "platform_income_ratio": 0.25,
+  "speed_attenuation": 0,
+  "rewards": [
+    {"id":"1","gift_id":"102","pool_condition":0,"weight":1,"reward_value":21,"reward_multiplier":3,"platform_exp":6,"fuel_points":2}
+  ],
+  "time_rules": [{"time_condition":1000,"time_coefficient":500}]
+}
+```
+
+基础商品的 `effectControlType` 为 6 时发送火箭，为 7 时购买加油。支付请求使用目录单价，服务在发起扣款前按奖池余额与运营权重为本次加油预留全部奖品。支付确认后一次写入奖池变动、平台收益、按实际奖品结算的主播收益、贡献排行和延长后的飞行时间。支付拒绝释放预留。上游支付超时时，订单和预留保持待核对状态，同一个 `Idempotency-Key` 可查询结果或待核对状态。最后可读取已持久化的火箭结算数据。
+
+`ROCKET_REFUEL_DURATION_CONFIG` 控制距离结束至少多少秒才可购买加油，默认 3 秒。根据点赞增加火箭速度的系数取 `ROCKET_LIKE_SPEED_COEFFICIENT`。当前付费加油使用目录基础价。活动折扣配额、额外公告和经验等级联动待接入。
+
 ## PostgreSQL
 
 准备一个专用数据库，例如 `open_live_platform`。连接用户需要在目标 schema 上有建表权限。以下命令用于本地 PowerShell，连接字符串中的账号和密码换成自己的值。
@@ -346,6 +390,10 @@ PG 模式下，账号、登录会话、房间、成员、管理员、禁言、�
 旧应用目录、版本、国家、帮助分类/问答、跑马灯及 PWA 主播清单通过 `go run ./cmd/import-live-catalog` 迁入 PostgreSQL。命令读取 `LIVEMEDIA_MYSQL_DSN` 和 `DATABASE_URL`，每次成功导入会在同一事务中替换整套公开资料。导入只选用公开列，应用密钥留在源库。
 
 ## 检查
+
+`go run ./cmd/import-live-history` 从旧 MySQL 的只读事务导入房间资料、已结束场次、举报、积分与充值流水、星币余额。原房间以离线状态恢复，保留有效禁播限制，房间密码以散列保存。已有 Go 房间的设置优先。历史积分可在 PostgreSQL 的 `legacy_business_history` 对账，当前消费余额仍由已配置的支付服务提供。
+
+运维批量开户、补充搜索名、测试 RTC 凭据和删除主播账号使用独立的 `MAINTENANCE_TOKEN`。通过 Bearer 传入；原内部调用也可用 `X-Inner-Service` 传入该凭据。删除有订单外键引用的账号会返回 409，事务会保留账号、房间和原订单。测试 RTC 凭据绑定调用时已经分配的房间身份。
 
 机器人私聊沿用 `POST /api/chatbot/{botid}` 和 `GET /api/chatbot/{botid}/{token}`。双方的 H5 连接都收到同一条 `botchat` 消息。首次拉取传 `latest`，之后传上次响应中的 `more`。旧 MySQL 的 `chat_message` 随 `cmd/import-live-interactions` 导入。
 

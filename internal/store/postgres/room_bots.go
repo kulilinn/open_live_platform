@@ -17,13 +17,13 @@ type roomBots struct {
 	ids    []int64
 }
 
-// ConfigureRoomBots is called once at startup, before the store handles requests.
+// ConfigureRoomBots publishes a validated, immutable configuration to room updates.
 func (s *Store) ConfigureRoomBots(config livebot.Config) error {
 	ids, err := config.AccountIDs()
 	if err != nil {
 		return err
 	}
-	s.bots = &roomBots{config: config, ids: ids}
+	s.bots.Store(&roomBots{config: config, ids: ids})
 	return nil
 }
 
@@ -73,11 +73,12 @@ const botEligibleRoom = ` r.online AND NOT r.anchor_away AND r.password_hash IS 
 	AND r.live_started_at+$3::interval<=statement_timestamp() `
 
 func (s *Store) SweepRoomBots(ctx context.Context) error {
-	bots := s.bots
+	bots := s.bots.Load()
 	if bots == nil {
 		return nil
 	}
-	entryDelay := time.Duration(bots.config.EntrySeconds) * time.Second
+	maxPopulation, minEntry := bots.config.CandidateSchedule()
+	entryDelay := time.Duration(minEntry) * time.Second
 	rows, err := s.pool.Query(ctx, `SELECT room_id FROM (
 		SELECT room_id,send_at AS due FROM room_bot_replies WHERE send_at<=statement_timestamp()
 		UNION ALL
@@ -90,7 +91,7 @@ func (s *Store) SweepRoomBots(ctx context.Context) error {
 			AND EXISTS(SELECT 1 FROM users u WHERE u.id=ANY($1::bigint[]) AND `+botAvailable+`
 				AND NOT EXISTS(SELECT 1 FROM room_kicks WHERE room_id=r.id AND user_id=u.id))
 		) AS pending GROUP BY room_id ORDER BY min(due),room_id LIMIT $4`,
-		bots.ids, bots.config.RoomPopulation, entryDelay, roomBotBatch)
+		bots.ids, maxPopulation, entryDelay, roomBotBatch)
 	if err != nil {
 		return err
 	}
@@ -99,14 +100,14 @@ func (s *Store) SweepRoomBots(ctx context.Context) error {
 		return err
 	}
 	for _, roomID := range roomIDs {
-		if err := s.change(ctx, roomID, func(r *roomChange) error { return r.sweepRoomBot(entryDelay) }); err != nil {
+		if err := s.change(ctx, roomID, func(r *roomChange) error { return r.sweepRoomBot() }); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *roomChange) sweepRoomBot(entryDelay time.Duration) error {
+func (r *roomChange) sweepRoomBot() error {
 	var botID int64
 	var departing bool
 	err := r.tx.QueryRow(r.ctx, `SELECT b.user_id, NOT r.online OR r.live_id<>b.live_id OR r.password_hash IS NOT NULL
@@ -114,7 +115,7 @@ func (r *roomChange) sweepRoomBot(entryDelay time.Duration) error {
 		FROM room_bot_members b JOIN rooms r ON r.id=b.room_id WHERE b.room_id=$1`, r.id, r.bots.ids).Scan(&botID, &departing)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return r.addRoomBot(entryDelay)
+		return r.addRoomBot()
 	case err != nil:
 		return err
 	case departing:
@@ -128,16 +129,24 @@ func (r *roomChange) sweepRoomBot(entryDelay time.Duration) error {
 	}
 }
 
-func (r *roomChange) addRoomBot(entryDelay time.Duration) error {
+func (r *roomChange) addRoomBot() error {
 	bots := r.bots
+	var liveID int64
+	if err := r.tx.QueryRow(r.ctx, `SELECT live_id FROM rooms WHERE id=$1`, r.id).Scan(&liveID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	population, entry, stay := bots.config.RoomSchedule(liveID)
 	var botID int64
 	err := r.tx.QueryRow(r.ctx, `INSERT INTO room_bot_members(room_id,user_id,live_id,expires_at)
 		SELECT r.id,u.id,r.live_id,statement_timestamp()+$4::interval
 		FROM rooms r CROSS JOIN users u WHERE r.id=$5 AND `+botEligibleRoom+`
 			AND u.id=ANY($1::bigint[]) AND `+botAvailable+`
 			AND NOT EXISTS(SELECT 1 FROM room_kicks WHERE room_id=r.id AND user_id=u.id)
-		ORDER BY u.id LIMIT 1 ON CONFLICT DO NOTHING RETURNING user_id`, bots.ids, bots.config.RoomPopulation,
-		entryDelay, time.Duration(bots.config.StaySeconds)*time.Second, r.id).Scan(&botID)
+		ORDER BY u.id LIMIT 1 ON CONFLICT DO NOTHING RETURNING user_id`, bots.ids, population,
+		time.Duration(entry)*time.Second, time.Duration(stay)*time.Second, r.id).Scan(&botID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}

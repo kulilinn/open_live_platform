@@ -65,7 +65,18 @@ func (s anchorAPI) status(w http.ResponseWriter, r *http.Request, actor int64) {
 	if record.State == anchor.Rejected {
 		result["reject_reason"] = record.Reason
 	} else {
-		result["task_time_expired"] = record.StartedAt != nil && time.Since(*record.StartedAt) >= 180*24*time.Hour
+		started := record.StartedAt
+		if tasks, ok := s.store.(anchor.TaskStore); ok {
+			first, err := tasks.StarTaskStarted(r.Context(), actor)
+			if err != nil {
+				anchorError(w, err)
+				return
+			}
+			if first != nil && (started == nil || first.Before(*started)) {
+				started = first
+			}
+		}
+		result["task_time_expired"] = started != nil && time.Since(*started) >= anchor.TaskEligibility
 	}
 	anchorResult(w, result)
 }
@@ -126,7 +137,8 @@ func (s anchorAPI) getProfile(w http.ResponseWriter, r *http.Request, actor int6
 		"search_name": profile.SearchName, "display_name": user.Account, "free_sub": free, "toy_info": profile.ToyInfo,
 		"instagram_link": record.Instagram, "strip_chat_link": record.StripChat, "tiktok_link": record.TikTok,
 		"yutube_link": record.YouTube, "level": nil, "exp": nil, "max_exp": nil,
-		"trans": user.TranslationEnabled, "trans_lang": user.TranslationLanguage, "teacher_label": record.Label, "room": profile.GroupRoom,
+		"trans": user.TranslationEnabled, "trans_lang": user.TranslationLanguage,
+		"teacher_label": s.teacherLabel(ctx, profile.GroupRoom), "room": profile.GroupRoom,
 	}
 	if id == actor {
 		result["family_name"], result["address"] = record.FamilyName, record.Address

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"open_live_platform/internal/anchor"
 	"open_live_platform/internal/dm"
 	"open_live_platform/internal/subscription"
 )
@@ -172,11 +173,21 @@ func (s *Store) SubscribeFree(ctx context.Context, members dm.Metadata) error {
 		if err != nil {
 			return err
 		}
+		var followed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM subscription_members m JOIN subscription_plans p ON p.id=m.plan_id
+			WHERE m.fan_id=$1 AND m.anchor_id=$2 AND p.plan_type=2)`, fanID, anchorID).Scan(&followed); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO subscription_members(fan_id,anchor_id,plan_id,expires_at) VALUES($1,$2,$3,now()+interval '3650 days')
 			ON CONFLICT (fan_id,plan_id) DO UPDATE SET created_at=now(),expires_at=EXCLUDED.expires_at,cancelled_at=NULL,reason=0
 			WHERE subscription_members.cancelled_at IS NOT NULL OR subscription_members.expires_at<=now()`, fanID, anchorID, planID)
 		if err != nil {
 			return err
+		}
+		if !followed {
+			if err := recordAnchorTask(ctx, tx, anchorID, time.Now().UTC(), taskEvent{target: anchor.TaskFollow, key: strconv.FormatInt(fanID, 10), count: 1}); err != nil {
+				return err
+			}
 		}
 		return syncSubscriptionDM(ctx, tx, members)
 	})

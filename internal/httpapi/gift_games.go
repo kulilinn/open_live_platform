@@ -50,7 +50,11 @@ func (a giftInteractionsAPI) voteGame(w http.ResponseWriter, r *http.Request, ac
 		httpx.Error(w, http.StatusServiceUnavailable, "gift game storage unavailable")
 		return
 	}
-	item, ok := a.find(input.GiftID)
+	item, ok, err := a.catalog.Lookup(ctx, input.GiftID)
+	if err != nil {
+		gameError(w, err)
+		return
+	}
 	if !ok || item.GiftType != 1 {
 		gameError(w, gift.ErrOrderNotFound)
 		return

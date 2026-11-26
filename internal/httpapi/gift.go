@@ -20,13 +20,18 @@ func RegisterPoints(mux *http.ServeMux, accounts auth.AccountStore, billing *pay
 	}))
 }
 
-func RegisterGiftCatalog(mux *http.ServeMux, accounts auth.AccountStore, items []gift.Gift) {
+func RegisterGiftCatalog(mux *http.ServeMux, accounts auth.AccountStore, catalog *gift.Catalog) {
 	mux.HandleFunc("GET /api/gift/list", (server{accounts: accounts}).authenticated(func(w http.ResponseWriter, r *http.Request, _ int64) {
-		data := items
+		data := []gift.Gift{}
 		switch r.URL.Query().Get("all") {
 		case "", "true":
+			var err error
+			data, err = catalog.Items(r.Context())
+			if err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "could not read gift catalog")
+				return
+			}
 		case "false":
-			data = []gift.Gift{}
 		default:
 			httpx.Error(w, http.StatusBadRequest, "all must be true or false")
 			return

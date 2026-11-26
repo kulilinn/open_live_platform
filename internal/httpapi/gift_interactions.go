@@ -13,18 +13,19 @@ import (
 
 type giftInteractionsAPI struct {
 	dates   *Dates
-	catalog []gift.Gift
+	catalog *gift.Catalog
 	content gift.Interactions
 	billing *payment.Client
 }
 
-func RegisterGiftInteractions(mux *http.ServeMux, dates *Dates, catalog []gift.Gift, content gift.Interactions, billing *payment.Client) {
+func RegisterGiftInteractions(mux *http.ServeMux, dates *Dates, catalog *gift.Catalog, content gift.Interactions, billing *payment.Client) {
 	a := giftInteractionsAPI{dates, catalog, content, billing}
 	s := server{accounts: dates.Accounts}
 	mux.HandleFunc("POST /api/gift/block", s.authenticated(a.block))
 	mux.HandleFunc("POST /api/gift/recommend/{channel}", s.authenticated(a.recommend))
 	mux.HandleFunc("GET /api/gift/promotions/info", s.authenticated(a.promotions))
 	mux.HandleFunc("GET /api/gift/box/info", s.authenticated(a.box))
+	mux.HandleFunc("GET /api/date/gift/quick/list", s.authenticated(a.quickList))
 	mux.HandleFunc("GET /api/gift/game/list", s.authenticated(a.questions))
 	mux.HandleFunc("POST /api/gift/game/verif", s.authenticated(a.verifyGame))
 	mux.HandleFunc("POST /api/gift/game/accept", s.authenticated(a.voteGame))
@@ -82,7 +83,11 @@ func (a giftInteractionsAPI) recommend(w http.ResponseWriter, r *http.Request, a
 		dateGiftResult(w, nil, err)
 		return
 	}
-	item, ok := a.find(input.ID)
+	item, ok, err := a.catalog.Lookup(ctx, input.ID)
+	if err != nil {
+		dateGiftResult(w, nil, err)
+		return
+	}
 	if !ok {
 		dateGiftResult(w, nil, gift.ErrOrderNotFound)
 		return
@@ -110,7 +115,12 @@ func (a giftInteractionsAPI) promotions(w http.ResponseWriter, r *http.Request, 
 	}
 	switch r.URL.Query().Get("all") {
 	case "", "true":
-		collectibleData(w, a.content.PromotionList(a.catalog, time.Now()))
+		items, err := a.catalog.Items(r.Context())
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not read gift promotions")
+			return
+		}
+		collectibleData(w, a.content.PromotionList(items, time.Now()))
 	case "false":
 		collectibleData(w, []gift.PromotionView{})
 	default:
@@ -130,7 +140,12 @@ func (a giftInteractionsAPI) box(w http.ResponseWriter, r *http.Request, actor i
 		dateGiftResult(w, nil, date.ErrForbidden)
 		return
 	}
-	collectibleData(w, a.content.BoxContents(box, actor, a.catalog, time.Now()))
+	items, err := a.catalog.Items(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read gift box")
+		return
+	}
+	collectibleData(w, a.content.BoxContents(box, actor, items, time.Now()))
 }
 
 func (a giftInteractionsAPI) questions(w http.ResponseWriter, _ *http.Request, _ int64) {
@@ -155,7 +170,11 @@ func (a giftInteractionsAPI) verifyGame(w http.ResponseWriter, r *http.Request, 
 		dateGiftResult(w, nil, err)
 		return
 	}
-	item, ok := a.find(input.GiftID)
+	item, ok, err := a.catalog.Lookup(ctx, input.GiftID)
+	if err != nil {
+		dateGiftResult(w, nil, err)
+		return
+	}
 	if !ok || item.GiftType != 1 {
 		dateGiftResult(w, nil, gift.ErrOrderNotFound)
 		return
@@ -191,13 +210,4 @@ func (a giftInteractionsAPI) checkBlocked(r *http.Request, channel, giftID int64
 		return date.ErrForbidden
 	}
 	return nil
-}
-
-func (a giftInteractionsAPI) find(id int64) (gift.Gift, bool) {
-	for _, item := range a.catalog {
-		if item.ID == id {
-			return item, true
-		}
-	}
-	return gift.Gift{}, false
 }
