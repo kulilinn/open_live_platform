@@ -89,3 +89,37 @@ func TestRoomStatusHTTP(t *testing.T) {
 		t.Fatalf("missing status = %d %+v", missing.Code, missing.Body)
 	}
 }
+
+func TestRustRoomInfoShape(t *testing.T) {
+	accounts, rooms := auth.NewStore(), live.NewStore()
+	owner, err := accounts.SignUp(t.Context(), "room-info@example.com", "secret", "Room Owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	httpapi.Register(mux, accounts, rooms)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	start := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/start", owner.Token, map[string]any{
+		"subject": "Rust subject", "password": "secret",
+	})
+	data, ok := start.Body["data"].(map[string]any)
+	if start.Code != http.StatusOK || start.Body["status"] != "200" || !ok ||
+		data["room"] != itoa(owner.User.ID) || data["subject"] != "Rust subject" ||
+		data["isLock"] != true || data["memberCount"] != float64(0) {
+		t.Fatalf("Rust start = %d %+v", start.Code, start.Body)
+	}
+
+	info := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/live/room/info/"+itoa(owner.User.ID), owner.Token, nil)
+	if info.Code != http.StatusOK || info.Body["room"] != itoa(owner.User.ID) ||
+		info.Body["anchor"] != itoa(owner.User.ID) {
+		t.Fatalf("Rust info = %d %+v", info.Code, info.Body)
+	}
+	updated := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/setting", owner.Token, map[string]any{
+		"subject": "Updated subject",
+	})
+	if updated.Code != http.StatusOK || updated.Body["data"].(map[string]any)["subject"] != "Updated subject" {
+		t.Fatalf("Rust setting = %d %+v", updated.Code, updated.Body)
+	}
+}

@@ -30,7 +30,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	mux.HandleFunc("POST /api/live/room/start", s.authenticated(s.startRoom))
 	mux.HandleFunc("POST /api/live/room/setting", s.authenticated(s.updateRoomSettings))
 	mux.HandleFunc("POST /api/live/room/list", s.authenticated(s.listRooms))
-	mux.HandleFunc("GET /api/live/room/info/{room}", s.authenticated(roomQuery(rooms.Info)))
+	mux.HandleFunc("GET /api/live/room/info/{room}", s.authenticated(s.infoRoom))
 	mux.HandleFunc("GET /api/live/room/audiences/{room}", s.authenticated(s.audiences))
 	mux.HandleFunc("POST /api/live/room/audiences/{room}", s.authenticated(s.audiencesPage))
 	mux.HandleFunc("GET /api/live/room/admins/{room}", s.authenticated(s.admins))

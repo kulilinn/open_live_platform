@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
@@ -30,6 +31,44 @@ type Room struct {
 	Online      bool   `json:"online"`
 	MemberCount int    `json:"member_count"`
 	IsLock      bool   `json:"isLock"`
+}
+
+func (r *Room) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	read := func(name string, target any) error {
+		if value, ok := fields[name]; ok {
+			return json.Unmarshal(value, target)
+		}
+		return nil
+	}
+	if err := read("id", &r.ID); err != nil {
+		return err
+	}
+	if err := read("owner_id", &r.OwnerID); err != nil {
+		return err
+	}
+	if err := read("title", &r.Title); err != nil {
+		return err
+	}
+	if err := read("member_count", &r.MemberCount); err != nil {
+		return err
+	}
+	if err := read("isLock", &r.IsLock); err != nil {
+		return err
+	}
+	if value, ok := fields["online"]; ok {
+		if err := json.Unmarshal(value, &r.Online); err != nil {
+			var status int
+			if err := json.Unmarshal(value, &status); err != nil {
+				return err
+			}
+			r.Online = status != 0
+		}
+	}
+	return nil
 }
 
 // RoomFilter selects rooms by online status and requests a one-based page.

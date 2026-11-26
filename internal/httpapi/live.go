@@ -14,16 +14,31 @@ import (
 
 func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 	var input struct {
-		Title    string `json:"title"`
-		Subject  string `json:"subject"`
-		Password string `json:"password"`
+		Title    *string `json:"title"`
+		Subject  *string `json:"subject"`
+		Password string  `json:"password"`
 	}
 	if !httpx.Decode(w, r, &input) {
 		return
 	}
-	room, err := s.rooms.Start(r.Context(), userID, cmp.Or(input.Title, input.Subject), input.Password)
+	title := ""
+	if input.Title != nil {
+		title = *input.Title
+	} else if input.Subject != nil {
+		title = *input.Subject
+	}
+	room, err := s.rooms.Start(r.Context(), userID, title, input.Password)
 	if err != nil {
 		httpx.LiveError(w, err)
+		return
+	}
+	if input.Subject != nil && input.Title == nil {
+		info, infoErr := s.roomInfo(r.Context(), userID, room.ID)
+		if infoErr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not build room response")
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": info})
 		return
 	}
 	httpx.JSON(w, http.StatusOK, room)
@@ -62,7 +77,12 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 		httpx.LiveError(w, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": room})
+	info, infoErr := s.roomInfo(r.Context(), userID, room.ID)
+	if infoErr != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not build room response")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": info})
 }
 
 func (s server) listRooms(w http.ResponseWriter, r *http.Request, _ int64) {
