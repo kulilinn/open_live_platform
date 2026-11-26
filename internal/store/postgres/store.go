@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,7 +25,11 @@ var roomChatHistorySchema string
 var userLanguageSchema string
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	eventChannel string
+	eventReady   atomic.Bool
+	stopEvents   context.CancelFunc
+	eventsDone   chan struct{}
 	// Independent rooms can publish in parallel. Each shard orders local
 	// subscriptions and delivery with the commits that change their room.
 	streams [32]streams
@@ -32,7 +37,12 @@ type Store struct {
 
 type streams struct {
 	sync.Mutex
-	rooms map[int64]map[chan live.Event]int64
+	rooms map[int64]map[chan live.Event]subscriber
+}
+
+type subscriber struct {
+	userID int64
+	marker string
 }
 
 var _ auth.AccountStore = (*Store)(nil)
@@ -59,11 +69,21 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{pool: pool}, nil
+	s := &Store{pool: pool}
+	if err := s.startRoomEvents(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Store) Shutdown() {
+	s.stopEvents()
+	<-s.eventsDone
 	s.pool.Close()
+}
+
+func (s *Store) closeSubscriptions() {
 	for i := range s.streams {
 		stream := &s.streams[i]
 		stream.Lock()
@@ -83,8 +103,11 @@ func (s *Store) stream(id int64) *streams {
 
 func (s *streams) publish(event live.Event) {
 	listeners := s.rooms[event.RoomID]
-	for ch, uid := range listeners {
-		disconnect := event.Type == "close" || (event.Type == "kick" && uid == event.TargetID) || (event.Type == "leave" && uid == event.UserID)
+	for ch, sub := range listeners {
+		if sub.marker != "" {
+			continue
+		}
+		disconnect := event.Type == "close" || (event.Type == "kick" && sub.userID == event.TargetID) || (event.Type == "leave" && sub.userID == event.UserID)
 		select {
 		case ch <- event:
 		default:
@@ -102,7 +125,6 @@ func (s *streams) publish(event live.Event) {
 
 // Change serializes a room's SQL preconditions and mutations, including
 // concurrent clients using the database from separate platform processes.
-// Socket notifications are delivered only to connections of this process.
 func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error) error {
 	stream := s.stream(id)
 	stream.Lock()
@@ -113,32 +135,33 @@ func (s *Store) change(ctx context.Context, id int64, fn func(*roomChange) error
 			return err
 		}
 		r = roomChange{ctx: ctx, tx: tx, id: id}
-		return fn(&r)
+		if err := fn(&r); err != nil {
+			return err
+		}
+		return s.notifyRoomChange(&r)
 	})
 	if err != nil {
 		return err
 	}
-	if r.event.Type != "" {
-		r.event.RoomID = id
-		stream.publish(r.event)
-	}
 	if r.sub != nil {
 		if stream.rooms == nil {
-			stream.rooms = make(map[int64]map[chan live.Event]int64)
+			stream.rooms = make(map[int64]map[chan live.Event]subscriber)
 		}
 		if stream.rooms[id] == nil {
-			stream.rooms[id] = make(map[chan live.Event]int64)
+			stream.rooms[id] = make(map[chan live.Event]subscriber)
 		}
-		stream.rooms[id][r.sub] = r.subUser
+		stream.rooms[id][r.sub] = subscriber{userID: r.subUser, marker: r.subMarker}
 	}
 	return nil
 }
 
 type roomChange struct {
-	ctx     context.Context
-	tx      pgx.Tx
-	id      int64
-	event   live.Event
-	sub     chan live.Event
-	subUser int64
+	ctx       context.Context
+	tx        pgx.Tx
+	id        int64
+	event     live.Event
+	messageID int64
+	sub       chan live.Event
+	subUser   int64
+	subMarker string
 }

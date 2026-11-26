@@ -427,7 +427,8 @@ func (s *Store) SendChat(ctx context.Context, msg live.ChatMessage) (int64, erro
 		}
 		err := r.tx.QueryRow(ctx, `INSERT INTO room_messages(room_id,user_id,text,payload)
 			VALUES($1,$2,$3,$4) RETURNING id`, msg.RoomID, msg.UserID, msg.Text, msg.Payload).Scan(&messageID)
-		r.event = live.Event{Type: "chat", UserID: msg.UserID, Text: msg.Text, Payload: msg.Payload}
+		r.event = live.Event{Type: "chat", UserID: msg.UserID}
+		r.messageID = messageID
 		return err
 	})
 	if err != nil {
@@ -472,6 +473,9 @@ func (s *Store) ChatHistory(ctx context.Context, roomID, userID int64, page, siz
 func (s *Store) Subscribe(ctx context.Context, id, uid int64) (<-chan live.Event, func(), error) {
 	ch := make(chan live.Event, 32)
 	err := s.change(ctx, id, func(r *roomChange) error {
+		if !s.eventReady.Load() {
+			return errRoomEventsUnavailable
+		}
 		if err := r.requireMember(uid); err != nil {
 			return err
 		}
