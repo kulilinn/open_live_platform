@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -108,7 +109,14 @@ func (a giftInteractionsAPI) recommend(w http.ResponseWriter, r *http.Request, a
 	collectibleData(w, "OK")
 }
 
-func (a giftInteractionsAPI) promotions(w http.ResponseWriter, r *http.Request, _ int64) {
+func (a giftInteractionsAPI) promotionContent(ctx context.Context, actor int64) (gift.Interactions, error) {
+	if limits, ok := a.dates.Service.Store.(gift.LimitStore); ok {
+		return limits.GiftPromotionContent(ctx, actor, a.content)
+	}
+	return a.content, nil
+}
+
+func (a giftInteractionsAPI) promotions(w http.ResponseWriter, r *http.Request, actor int64) {
 	if r.URL.Query().Get("date_room_id") == "" {
 		httpx.Error(w, http.StatusBadRequest, "date_room_id is required")
 		return
@@ -120,7 +128,12 @@ func (a giftInteractionsAPI) promotions(w http.ResponseWriter, r *http.Request, 
 			httpx.Error(w, http.StatusInternalServerError, "could not read gift promotions")
 			return
 		}
-		collectibleData(w, a.content.PromotionList(items, time.Now()))
+		content, err := a.promotionContent(r.Context(), actor)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not read gift promotions")
+			return
+		}
+		collectibleData(w, content.PromotionList(items, time.Now()))
 	case "false":
 		collectibleData(w, []gift.PromotionView{})
 	default:
@@ -145,7 +158,12 @@ func (a giftInteractionsAPI) box(w http.ResponseWriter, r *http.Request, actor i
 		httpx.Error(w, http.StatusInternalServerError, "could not read gift box")
 		return
 	}
-	collectibleData(w, a.content.BoxContents(box, actor, items, time.Now()))
+	content, err := a.promotionContent(r.Context(), actor)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not read gift box")
+		return
+	}
+	collectibleData(w, content.BoxContents(box, actor, items, time.Now()))
 }
 
 func (a giftInteractionsAPI) questions(w http.ResponseWriter, _ *http.Request, _ int64) {

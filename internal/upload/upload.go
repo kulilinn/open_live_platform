@@ -63,6 +63,10 @@ func (c Config) PutBytes(ctx context.Context, key string, data []byte) error {
 	return c.Put(ctx, key, func(yield func([]byte, error) bool) { yield(data, nil) })
 }
 
+func (c Config) PutTypedBytes(ctx context.Context, key, contentType string, data []byte) error {
+	return c.put(ctx, key, contentType, func(yield func([]byte, error) bool) { yield(data, nil) })
+}
+
 type Store interface {
 	StageUpload(context.Context, Part, Finish) error
 }
@@ -70,6 +74,10 @@ type Store interface {
 // Put assembles the browser's small, potentially out-of-order chunks on disk.
 // S3 receives one signed PUT, so 256 KB browser chunks require no client changes.
 func (c Config) Put(ctx context.Context, key string, parts Parts) error {
+	return c.put(ctx, key, mime.TypeByExtension(path.Ext(key)), parts)
+}
+
+func (c Config) put(ctx context.Context, key, contentType string, parts Parts) error {
 	file, err := os.CreateTemp("", "livemedia-upload-*")
 	if err != nil {
 		return err
@@ -105,7 +113,7 @@ func (c Config) Put(ctx context.Context, key string, parts Parts) error {
 		return err
 	}
 	req.ContentLength = size
-	req.Header.Set("Content-Type", cmp.Or(mime.TypeByExtension(path.Ext(key)), "application/octet-stream"))
+	req.Header.Set("Content-Type", cmp.Or(contentType, "application/octet-stream"))
 	digest := hex.EncodeToString(hash.Sum(nil))
 	req.Header.Set("X-Amz-Content-Sha256", digest)
 	creds := aws.Credentials{AccessKeyID: c.KeyID, SecretAccessKey: c.Secret}

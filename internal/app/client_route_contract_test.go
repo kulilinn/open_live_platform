@@ -24,7 +24,9 @@ func TestRustClientRoutesRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	mux := a.Server.Handler.(*http.ServeMux)
+	mux := a.Server.Handler.(interface {
+		Handler(*http.Request) (http.Handler, string)
+	})
 	param := regexp.MustCompile(`\{[^}]+\}`)
 	normalize := func(s string) string { return param.ReplaceAllString(s, "{}") }
 	for _, line := range strings.Split(strings.TrimSpace(clientRouteContract), "\n") {

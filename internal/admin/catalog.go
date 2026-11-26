@@ -36,6 +36,7 @@ type PurchaseRow struct {
 }
 
 func (b backoffice) registerCatalogAndFinance(mux *http.ServeMux, catalog *gift.Catalog) {
+	b.registerGiftTemplates(mux, catalog)
 	const base = "POST /api/operation/gifts/gift/"
 	mux.HandleFunc(base+"list", b.authorized(false, true, func(w http.ResponseWriter, r *http.Request, _ Principal, _ [sha256.Size]byte) {
 		items, err := catalog.Items(r.Context())

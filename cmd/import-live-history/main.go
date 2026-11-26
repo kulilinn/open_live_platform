@@ -34,6 +34,17 @@ var tables = []sourceTable{
 	{"star_coin_flow_records", "id", "account_id", "id account_id biz_type biz_id amount balance related_record_id status remark create_time"},
 }
 
+var mcnTables = []sourceTable{
+	{"mcn_info", "id", "id", "id sharing_template_id name super_name email agency_level ratio status create_by create_time update_time"},
+	{"mcn_settle_statistic", "id", "mcn_id", "id mcn_id ?live_id manager_id streamer_id ?trace_id ld ?star_coin_total ?live_flow_total ratio ?live_start_time ?live_end_time ?viewer_num ?fans_num ?new_fans_num create_time ?update_time"},
+	{"mcn_settle_agency_streamer_statistic", "id", "mcn_id", "id mcn_id manager_id streamer_id ld ratio manager_ratio agency_ratio create_time"},
+	{"mcn_settle_platform_statistic", "id", "mcn_id", "id mcn_id ld ratio create_time"},
+	{"mcn_sharing_template", "id", "COALESCE(mcn_id,0)", "id template_id mcn_id name min max ratio status create_by create_time update_time"},
+	{"mcn_user", "id", "mcn_id", "id mcn_id name"},
+	{"mcn_role", "id", "mcn_id", "id mcn_id name manager_name"},
+	{"mcn_user_role", "id", "user_id", "id user_id role_id"},
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -42,13 +53,30 @@ func main() {
 	}
 }
 func run(ctx context.Context) error {
-	dsn, targetDSN := os.Getenv("LIVEMEDIA_MYSQL_DSN"), os.Getenv("DATABASE_URL")
-	if dsn == "" || targetDSN == "" {
-		return errors.New("set LIVEMEDIA_MYSQL_DSN and DATABASE_URL")
+	dsn, mcnDSN, targetDSN := os.Getenv("LIVEMEDIA_MYSQL_DSN"), os.Getenv("LIVEMEDIA_MCN_MYSQL_DSN"), os.Getenv("DATABASE_URL")
+	if (dsn == "" && mcnDSN == "") || targetDSN == "" {
+		return errors.New("set DATABASE_URL and at least one of LIVEMEDIA_MYSQL_DSN or LIVEMEDIA_MCN_MYSQL_DSN")
 	}
+	db, err := postgres.Open(ctx, targetDSN)
+	if err != nil {
+		return err
+	}
+	defer db.Shutdown()
+	if dsn != "" {
+		if err := importSource(ctx, db, dsn, "LIVEMEDIA_MYSQL_DSN", tables); err != nil {
+			return err
+		}
+	}
+	if mcnDSN != "" {
+		return importSource(ctx, db, mcnDSN, "LIVEMEDIA_MCN_MYSQL_DSN", mcnTables)
+	}
+	return nil
+}
+
+func importSource(ctx context.Context, db *postgres.Store, dsn, variable string, sources []sourceTable) error {
 	src, err := mysql.ParseDSN(dsn)
 	if err != nil {
-		return errors.New("invalid LIVEMEDIA_MYSQL_DSN")
+		return fmt.Errorf("invalid %s", variable)
 	}
 	src.ParseTime, src.Loc = true, time.UTC
 	if src.Params == nil {
@@ -66,12 +94,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	db, err := postgres.Open(ctx, targetDSN)
-	if err != nil {
-		return err
-	}
-	defer db.Shutdown()
-	result, err := db.ImportLegacyHistory(ctx, historyRows(ctx, tx))
+	result, err := db.ImportLegacyHistory(ctx, historyRows(ctx, tx, sources))
 	if err != nil {
 		return err
 	}
@@ -79,9 +102,9 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-func historyRows(ctx context.Context, tx *sql.Tx) iter.Seq2[postgres.HistoryRow, error] {
+func historyRows(ctx context.Context, tx *sql.Tx, sources []sourceTable) iter.Seq2[postgres.HistoryRow, error] {
 	return func(yield func(postgres.HistoryRow, error) bool) {
-		for _, t := range tables {
+		for _, t := range sources {
 			q, err := historyQuery(ctx, tx, t)
 			if err != nil {
 				yield(postgres.HistoryRow{}, fmt.Errorf("inspect %s: %w", t.name, err))

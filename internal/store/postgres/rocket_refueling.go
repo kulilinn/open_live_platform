@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"open_live_platform/internal/gift"
+	"open_live_platform/internal/subscription"
 )
 
 func (s *Store) ConfigureRocketRewards(ctx context.Context, rules *gift.RocketRules) error {
@@ -122,12 +123,16 @@ func (r *roomChange) settleRocketRefuel(order gift.Order) (int64, error) {
 			return 0, err
 		}
 	}
-	_, err := r.tx.Exec(r.ctx, `INSERT INTO room_rocket_contributions(order_id,user_id,score,combo,multiplier,platform_exp)
+	var combo int64
+	err := r.tx.QueryRow(r.ctx, `INSERT INTO room_rocket_contributions(order_id,user_id,score,combo,multiplier,platform_exp)
 		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(order_id,user_id) DO UPDATE SET
 			score=room_rocket_contributions.score+EXCLUDED.score,combo=room_rocket_contributions.combo+EXCLUDED.combo,
 			multiplier=GREATEST(room_rocket_contributions.multiplier,EXCLUDED.multiplier),
-			platform_exp=room_rocket_contributions.platform_exp+EXCLUDED.platform_exp`,
-		launchID, order.Input.SenderID, plan.Score, int64(order.Input.Quantity), plan.Multiplier, plan.PlatformExp)
+			platform_exp=room_rocket_contributions.platform_exp+EXCLUDED.platform_exp RETURNING combo`,
+		launchID, order.Input.SenderID, plan.Score, int64(order.Input.Quantity), plan.Multiplier, plan.PlatformExp).Scan(&combo)
+	if err == nil {
+		_, err = r.tx.Exec(r.ctx, `UPDATE rocket_refuel_orders SET combo_at_settlement=$2 WHERE order_id=$1`, order.ID, combo)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -176,37 +181,66 @@ func rocketRefuelFrames(ctx context.Context, conn *pgx.Conn, signal roomSignal) 
 	if err != nil {
 		return nil, err
 	}
-	var launchID, millis int64
+	var launchID, millis, combo int64
 	var end *time.Time
-	if err := conn.QueryRow(ctx, `SELECT launch_id,added_millis,end_at_after FROM rocket_refuel_orders WHERE order_id=$1`, order.ID).
-		Scan(&launchID, &millis, &end); err != nil {
+	var plan gift.RefuelPlan
+	if err := conn.QueryRow(ctx, `SELECT launch_id,added_millis,end_at_after,combo_at_settlement,plan FROM rocket_refuel_orders WHERE order_id=$1`, order.ID).
+		Scan(&launchID, &millis, &end, &combo, &plan); err != nil {
 		return nil, err
 	}
 	rank, err := readRocketRank(ctx, conn, launchID)
 	if err != nil {
 		return nil, err
 	}
-	payloads := []struct {
+	type payload struct {
 		kind    int
 		channel string
 		data    any
-	}{
-		{6, "realtime", map[string]any{"user_name": order.Sender.Name, "combo": order.Input.Quantity, "context": ""}},
-		{9, "rocket_rank", rank},
+		index   int
+	}
+	payloads := []payload{
+		{6, "realtime", map[string]any{"user_name": order.Sender.Name, "combo": order.Input.Quantity, "context": ""}, 0},
+		{9, "rocket_rank", rank, 0},
 	}
 	if end != nil && millis > 0 {
-		payloads = append(payloads, struct {
-			kind    int
-			channel string
-			data    any
-		}{16, "realtime", map[string]any{
+		payloads = append(payloads, payload{16, "realtime", map[string]any{
 			"refuel_time": millis, "user_name": order.Sender.Name, "user_avatar": order.Sender.Photo, "rocket_end_time": end.Unix(),
-		}})
+		}, 0})
+	}
+	for _, notice := range plan.Notices {
+		if notice.Deleted == 0 && notice.Type == gift.ComboRocketNotice && notice.Condition == combo {
+			if notice.RoomFlag == 0 {
+				platform, fan, err := subscriptionExperience(ctx, conn, order.Sender.ID, order.Receiver.ID)
+				if err != nil {
+					return nil, err
+				}
+				platformLevel, fanLevel := subscription.ExperienceLevels(platform, fan)
+				order.Sender.PlatformLevel, order.Sender.FanLevel = int32(platformLevel), int32(fanLevel)
+				payloads = append(payloads, payload{18, "realtime", map[string]any{
+					"sender_info": order.Sender, "sender_role": order.SenderRole, "combo": combo,
+				}, 0})
+			}
+			break
+		}
+	}
+	for i, reward := range plan.Rewards {
+		for _, notice := range plan.Notices {
+			if notice.Deleted == 0 && notice.Type == gift.CriticalRocketNotice && notice.Condition > reward.Multiplier {
+				payloads = append(payloads, payload{5, "realtime", map[string]any{
+					"user_name": order.Sender.Name, "critical_strike": notice.Condition, "context": notice.Content,
+				}, i + 1})
+				break
+			}
+		}
 	}
 	frames := make([][]byte, 0, len(payloads))
 	for _, part := range payloads {
+		kind := part.kind
+		if part.index > 0 {
+			kind = part.kind*1000 + part.index
+		}
 		frame, err := json.Marshal(map[string]any{
-			"id": strconv.FormatInt(rocketMessageID(order.ID, part.kind), 10), "room": order.Input.Room, "channel": part.channel, "priority": 0,
+			"id": strconv.FormatInt(rocketMessageID(order.ID, kind), 10), "room": order.Input.Room, "channel": part.channel, "priority": 0,
 			"sender": strconv.FormatInt(order.Input.SenderID, 10), "timestamp": strconv.FormatInt(order.PaidAt.Unix(), 10),
 			"message": map[string]any{"msgGroup": "gift", "msgType": part.kind, "message": part.data},
 		})

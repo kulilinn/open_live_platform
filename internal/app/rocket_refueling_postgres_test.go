@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"open_live_platform/internal/app"
 	"open_live_platform/internal/gift"
@@ -67,7 +68,14 @@ func TestPostgresRocketRefuelSettlesWeightedRewardsAndPool(t *testing.T) {
 			{"id":"1","gift_id":"102","pool_condition":0,"weight":1,"reward_value":21,"reward_multiplier":3,"platform_exp":6,"fuel_points":2},
 			{"id":"2","gift_id":"102","pool_condition":100000,"weight":500,"reward_value":55,"reward_multiplier":9,"platform_exp":19,"fuel_points":9}
 		],
-		"time_rules":[{"time_condition":30,"time_coefficient":10},{"time_condition":1000,"time_coefficient":500}]
+		"time_rules":[{"time_condition":30,"time_coefficient":10},{"time_condition":1000,"time_coefficient":500}],
+		"notices":[
+			{"notice_type":1,"config_condition":3,"content":"equal threshold is skipped"},
+			{"notice_type":1,"config_condition":4,"content":"deleted","del_flag":1},
+			{"notice_type":1,"config_condition":5,"content":"Critical"},
+			{"notice_type":2,"config_condition":2,"live_room_flag":0},
+			{"notice_type":2,"config_condition":3,"live_room_flag":1}
+		]
 	}`), 0600))
 	open := func(config app.Config) *app.App {
 		p, err := app.New(ctx, config)
@@ -106,11 +114,65 @@ func TestPostgresRocketRefuelSettlesWeightedRewardsAndPool(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("invalid attempts billed %d times", calls.Load())
 	}
+	sub, err := first.Rooms.SubscribeWithTranslations(ctx, room.ID, owner.User.ID)
+	check(err)
+	defer sub.Unsubscribe()
 	send(second, 101, 2, "fuel", 200, "200")
 	send(first, 101, 2, "fuel", 200, "200")
+	notices := make(map[string]bool)
+	var criticalFrames, comboFrames int
+	deadline := time.After(3 * time.Second)
+	for criticalFrames < 2 || comboFrames < 1 {
+		select {
+		case event, open := <-sub.Events:
+			if !open {
+				t.Fatal("rocket room subscription closed")
+			}
+			if event.Type != "gift" {
+				continue
+			}
+			var frame struct {
+				ID, Channel string
+				Message     struct {
+					Type int             `json:"msgType"`
+					Data json.RawMessage `json:"message"`
+				}
+			}
+			check(json.Unmarshal([]byte(event.Payload), &frame))
+			if frame.Message.Type != 5 && frame.Message.Type != 18 {
+				continue
+			}
+			var data struct {
+				Strike int    `json:"critical_strike"`
+				Combo  int    `json:"combo"`
+				Text   string `json:"context"`
+			}
+			check(json.Unmarshal(frame.Message.Data, &data))
+			switch frame.Message.Type {
+			case 5:
+				if frame.Channel != "realtime" || data.Strike != 5 || data.Text != "Critical" || notices[frame.ID] {
+					t.Fatalf("critical frame %s", event.Payload)
+				}
+				notices[frame.ID] = true
+				criticalFrames++
+			case 18:
+				if frame.Channel != "realtime" || data.Combo != 2 {
+					t.Fatalf("combo frame %s", event.Payload)
+				}
+				comboFrames++
+			}
+		case <-deadline:
+			t.Fatalf("rocket notices: critical=%d combo=%d", criticalFrames, comboFrames)
+		}
+	}
 	send(second, 101, 3, "decline", 200, "4046")
 	send(first, 101, 3, "decline", 200, "4046")
 	store := first.Rooms.(*postgres.Store)
+	platform, fan, err := store.SubscriptionExperience(ctx, viewer.User.ID, owner.User.ID)
+	check(err)
+	if platform != 232 || fan != 0 {
+		t.Fatalf("rocket settlement experience: platform=%d fan=%d", platform, fan)
+	}
 	rocket, err := store.RoomRocket(ctx, room.ID, room.Session.LiveID)
 	check(err)
 	if rocket == nil || rocket.End.Sub(rocket.Start).Seconds() != 32 {

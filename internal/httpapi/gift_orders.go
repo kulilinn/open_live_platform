@@ -20,6 +20,7 @@ import (
 func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, store gift.OrderStore, billing *payment.Client, catalog *gift.Catalog) {
 	s := server{accounts: accounts, rooms: rooms}
 	_, effectsAvailable := store.(gift.RoomEffectsStore)
+	limits, limitsAvailable := store.(gift.LimitStore)
 	give := func(rocketOnly bool) http.HandlerFunc {
 		return s.authenticated(func(w http.ResponseWriter, r *http.Request, userID int64) {
 			var input gift.Input
@@ -27,7 +28,7 @@ func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms li
 				return
 			}
 			roomID, parseErr := strconv.ParseInt(input.Room, 10, 64)
-			if parseErr != nil || roomID <= 0 || input.LiveID <= 0 || input.GiftID <= 0 || input.ReceiverID <= 0 || input.Quantity <= 0 {
+			if parseErr != nil || roomID <= 0 || input.LiveID <= 0 || input.GiftID <= 0 || input.LimitID < 0 || input.ReceiverID <= 0 || input.Quantity <= 0 {
 				writeGiftError(w, http.StatusBadRequest, "400", "invalid gift purchase")
 				return
 			}
@@ -73,6 +74,9 @@ func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms li
 				return
 			}
 			cost, income, err := item.Cost(input.Quantity, input.LimitID)
+			if input.LimitID > 0 && limitsAvailable {
+				cost, income, err = limits.GiftLimitQuote(r.Context(), input, item)
+			}
 			if err != nil {
 				giftOrderResponse(w, gift.Order{}, err)
 				return
@@ -104,8 +108,8 @@ func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms li
 				return
 			}
 			var receipt payment.Receipt
-			if cost > 0 {
-				receipt, err = billing.Decrease(r.Context(), userID, cost, order.PaymentOrder)
+			if order.Cost > 0 {
+				receipt, err = billing.Decrease(r.Context(), userID, order.Cost, order.PaymentOrder)
 			}
 			declined := errors.Is(err, payment.ErrInsufficientPoints)
 			if err != nil && !declined {
@@ -116,7 +120,7 @@ func RegisterGiftOrders(mux *http.ServeMux, accounts auth.AccountStore, rooms li
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 			defer cancel()
 			completed, err := store.FinishGift(ctx, roomID, order, receipt, declined)
-			if err != nil && !declined && cost > 0 {
+			if err != nil && !declined && order.Cost > 0 {
 				giftOrderResponse(w, order, gift.ErrPending)
 				return
 			}
@@ -288,6 +292,8 @@ func giftOrderResponse(w http.ResponseWriter, order gift.Order, err error) {
 		writeGiftError(w, http.StatusServiceUnavailable, "503", err.Error())
 	case errors.Is(err, gift.ErrCannotRefuel):
 		writeGiftError(w, http.StatusOK, "4086", err.Error())
+	case errors.Is(err, gift.ErrLimit):
+		writeGiftError(w, http.StatusOK, "4038", strings.TrimPrefix(err.Error(), gift.ErrLimit.Error()+": "))
 	case errors.Is(err, gift.ErrUnsupported):
 		writeGiftError(w, http.StatusUnprocessableEntity, "422", err.Error())
 	case errors.Is(err, gift.ErrPending):

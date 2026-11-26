@@ -14,6 +14,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	"open_live_platform/internal/admin"
+	"open_live_platform/internal/auth"
 	"open_live_platform/internal/edge"
 	"open_live_platform/internal/etcdlive"
 	"open_live_platform/internal/platformgrpc"
@@ -97,6 +98,7 @@ func (a *App) serve(ctx context.Context, public, internal net.Listener, manageme
 
 	rpcServer := grpc.NewServer()
 	platformgrpc.Register(rpcServer, a.Accounts, a.Rooms)
+	platformgrpc.RegisterUserDirectory(rpcServer, auth.UserDirectory{Accounts: a.Accounts, Token: a.Config.InternalUserToken})
 	rpcHealth := health.NewServer()
 	rpcHealth.SetServingStatus(etcdlive.PlatformService, healthpb.HealthCheckResponse_SERVING)
 	healthpb.RegisterHealthServer(rpcServer, rpcHealth)

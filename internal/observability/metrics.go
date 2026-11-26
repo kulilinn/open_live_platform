@@ -14,11 +14,14 @@ import (
 )
 
 type Metrics struct {
-	Registry  *prometheus.Registry
-	requests  *prometheus.CounterVec
-	latency   *prometheus.HistogramVec
-	Discovery prometheus.Gauge
-	Reloads   *prometheus.CounterVec
+	Registry      *prometheus.Registry
+	requests      *prometheus.CounterVec
+	latency       *prometheus.HistogramVec
+	Discovery     prometheus.Gauge
+	Reloads       *prometheus.CounterVec
+	onlines       prometheus.Gauge
+	connectors    prometheus.Gauge
+	relayMessages *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -27,12 +30,31 @@ func New() *Metrics {
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "http_requests_total", Help: "Completed HTTP requests by route."}, []string{"path", "method"}),
 		latency: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "http_response_time_seconds", Help: "HTTP response time by route.",
 			Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1, 5, 10, 60}}, []string{"path", "method", "status"}),
-		Discovery: prometheus.NewGauge(prometheus.GaugeOpts{Name: "platform_etcd_discovery_registered", Help: "Whether the gRPC endpoint is registered in etcd."}),
-		Reloads:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "platform_etcd_config_reload_total", Help: "Configuration updates accepted or rejected."}, []string{"result"}),
+		Discovery:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "platform_etcd_discovery_registered", Help: "Whether the gRPC endpoint is registered in etcd."}),
+		Reloads:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "platform_etcd_config_reload_total", Help: "Configuration updates accepted or rejected."}, []string{"result"}),
+		onlines:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "onlines", Help: "Connected browser relay clients."}),
+		connectors:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "connectors", Help: "Connected device relay clients."}),
+		relayMessages: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "agent_msg_total", Help: "Received relay messages by protocol."}, []string{"protocol"}),
 	}
 	result.Registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		result.requests, result.latency, result.Discovery, result.Reloads)
+		result.requests, result.latency, result.Discovery, result.Reloads, result.onlines, result.connectors, result.relayMessages)
 	return result
+}
+
+func (m *Metrics) RelayOpened(protocol string) func() {
+	gauge := m.onlines
+	if protocol == "devicerelayer" {
+		gauge = m.connectors
+	}
+	gauge.Inc()
+	return gauge.Dec
+}
+
+func (m *Metrics) RelayMessage(protocol string) {
+	if protocol == "" {
+		protocol = "native"
+	}
+	m.relayMessages.WithLabelValues(protocol).Inc()
 }
 
 func (m *Metrics) Handler() http.Handler {

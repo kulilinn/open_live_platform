@@ -18,6 +18,7 @@ import (
 )
 
 type RustOptions struct {
+	Metrics    RelayMetrics
 	AppID      int64
 	AppKey     string
 	AppSecret  string
@@ -27,6 +28,11 @@ type RustOptions struct {
 	Devices    RustDeviceStore
 	Grants     RustControlStore
 	DeviceLogs upload.Config
+}
+
+type RelayMetrics interface {
+	RelayOpened(string) func()
+	RelayMessage(string)
 }
 
 type RustTicketRecord struct {

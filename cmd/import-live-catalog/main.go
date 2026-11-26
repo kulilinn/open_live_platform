@@ -22,9 +22,12 @@ var sections = []struct{ name, query string }{
 	{"apps", "SELECT app_id,app_key,app_name,url,callback_url,banner,`desc`,installs,popularity,release_time,state,mobile_client_url FROM apps WHERE state>1 ORDER BY app_id"},
 	{"countries", "SELECT code,name,capital,region,currency_code,currency_name,currency_symbol,language_code,language_name,flag,NULL AS _version FROM countries ORDER BY code"},
 	{"versions", "SELECT name,platform,curr_version,content_zh,content_ja,content_en,ios_url,android_url,update_time,del_flag,NULL AS _version FROM update_version ORDER BY name"},
-	{"marquee", "SELECT id,name,is_jump,jump_url,content FROM marquee WHERE is_deleted=0 AND status=1 ORDER BY display_order,id"},
-	{"classify", "SELECT id,pid,name,language FROM help_classify ORDER BY display_order,id"},
-	{"questions", "SELECT id,first_classify_id,second_classify_id,is_hot,question,language FROM help_question ORDER BY is_hot DESC,display_order,id"},
+	{"marquee", "SELECT id,name,is_jump,jump_url,content,display_order,status,is_deleted FROM marquee ORDER BY display_order,id"},
+	{"broadcast_configs", "SELECT id,name,format,jump_type,jump_target,jump_background,jump_name,background FROM broadcast_configs ORDER BY id"},
+	{"common_settings", "SELECT id,content FROM common_settings WHERE id IN ('black_ip','white_user','black_user','withdrawal_settings') ORDER BY id"},
+	{"bad_words", "SELECT id,name,description,for_country,for_science,url,status FROM bad_words ORDER BY id"},
+	{"classify", "SELECT id,pid,name,language,display_order,create_by,create_by_name,create_time,update_by,update_by_name,update_time FROM help_classify ORDER BY display_order,id"},
+	{"questions", "SELECT id,first_classify_id,second_classify_id,is_hot,question,language,status,display_order,create_by,create_by_name,create_time,update_by,update_by_name,update_time FROM help_question ORDER BY is_hot DESC,display_order,id"},
 	{"answers", "SELECT id,answer,language FROM help_answer ORDER BY id,language"},
 }
 

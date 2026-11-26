@@ -33,7 +33,7 @@ func (s server) exchangeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "token": session.Token, "user": rustAuthUser(session.User)})
+	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "token": session.Token, "user": rustAuthUser(r, session.User)})
 }
 
 func exchangeError(w http.ResponseWriter, err error) {

@@ -45,22 +45,24 @@ func (r Route) MarshalJSON() ([]byte, error) {
 }
 
 type Principal struct {
-	ID           int64    `json:"id,string"`
-	Area         string   `json:"area"`
-	Tenant       string   `json:"tenant"`
-	Username     string   `json:"username"`
-	Nickname     string   `json:"nickName"`
-	Email        string   `json:"email"`
-	PasswordHash string   `json:"passwordHash"`
-	Admin        bool     `json:"admin"`
-	AgencyID     int64    `json:"mcnId,string"`
-	Manager      bool     `json:"manager"`
-	Disabled     bool     `json:"disabled"`
-	Roles        []string `json:"roles"`
-	Permissions  []string `json:"permissions"`
-	Routes       []Route  `json:"routes"`
-	password     auth.LegacyPassword
-	fingerprint  [sha256.Size]byte
+	ID              int64    `json:"id,string"`
+	Area            string   `json:"area"`
+	Tenant          string   `json:"tenant"`
+	Username        string   `json:"username"`
+	Nickname        string   `json:"nickName"`
+	Email           string   `json:"email"`
+	PasswordHash    string   `json:"passwordHash"`
+	Admin           bool     `json:"admin"`
+	AgencyID        int64    `json:"mcnId,string"`
+	Manager         bool     `json:"manager"`
+	Disabled        bool     `json:"disabled"`
+	Roles           []string `json:"roles"`
+	Permissions     []string `json:"permissions"`
+	Routes          []Route  `json:"routes"`
+	DatabaseVersion string   `json:"-"`
+	AccountType     int      `json:"-"`
+	password        auth.LegacyPassword
+	fingerprint     [sha256.Size]byte
 }
 
 type Principals []Principal
@@ -84,7 +86,7 @@ func ReadPrincipals(file string) (Principals, error) {
 			return nil, fmt.Errorf("invalid backoffice principal at entry %d", i+1)
 		}
 		key := p.Area + ":" + strconv.FormatInt(p.ID, 10)
-		login := p.Area + ":" + p.Name()
+		login := p.Area + ":" + strings.ToLower(p.Name())
 		if p.Area == OperationArea {
 			login += ":" + p.Tenant
 		}
@@ -116,7 +118,12 @@ func (p Principal) Scope() string {
 type BackofficeSession struct {
 	ID                            int64
 	Area                          string
+	AgencyID                      int64
+	Manager                       bool
+	AccountType                   int
+	DisplayName                   string
 	Fingerprint                   [sha256.Size]byte
+	DatabaseVersion               string
 	AccessHash, RefreshHash       [sha256.Size]byte
 	AccessExpires, RefreshExpires time.Time
 }
@@ -153,7 +160,20 @@ type tokens struct {
 func newBackofficeSession(p Principal) (BackofficeSession, tokens) {
 	t := tokens{Access: "bo-" + rand.Text() + rand.Text(), Refresh: "br-" + rand.Text() + rand.Text(), ExpiresIn: int64(AccessTTL.Seconds()), Type: "Bearer"}
 	now := time.Now().UTC()
-	return BackofficeSession{ID: p.ID, Area: p.Area, Fingerprint: p.fingerprint,
+	displayName := p.Nickname
+	if displayName == "" {
+		displayName = p.Name()
+	}
+	accountType := 0
+	if p.AccountType != 0 {
+		accountType = p.AccountType
+	} else if p.Admin {
+		accountType = 1
+	} else if p.Manager {
+		accountType = 2
+	}
+	return BackofficeSession{ID: p.ID, Area: p.Area, AgencyID: p.AgencyID, Manager: p.Manager,
+		AccountType: accountType, DisplayName: displayName, Fingerprint: p.fingerprint, DatabaseVersion: p.DatabaseVersion,
 		AccessHash: sha256.Sum256([]byte(t.Access)), RefreshHash: sha256.Sum256([]byte(t.Refresh)),
 		AccessExpires: now.Add(AccessTTL), RefreshExpires: now.Add(RefreshTTL)}, t
 }
@@ -163,6 +183,14 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		return nil, fmt.Errorf("no active %s principals in the configured credential file", area)
 	}
 	b := backoffice{store: store, area: area, principals: principals}
+	if system, ok := store.(SystemStore); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := system.ReserveSystemBootstrap(ctx, principals)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if len(options) > 0 {
 		b.options = options[0]
 	}
@@ -173,6 +201,7 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		login, logout = "POST /api/user/account_login", "POST /api/user/logout"
 	}
 	mux.HandleFunc(login, b.login)
+	b.registerSystem(mux)
 	mux.HandleFunc(logout, b.authorized(false, false, func(w http.ResponseWriter, r *http.Request, _ Principal, key [sha256.Size]byte) {
 		backofficeReply(w, nil, b.store.LogoutBackoffice(r.Context(), b.area, key))
 	}))
@@ -190,6 +219,8 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		}
 		b.registerMCN(mux)
 		b.registerMCNOnboarding(mux)
+		b.registerMCNReports(mux)
+		b.registerMCNIncome(mux)
 	} else {
 		b.registerOperations(mux)
 		b.registerUserHistory(mux)
@@ -197,9 +228,19 @@ func BackofficeHandler(area string, principals Principals, store BackofficeStore
 		b.registerGiftMutations(mux, catalog)
 		b.registerAnchorReviews(mux)
 		b.registerPostReviews(mux)
+		b.registerEditorial(mux)
+		b.registerPlatformSettings(mux)
+		b.registerWordLists(mux)
+		b.registerUploads(mux, catalog)
 	}
+	b.registerMCNDirectory(mux)
+	b.registerMCNFinanceIncome(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+		var limit int64 = 64 * 1024
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			limit = 2 * 1024 * 1024
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		mux.ServeHTTP(w, r)
 	}), nil
 }
@@ -214,17 +255,50 @@ func (b backoffice) login(w http.ResponseWriter, r *http.Request) {
 		name = body.Email
 	}
 	for _, p := range b.principals {
-		if p.Area != b.area || p.Disabled || p.Name() != name || (b.area == OperationArea && p.Tenant != tenant) {
+		if p.Area != b.area || !strings.EqualFold(p.Name(), name) || (b.area == OperationArea && p.Tenant != tenant) {
 			continue
 		}
-		if len(body.Password) <= 4096 && p.password.Matches(body.Password) {
-			session, response := newBackofficeSession(p)
-			backofficeReply(w, response, b.store.LoginBackoffice(r.Context(), session))
+		b.loginPrincipal(w, r, p, body.Password)
+		return
+	}
+	if system, ok := b.store.(SystemStore); ok && name != "" && (b.area != OperationArea || tenant != "") && len(body.Password) <= 4096 {
+		p, err := system.FindSystemPrincipal(r.Context(), b.area, 0, tenant, name)
+		if err == nil {
+			b.loginPrincipal(w, r, p, body.Password)
 			return
 		}
-		break
+		if !errors.Is(err, ErrBackofficeNotFound) {
+			backofficeReply(w, nil, err)
+			return
+		}
 	}
 	backofficeError(w, http.StatusUnauthorized, "401", "Unauthorized request")
+}
+
+func (b backoffice) loginPrincipal(w http.ResponseWriter, r *http.Request, p Principal, password string) {
+	if p.Disabled || password == "" || len(password) > 4096 || !p.password.Matches(password) {
+		backofficeError(w, http.StatusUnauthorized, "401", "Unauthorized request")
+		return
+	}
+	session, response := newBackofficeSession(p)
+	err := b.store.LoginBackoffice(r.Context(), session)
+	if errors.Is(err, ErrBackofficeNotFound) {
+		backofficeError(w, http.StatusUnauthorized, "401", "Unauthorized request")
+		return
+	}
+	backofficeReply(w, response, err)
+}
+
+func (b backoffice) currentPrincipal(ctx context.Context, id int64) (Principal, error) {
+	for _, p := range b.principals {
+		if p.Area == b.area && p.ID == id {
+			return p, nil
+		}
+	}
+	if system, ok := b.store.(SystemStore); ok {
+		return system.FindSystemPrincipal(ctx, b.area, id, "", "")
+	}
+	return Principal{}, ErrBackofficeNotFound
 }
 
 type backofficeHandler func(http.ResponseWriter, *http.Request, Principal, [sha256.Size]byte)
@@ -254,25 +328,26 @@ func (b backoffice) authorizedTenant(refresh, permission bool, tenant string, ne
 			backofficeReply(w, nil, err)
 			return
 		}
-		for _, p := range b.principals {
-			if p.Area != b.area || p.Disabled || p.ID != id || p.fingerprint != fingerprint {
-				continue
-			}
-			if permission && ((tenant != "" && p.Tenant != tenant) ||
-				(!p.Admin && !slices.Contains(p.Permissions, strings.ReplaceAll(strings.TrimPrefix(r.URL.Path, "/"), "/", ":")))) {
-				backofficeError(w, http.StatusForbidden, "403", "Operation not allowed")
-				return
-			}
-			if permission {
-				if err := b.store.AuditBackofficeAccess(r.Context(), p, r.URL.Path); err != nil {
-					backofficeReply(w, nil, err)
-					return
-				}
-			}
-			next(w, r, p, key)
+		p, err := b.currentPrincipal(r.Context(), id)
+		if errors.Is(err, ErrBackofficeNotFound) || (err == nil && (p.Disabled || p.fingerprint != fingerprint)) {
+			backofficeError(w, http.StatusUnauthorized, "401", "Unauthorized request")
 			return
 		}
-		backofficeError(w, http.StatusUnauthorized, "401", "Unauthorized request")
+		if err != nil {
+			backofficeReply(w, nil, err)
+			return
+		}
+		if permission && ((tenant != "" && p.Tenant != tenant) || !p.Can(systemPermission(r.URL.Path))) {
+			backofficeError(w, http.StatusForbidden, "403", "Operation not allowed")
+			return
+		}
+		if permission {
+			if err := b.store.AuditBackofficeAccess(r.Context(), p, r.URL.Path); err != nil {
+				backofficeReply(w, nil, err)
+				return
+			}
+		}
+		next(w, r, p, key)
 	}
 }
 

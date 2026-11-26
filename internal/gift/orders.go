@@ -16,6 +16,7 @@ var (
 	ErrOrderConflict = errors.New("gift idempotency key already used for another purchase")
 	ErrPending       = errors.New("gift payment requires reconciliation")
 	ErrUnsupported   = errors.New("gift pricing or effects unavailable")
+	ErrLimit         = errors.New("gift purchase limit")
 )
 
 const (
@@ -82,6 +83,31 @@ type OrderStore interface {
 	GiftIncome(ctx context.Context, roomID, liveID int64) ([]Income, error)
 	GiftTotalIncome(ctx context.Context, roomID int64) (*int64, error)
 	GiftRank(ctx context.Context, anchorID int64, since time.Time) ([]Rank, error)
+}
+
+type LimitStore interface {
+	GiftLimitQuote(ctx context.Context, input Input, item Gift) (int64, int64, error)
+	GiftPromotionContent(ctx context.Context, userID int64, content Interactions) (Interactions, error)
+}
+
+func (l Limit) Cost(item Gift, quantity int32) (int64, int64, error) {
+	if l.GiftID != item.ID || l.Income == nil {
+		return 0, 0, ErrUnsupported
+	}
+	if _, _, err := item.Cost(quantity, 0); err != nil {
+		return 0, 0, err
+	}
+	if l.Price < 0 || l.Price > math.MaxInt64/int64(quantity) {
+		return 0, 0, ErrUnsupported
+	}
+	cost, income := l.Price*int64(quantity), *l.Income
+	if item.EffectControlType == RefuelingEffect {
+		income = 0
+	}
+	if income < 0 || income > cost {
+		return 0, 0, ErrUnsupported
+	}
+	return cost, income, nil
 }
 
 func (g Gift) Cost(quantity int32, limitID int64) (int64, int64, error) {

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -141,6 +142,7 @@ type catalog struct {
 }
 
 type Service struct {
+	luban     atomic.Pointer[LubanCatalog]
 	store     Store
 	chain     *chain
 	data      catalog
@@ -232,12 +234,15 @@ func (s *Service) UserProfile(ctx context.Context, userID int64, photo string, i
 }
 
 func (s *Service) Privileges() []Privilege {
+	if cfg := s.luban.Load(); cfg != nil {
+		return append([]Privilege{}, cfg.privileges...)
+	}
 	return append([]Privilege{}, s.data.Privileges...)
 }
 
 func (s *Service) Adorns(unlock *int32) []Adorn {
 	items := []Adorn{}
-	for _, item := range s.data.Adorns {
+	for _, item := range s.availableAdorns() {
 		if unlock == nil || item.Unlock == *unlock {
 			item.EffectTime, item.FloatingTime = 0, 0
 			items = append(items, item)
@@ -306,8 +311,8 @@ func (s *Service) Bind(ctx context.Context, userID, challengeID int64, tokenID u
 		return err
 	}
 	var slots map[int8]int32
-	if len(s.data.Adorns) > 0 && s.data.Adorns[0].Unlock == 1 {
-		slots = s.data.Adorns[0].slots()
+	if adorns := s.availableAdorns(); len(adorns) > 0 && adorns[0].Unlock == 1 {
+		slots = adorns[0].slots()
 	}
 	return s.store.BindNFT(ctx, challenge, binding, slots)
 }
@@ -337,7 +342,7 @@ func (s *Service) Unbind(ctx context.Context, userID int64) error {
 }
 
 func (s *Service) Equip(ctx context.Context, userID int64, adornID int32) error {
-	adorn, found := s.adorn[adornID]
+	adorn, found := s.adornLookup()[adornID]
 	if !found {
 		return ErrNotFound
 	}
@@ -371,8 +376,9 @@ func (s *Service) View(ctx context.Context, userID int64, verify bool) (View, er
 		return view, err
 	}
 	view.TokenID = &state.Binding.TokenID
+	adorns := s.adornLookup()
 	for slot, id := range state.Slots {
-		a, found := s.adorn[id]
+		a, found := adorns[id]
 		if !found || slot < 1 || slot > 7 {
 			continue
 		}

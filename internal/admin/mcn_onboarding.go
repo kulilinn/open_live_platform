@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"open_live_platform/internal/transport/httpx"
+	"open_live_platform/internal/upload"
 )
 
 const (
@@ -64,7 +65,9 @@ type MCNOnboardingStore interface {
 }
 
 type BackofficeOptions struct {
-	MCNJoinURL string
+	MCNJoinURL, MCNInternalToken string
+	Images                       upload.Config
+	ImagePrefix                  string
 }
 
 func (b backoffice) registerMCNOnboarding(mux *http.ServeMux) {

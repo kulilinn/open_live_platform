@@ -107,6 +107,10 @@ func RegisterPublicCatalog(mux *http.ServeMux, store catalog.Store) {
 		}
 		list := make([]map[string]any, 0, len(rows))
 		for _, v := range rows {
+			// Earlier snapshots contain only published items and omit both flags.
+			if v.Int("is_deleted") != 0 || (v["status"] != nil && v.Int("status") != 1) {
+				continue
+			}
 			list = append(list, map[string]any{"id": string(v["id"]), "name": v["name"], "isJump": v["is_jump"], "jumpUrl": v["jump_url"], "content": v["content"]})
 		}
 		reply(w, list)

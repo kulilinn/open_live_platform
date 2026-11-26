@@ -8,6 +8,27 @@ service PlatformService {
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
 }
 
+service UserDirectoryService {
+  rpc GetUser(GetUserRequest) returns (DirectoryUser);
+}
+
+message GetUserRequest {
+  int64 id = 1;
+}
+
+message DirectoryUser {
+  int64 id = 1;
+  string email = 2;
+  string name = 3;
+  string display_name = 4;
+  string search_name = 5;
+  string language = 6;
+  string photo = 7;
+  string banner = 8;
+  bool is_anchor = 9;
+  int32 status = 10;
+}
+
 message GetStatsRequest {}
 
 message GetStatsResponse {

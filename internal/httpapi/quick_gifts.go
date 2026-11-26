@@ -43,10 +43,15 @@ func (a giftInteractionsAPI) quickList(w http.ResponseWriter, r *http.Request, a
 			}
 		}
 	}
-	list := make([]gift.PromotionView, 0, len(a.content.QuickGifts))
+	content, err := a.promotionContent(ctx, actor)
+	if err != nil {
+		dateGiftResult(w, nil, err)
+		return
+	}
+	list := make([]gift.PromotionView, 0, len(content.QuickGifts))
 	now := time.Now()
-	for _, entry := range a.content.QuickGifts {
-		item, ok := a.content.PromotionAtLimit(entry.LimitID, actor, items, now)
+	for _, entry := range content.QuickGifts {
+		item, ok := content.PromotionAtLimit(entry.LimitID, actor, items, now)
 		if !ok {
 			continue
 		}

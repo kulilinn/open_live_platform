@@ -38,6 +38,13 @@ func (s *Store) SetMCNApplication(ctx context.Context, actor admin.Principal, pa
 		return admin.ErrBackofficeForbidden
 	}
 	return s.mcnChange(ctx, func(tx pgx.Tx) error {
+		var disabled bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcn_agency_directory WHERE id=$1 AND disabled)`, actor.AgencyID).Scan(&disabled); err != nil {
+			return err
+		}
+		if disabled {
+			return admin.ErrBackofficeForbidden
+		}
 		if action == "add" {
 			return applyMCNStreamer(ctx, tx, actor, path, edit, managerName, inviteBase)
 		}
@@ -68,7 +75,13 @@ func (s *Store) SetMCNApplication(ctx context.Context, actor admin.Principal, pa
 				err = admin.ErrMCNState
 			}
 		case "account_new":
+			if record.Status == admin.MCNJoinFinish {
+				return nil
+			}
 			err = enableMCNStreamer(ctx, tx, record)
+			if err == nil {
+				err = addMCNMembershipMessage(ctx, tx, record.ID, 2)
+			}
 		default:
 			err = admin.ErrMCNState
 		}
@@ -205,9 +218,6 @@ func rejectMCNStreamer(ctx context.Context, tx pgx.Tx, record mcnApplication) er
 }
 
 func enableMCNStreamer(ctx context.Context, tx pgx.Tx, record mcnApplication) error {
-	if record.Status == admin.MCNJoinFinish {
-		return nil
-	}
 	if record.Status != admin.MCNJoinWait {
 		return admin.ErrMCNState
 	}
@@ -243,7 +253,8 @@ func (s *Store) ConfirmMCNInvitation(ctx context.Context, agency, streamer int64
 		var record int64
 		var expected []byte
 		err := tx.QueryRow(ctx, `SELECT id,invite_hash FROM backoffice_mcn_streamers
-			WHERE mcn_id=$1 AND streamer_id=$2 AND status=$3 AND NOT superseded AND invite_until>statement_timestamp() FOR UPDATE`,
+			WHERE mcn_id=$1 AND streamer_id=$2 AND status=$3 AND NOT superseded AND invite_until>statement_timestamp()
+			AND NOT EXISTS(SELECT 1 FROM mcn_agency_directory WHERE id=$1 AND disabled) FOR UPDATE`,
 			agency, streamer, admin.MCNJoinNormal).Scan(&record, &expected)
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && subtle.ConstantTimeCompare(expected, hash[:]) != 1 {
 			return admin.ErrBackofficeForbidden
@@ -272,6 +283,16 @@ func (s *Store) ConfirmMCNInvitation(ctx context.Context, agency, streamer int64
 		_, err = tx.Exec(ctx, `INSERT INTO backoffice_logs(area,tenant,operator_id,operator_name,path,target,action)
 			SELECT 'mcn',$2,u.id,u.account,'/api/mcn/streamer/join',$3,'mcn_consent' FROM users u WHERE u.id=$1`,
 			streamer, strconv.FormatInt(agency, 10), strconv.FormatInt(record, 10))
-		return err
+		if err != nil {
+			return err
+		}
+		return addMCNMembershipMessage(ctx, tx, record, 1)
 	})
+}
+
+func addMCNMembershipMessage(ctx context.Context, tx pgx.Tx, membership int64, ty int) error {
+	_, err := tx.Exec(ctx, `INSERT INTO mcn_messages(agency_id,manager_id,user_id,ty,params)
+		SELECT mcn_id,manager_id,CASE WHEN $2=1 THEN streamer_id ELSE id END,$2,jsonb_build_object('name',name)
+		FROM backoffice_mcn_streamers WHERE id=$1`, membership, ty)
+	return err
 }

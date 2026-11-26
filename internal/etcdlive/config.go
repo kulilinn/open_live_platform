@@ -61,14 +61,14 @@ func (s Tables) Read(ctx context.Context, revision int64) (map[string][]byte, in
 	if len(version) == 0 {
 		return nil, result.Header.Revision, errors.New("etcd configuration version key missing")
 	}
-	if revision == 0 && version[0].ModRevision < result.Header.Revision {
-		published, _, err := s.Read(ctx, version[0].ModRevision)
-		return published, result.Header.Revision, err
-	}
 	tables := make(map[string][]byte, len(s.Names))
 	for i, name := range s.Names {
 		rows := result.Responses[i+1].GetResponseRange()
 		if len(rows.Kvs) > 0 {
+			if revision == 0 && rows.Kvs[0].ModRevision > version[0].ModRevision {
+				published, _, err := s.Read(ctx, version[0].ModRevision)
+				return published, result.Header.Revision, err
+			}
 			tables[name] = rows.Kvs[0].Value
 		}
 	}

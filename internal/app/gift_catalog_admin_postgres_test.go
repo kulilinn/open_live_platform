@@ -127,6 +127,70 @@ func TestPostgresOperationalGiftCatalog(t *testing.T) {
 	if calls.Load() != 1 || points.Load() != 25 {
 		t.Fatalf("payment did not get catalog price: %d calls, %d points", calls.Load(), points.Load())
 	}
+	_, err = db.Exec(ctx, `INSERT INTO legacy_business_history(source_table,source_id,owner_id,record) VALUES
+		('pay_orders','9007199254741221',$1,'{"amount":16.58,"point":90,"payment_method_name":"Card","status":2,"create_time":"2026-01-21 04:20:00"}'),
+		('point_transactions','1',$1,'{"no":"purchase-1","transaction_type":2,"total_point":25,"income_or_expenses":-1,"create_time":"2026-01-21 04:21:00"}'),
+		('point_transactions','9007199254741222',$1,'{"no":"legacy-spend","transaction_type":2,"total_point":45,"income_or_expenses":-1,"transaction_order_id":77,"create_time":"2026-01-21 04:22:00"}'),
+		('point_transactions','9007199254741223',$1,'{"no":"legacy-income","transaction_type":2,"total_point":99,"income_or_expenses":1,"create_time":"2026-01-21 04:23:00"}'),
+		('gift_production_marketing','77',$1,'{"gift_id":78}'),('gifts','78',78,'{"name":"Legacy gift"}')`, fan.User.ID)
+	check(err)
+	const reports = "/api/operation/usermanage/user/"
+	charge := fmt.Sprintf(`{"uid":"%d","status":2,"startTime":"2026-01-21","endTime":"2026-01-22"}`, fan.User.ID)
+	data = request(ops.Backoffice.Handler, "POST", reports+"charge_records", operator, "", charge, 200, "200")
+	if !strings.Contains(string(data), `"orderId":"9007199254741221"`) || !strings.Contains(string(data), `"price":"16.58"`) || !strings.Contains(string(data), `"total":1`) {
+		t.Fatalf("charge history = %s", data)
+	}
+	request(ops.Backoffice.Handler, "POST", reports+"charge_records", reader, "", charge, 403, "403")
+	data = request(ops.Backoffice.Handler, "POST", reports+"consume_records", operator, "", fmt.Sprintf(`{"uid":"%d","ty":2,"pageSize":2}`, fan.User.ID), 200, "200")
+	for _, want := range []string{`"total":2`, `"lp":25`, `"lp":45`, `"Legacy gift"`, `"Updated gift"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("consume history %s does not contain %s", data, want)
+		}
+	}
+	var post, comment int64
+	check(db.QueryRow(ctx, `INSERT INTO anchor_posts(owner_id,content,visibility,price,media,only_text,images,videos,video_length,reference_post,status,comment_count)
+		VALUES($1,'What the moderator sees',0,0,'[]',1,0,0,0,'',3,2) RETURNING id`, host.User.ID).Scan(&post))
+	check(db.QueryRow(ctx, `INSERT INTO anchor_post_comments(post_id,author_id,content) VALUES($1,$2,'Original comment') RETURNING id`, post, fan.User.ID).Scan(&comment))
+	_, err = db.Exec(ctx, `INSERT INTO anchor_post_comments(post_id,author_id,content,parent_id) VALUES($1,$2,'Reply',$3)`, post, host.User.ID, comment)
+	check(err)
+	const review = "/api/operation/business/post/"
+	postID := fmt.Sprintf(`{"id":"%d","uid":"%d"}`, post, host.User.ID)
+	comments := fmt.Sprintf(`{"postId":"%d"}`, post)
+	commentID := fmt.Sprintf(`{"id":"%d","postId":"%d"}`, comment, post)
+	request(ops.Backoffice.Handler, "POST", review+"delete", reader, "", postID, 403, "403")
+	data = request(ops.Backoffice.Handler, "POST", review+"page", operator, "", fmt.Sprintf(`{"authorId":"%d","passStatus":3}`, host.User.ID), 200, "200")
+	if !strings.Contains(string(data), `"total":1`) || !strings.Contains(string(data), `"commentNum":2`) {
+		t.Fatalf("post review page = %s", data)
+	}
+	data = request(ops.Backoffice.Handler, "POST", review+"detail", operator, "", postID, 200, "200")
+	if !strings.Contains(string(data), `"content":"What the moderator sees"`) {
+		t.Fatalf("post review detail = %s", data)
+	}
+	data = request(ops.Backoffice.Handler, "POST", review+"comments", operator, "", comments, 200, "200")
+	if !strings.Contains(string(data), `"comments":[`) || !strings.Contains(string(data), "Original comment") || !strings.Contains(string(data), "Reply") {
+		t.Fatalf("post review comments = %s", data)
+	}
+	request(ops.Backoffice.Handler, "POST", review+"detail", operator, "", fmt.Sprintf(`{"id":"%d","uid":"%d"}`, post, fan.User.ID), 200, "4005")
+	for range 2 {
+		request(ops.Backoffice.Handler, "POST", review+"comment_delete", operator, "", commentID, 200, "200")
+	}
+	data = request(ops.Backoffice.Handler, "POST", review+"comments", operator, "", comments, 200, "200")
+	if !strings.Contains(string(data), `"comments":[]`) {
+		t.Fatalf("moderator left comment branch active: %s", data)
+	}
+	for range 2 {
+		request(ops.Backoffice.Handler, "POST", review+"delete", operator, "", postID, 200, "200")
+	}
+	data = request(platform.Server.Handler, "GET", fmt.Sprintf("/anchor/api/get_one_post/%d", post), fan.Token, "", "", 200, "200")
+	if string(data) != "null" {
+		t.Fatalf("removed post still appears in public details: %s", data)
+	}
+	var removes, commentCount int
+	check(db.QueryRow(ctx, `SELECT count(*) FROM backoffice_logs WHERE operator_id=47 AND action IN ('post_delete','post_comment_delete')`).Scan(&removes))
+	check(db.QueryRow(ctx, `SELECT comment_count FROM anchor_posts WHERE id=$1 AND deleted`, post).Scan(&commentCount))
+	if removes != 2 || commentCount != 0 {
+		t.Fatalf("post moderator mutations audited %d times, %d active comments", removes, commentCount)
+	}
 	update("delete", operator, `{"id":"8001"}`, 200, "200")
 	if items := read(); strings.Contains(string(items), `"8001"`) {
 		t.Fatalf("deleted gift returned by catalog: %s", items)

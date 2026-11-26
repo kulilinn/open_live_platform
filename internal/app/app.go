@@ -44,6 +44,7 @@ import (
 type Config struct {
 	Etcd                       etcdlive.Config
 	LubanRoomBots              bool
+	LubanCollectibles          bool
 	MetricsAddr                string
 	MaintenanceToken           string
 	DemoItemsFile              string
@@ -80,7 +81,9 @@ type Config struct {
 	AdminAddr                  string
 	MCNAdminAddr               string
 	MCNJoinURL                 string
+	MCNInternalToken           string
 	AdminAccountsFile          string
+	AdminImagePrefix           string
 	EdgeToken                  string
 	RelaySecret                string
 	RelayPublicURL             string
@@ -88,6 +91,8 @@ type Config struct {
 	GiftCatalogFile            string
 	GiftInteractionFile        string
 	JWTSecret                  string
+	TrustedOAuthClientsFile    string
+	InternalUserToken          string
 	MailSMTP                   auth.SMTPConfig
 	MailCodeSecret             string
 	MailCodeTTL                time.Duration
@@ -115,12 +120,14 @@ type Config struct {
 func ConfigFromEnv() Config {
 	adminToken := os.Getenv("ADMIN_TOKEN")
 	bots, botConfigErr := livebot.LoadFromEnv()
+	lubanNFT, _ := strconv.ParseBool(os.Getenv("PLATFORM_ETCD_NFT"))
 	rocketSpeed, _ := strconv.ParseFloat(os.Getenv("ROCKET_LIKE_SPEED_COEFFICIENT"), 64)
 	postAuditRequired, _ := strconv.ParseBool(os.Getenv("POST_AUDIT_REQUIRED"))
 	testMode, _ := strconv.ParseBool(os.Getenv("TEST_MODE"))
 	return Config{
 		Etcd:                       etcdlive.FromEnv(),
 		LubanRoomBots:              livebot.WantsLuban(),
+		LubanCollectibles:          lubanNFT,
 		MetricsAddr:                metricsAddress(),
 		MaintenanceToken:           os.Getenv("MAINTENANCE_TOKEN"),
 		DemoItemsFile:              os.Getenv("DEMO_ITEMS_FILE"),
@@ -156,7 +163,9 @@ func ConfigFromEnv() Config {
 		AdminAddr:                  os.Getenv("PLATFORM_ADMIN_ADDR"),
 		MCNAdminAddr:               os.Getenv("PLATFORM_MCN_ADMIN_ADDR"),
 		MCNJoinURL:                 os.Getenv("MCN_STREAMER_JOIN_URL"),
+		MCNInternalToken:           os.Getenv("MCN_INTERNAL_TOKEN"),
 		AdminAccountsFile:          os.Getenv("ADMIN_ACCOUNTS_FILE"),
+		AdminImagePrefix:           os.Getenv("AWS_S3_BACKEND_PATH"),
 		EdgeToken:                  env("EDGE_TOKEN", adminToken),
 		RelaySecret:                env("RELAY_SECRET", "dev-secret"),
 		RelayPublicURL:             os.Getenv("RELAY_PUBLIC_URL"),
@@ -164,6 +173,8 @@ func ConfigFromEnv() Config {
 		GiftCatalogFile:            os.Getenv("GIFT_CATALOG_FILE"),
 		GiftInteractionFile:        os.Getenv("GIFT_INTERACTION_FILE"),
 		JWTSecret:                  os.Getenv("JWT_SECRET"),
+		TrustedOAuthClientsFile:    os.Getenv("AUTH_INTERNAL_CLIENTS_FILE"),
+		InternalUserToken:          os.Getenv("INTERNAL_USER_TOKEN"),
 		MailSMTP:                   smtpFromEnv(),
 		MailCodeSecret:             os.Getenv("MAIL_CODE_SECRET"),
 		MailCodeTTL:                mailCodeTTLFromEnv(),
@@ -188,24 +199,29 @@ func ConfigFromEnv() Config {
 }
 
 type App struct {
-	cluster       *appCluster
-	metrics       *observability.Metrics
-	geoDB         *geo.DB
-	push          relay.PushPrivate
-	dates         *httpapi.Dates
-	mcnMailer     admin.MCNMailSender
-	Config        Config
-	Accounts      auth.AccountStore
-	Rooms         live.RoomStore
-	DM            dm.Store
-	Subtitles     *stt.Service
-	Server        *http.Server
-	Backoffice    *http.Server
-	MCNBackoffice *http.Server
-	db            *postgres.Store
+	collectibleConfig *collectible.Service
+	cluster           *appCluster
+	metrics           *observability.Metrics
+	geoDB             *geo.DB
+	push              relay.PushPrivate
+	dates             *httpapi.Dates
+	mcnMailer         admin.MCNMailSender
+	Config            Config
+	Accounts          auth.AccountStore
+	Rooms             live.RoomStore
+	DM                dm.Store
+	Subtitles         *stt.Service
+	Server            *http.Server
+	Backoffice        *http.Server
+	MCNBackoffice     *http.Server
+	db                *postgres.Store
 }
 
 func New(ctx context.Context, config Config) (*App, error) {
+	trustedClients, err := auth.ReadTrustedClients(config.TrustedOAuthClientsFile)
+	if err != nil {
+		return nil, err
+	}
 	if config.roomBotsConfigError != nil {
 		return nil, fmt.Errorf("live room bots: %w", config.roomBotsConfigError)
 	}
@@ -336,6 +352,10 @@ func New(ctx context.Context, config Config) (*App, error) {
 			db.Shutdown()
 			return nil, err
 		}
+		if err := db.ImportGiftPromotionContent(ctx, interactions); err != nil {
+			db.Shutdown()
+			return nil, err
+		}
 		if len(config.RoomBots.Accounts) > 0 {
 			if err := db.ConfigureRoomBots(config.RoomBots); err != nil {
 				db.Shutdown()
@@ -369,6 +389,9 @@ func New(ctx context.Context, config Config) (*App, error) {
 			db.Shutdown()
 		}
 		return nil, err
+	}
+	if cluster != nil && cluster.usesNFT {
+		collectibles.ConfigureLuban(cluster.nft)
 	}
 	if db != nil && config.WalletPasses.Storage.Bucket != "" {
 		config.WalletPasses.Issued = db
@@ -423,6 +446,11 @@ func New(ctx context.Context, config Config) (*App, error) {
 	subtitles := stt.New(config.Subtitles, signer, rooms, taskStore)
 	dateSubtitles := stt.New(config.Subtitles, signer, rooms, dateStore.DateSubtitles())
 	config.RelayRust.DeviceLogs = config.Upload
+	var metrics *observability.Metrics
+	if config.MetricsAddr != "" {
+		metrics = observability.New()
+		config.RelayRust.Metrics = metrics
+	}
 	push := relay.Register(mux, accounts, rooms, config.RelaySecret, config.RelayPublicURL, config.RelayRust)
 	dates := &httpapi.Dates{Accounts: accounts, Service: date.New(dateStore, accounts, subscriptions, billing),
 		Signer: signer, Subtitles: dateSubtitles, Push: push}
@@ -435,7 +463,9 @@ func New(ctx context.Context, config Config) (*App, error) {
 		httpapi.LiveServices{Subtitles: subtitles, Dates: dates, Collectible: collectibles, PreloginEnd: config.PreloginEnd})
 	httpapi.RegisterSTT(mux, accounts, subtitles, dateSubtitles)
 	httpapi.RegisterTranslate(mux, accounts, translate.New(config.TextTranslation))
-	httpapi.RegisterGoogle(mux, auth.GoogleLogin{Config: config.Google, Accounts: accounts, Backend: backend, Mail: emailVerification})
+	googleLogin := auth.GoogleLogin{Config: config.Google, Accounts: accounts, Backend: backend, Mail: emailVerification}
+	httpapi.RegisterGoogle(mux, googleLogin)
+	httpapi.RegisterTrustedAuth(mux, auth.UserDirectory{Accounts: accounts, Token: config.InternalUserToken}, backend, googleLogin, trustedClients)
 	httpapi.RegisterTelegram(mux, accounts, backend, config.TelegramBotToken)
 	httpapi.RegisterGiftCatalog(mux, accounts, giftCatalog)
 	httpapi.RegisterGiftInteractions(mux, dates, giftCatalog, interactions, billing)
@@ -471,28 +501,30 @@ func New(ctx context.Context, config Config) (*App, error) {
 	}
 	edge.Register(mux, rooms, notices, config.EdgeToken)
 
-	var metrics *observability.Metrics
 	handler := httpx.BrowserHandler(mux, httpx.BrowserConfig{Origins: config.CORSOrigins, RateLimit: config.RateLimit, TrustedProxies: config.Geo.TrustedProxies})
-	if config.MetricsAddr != "" {
-		metrics = observability.New()
+	if db != nil {
+		handler = httpapi.WithAccessSettings(mux, handler, db, config.Geo.TrustedProxies)
+	}
+	if metrics != nil {
 		handler = metrics.Observe(handler, mux)
 	}
 	opened = true
 	return &App{
-		cluster:       cluster,
-		metrics:       metrics,
-		geoDB:         geoDB,
-		push:          push,
-		dates:         dates,
-		mcnMailer:     mcnMailer,
-		db:            db,
-		Config:        config,
-		Accounts:      accounts,
-		Rooms:         rooms,
-		DM:            messages,
-		Backoffice:    backoffice,
-		MCNBackoffice: mcnBackoffice,
-		Subtitles:     subtitles,
+		collectibleConfig: collectibles,
+		cluster:           cluster,
+		metrics:           metrics,
+		geoDB:             geoDB,
+		push:              push,
+		dates:             dates,
+		mcnMailer:         mcnMailer,
+		db:                db,
+		Config:            config,
+		Accounts:          accounts,
+		Rooms:             rooms,
+		DM:                messages,
+		Backoffice:        backoffice,
+		MCNBackoffice:     mcnBackoffice,
+		Subtitles:         subtitles,
 		Server: &http.Server{
 			Addr:              config.Addr,
 			Handler:           handler,
@@ -508,7 +540,10 @@ func managementServer(config Config, db *postgres.Store, principals admin.Princi
 	if address == "" {
 		return nil, nil
 	}
-	handler, err := admin.BackofficeHandler(area, principals, db, catalog, admin.BackofficeOptions{MCNJoinURL: config.MCNJoinURL})
+	handler, err := admin.BackofficeHandler(area, principals, db, catalog, admin.BackofficeOptions{
+		MCNJoinURL: config.MCNJoinURL, MCNInternalToken: config.MCNInternalToken,
+		Images: config.Upload, ImagePrefix: config.AdminImagePrefix,
+	})
 	if err != nil {
 		return nil, err
 	}

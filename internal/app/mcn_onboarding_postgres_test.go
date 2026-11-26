@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"open_live_platform/internal/admin"
@@ -39,7 +40,8 @@ func TestPostgresMCNOnboarding(t *testing.T) {
 		{ID: 21, Area: admin.MCNArea, AgencyID: 21, Email: "admin-one@example.test", Admin: true, PasswordHash: hash},
 		{ID: 22, Area: admin.MCNArea, AgencyID: 22, Email: "admin-two@example.test", Admin: true, PasswordHash: hash},
 		{ID: 23, Area: admin.MCNArea, AgencyID: 21, Email: "manager@example.test", Manager: true, PasswordHash: hash,
-			Permissions: []string{"api:streamer:add", "api:streamer:edit", "api:streamer:account_new"}},
+			Permissions: []string{"api:streamer:add", "api:streamer:edit", "api:streamer:account_new", "api:statistic:live:yesterday", "api:statistic:live:line_chart", "api:statistic:live:streamer_list",
+				"api:income:streamer:agency_page", "api:income:streamer:ratio_page", "api:statistic:streamer:refresh_settle_ld"}},
 	}
 	payload, err := json.Marshal(principals)
 	check(err)
@@ -106,7 +108,7 @@ func TestPostgresMCNOnboarding(t *testing.T) {
 	streamer := strconv.FormatInt(creator.User.ID, 10)
 	mutate := fmt.Sprintf(`{"id":%q,"streamerId":%q}`, id, streamer)
 	request(mcn, "POST", route+"edit", two, fmt.Sprintf(`{"id":%q,"name":"Spoof","ratio":"0.1"}`, id), 200, "4005")
-	request(mcn, "POST", route+"edit", manager, fmt.Sprintf(`{"id":%q,"name":"Creator Stage","ratio":"0.65","managerRatio":"0.05"}`, id), 200, "200")
+	request(mcn, "POST", route+"edit", manager, fmt.Sprintf(`{"id":%q,"name":"Creator Stage","ratio":"0.65","managerRatio":"0.05","agencyRatio":"0.6"}`, id), 200, "200")
 	request(mcn, "POST", route+"account_new", manager, mutate, 403, "403")
 	request(mcn, "POST", route+"account_new", one, mutate, 409, "409")
 	request(mcn, "POST", route+"update_status", one, fmt.Sprintf(`{"id":%q,"streamerId":%q,"status":2}`, id, streamer), 200, "200")
@@ -154,6 +156,72 @@ func TestPostgresMCNOnboarding(t *testing.T) {
 	if agency != 21 || status != 6 {
 		t.Fatalf("verified MCN activation = %d/%d", agency, status)
 	}
+	request(mcn, "POST", route+"account_new", one, mutate, 200, "200")
+	var messages []admin.MCNMessage
+	check(json.Unmarshal(request(mcn, "POST", "/api/home/message", manager, "", 200, "200"), &messages))
+	if len(messages) != 3 || messages[0].Type != 2 || messages[1].Type != 1 || messages[2].Type != 3 ||
+		!strings.Contains(messages[0].Params, "Creator Stage") || messages[1].UserID != creator.User.ID {
+		t.Fatalf("manager inbox contains incorrect membership and login messages: %+v", messages)
+	}
+	check(json.Unmarshal(request(mcn, "POST", "/api/home/message", two, "", 200, "200"), &messages))
+	if len(messages) != 1 || messages[0].Type != 3 || messages[0].UserID != principals[1].ID {
+		t.Fatalf("agency inbox leaked another agency's messages: %+v", messages)
+	}
+	const statusPath = "/api/mcn/streamer/apply/fetch_status"
+	lookup := fmt.Sprintf(`{"mcnId":"21","streamerId":%q}`, streamer)
+	request(mcn, "POST", statusPath, "", lookup, 401, "401")
+	request(mcn, "POST", statusPath, two, lookup, 403, "403")
+	if got := request(mcn, "POST", statusPath, manager, lookup, 200, "200"); string(got) != "6" {
+		t.Fatalf("MCN membership status = %s", got)
+	}
+	archive := func(id string, agencyID, managerID, ld, viewers, fanCount int) {
+		t.Helper()
+		_, err := db.Exec(ctx, `INSERT INTO legacy_business_history(source_table,source_id,owner_id,record)
+			VALUES('mcn_settle_statistic',$1,$2,jsonb_build_object('live_id',1677::bigint,'manager_id',$3::bigint,
+			'streamer_id',$4::bigint,'ld',$5::bigint,'viewer_num',$6::bigint,'new_fans_num',$7::bigint,
+			'create_time','2026-01-21'::text,'live_start_time',1768968000::bigint,'live_end_time',1768971600::bigint))`,
+			id, agencyID, managerID, creator.User.ID, ld, viewers, fanCount)
+		check(err)
+	}
+	archive("9007199254741221", 21, 23, 82, 6, 3)
+	archive("9007199254741222", 21, 88, 213, 10, 5)
+	archive("9007199254741223", 22, 88, 513, 9, 7)
+	_, err = db.Exec(ctx, `INSERT INTO legacy_business_history(source_table,source_id,owner_id,record) VALUES('mcn_info','21',21,'{"name":"Agency One"}')`)
+	check(err)
+	for wanted, actual := range map[string]json.RawMessage{
+		`"name":"Agency One","streamerTotal":1,"streamerNum":1,"managerNum":1,"adminNum":1`: request(mcn, "POST", "/api/home/agency_data", one, "", 200, "200"),
+		`"ld":"295","viewerNum":"16","newFansNum":"8"`:                                      request(mcn, "POST", "/api/home/agency_data_yesterday", one, `{"id":"2026-01-21"}`, 200, "200"),
+		`"ld":82,"viewerNum":6,"newFansNum":3,"count":1`:                                    request(mcn, "POST", "/api/statistic/live/yesterday", manager, `{"date":"2026-01-21","managerId":88}`, 200, "200"),
+		`"createTime":"2026-01-21","ld":82,"viewerNum":6`:                                   request(mcn, "POST", "/api/statistic/live/line_chart", manager, `{"startTime":"2026-01-20","endTime":"2026-01-21","managerId":"88","mcnId":22}`, 200, "200"),
+		`"streamerName":"Creator Stage"`:                                                    request(mcn, "POST", "/api/statistic/live/streamer_list", manager, `{"startTime":"2026-01-20 23:59:00","endTime":"2026-01-22 00:00:00"}`, 200, "200"),
+	} {
+		if !strings.Contains(string(actual), wanted) {
+			t.Fatalf("MCN reports expected %s in %s", wanted, actual)
+		}
+	}
+	_, err = db.Exec(ctx, `INSERT INTO legacy_business_history(source_table,source_id,owner_id,record) VALUES
+		('mcn_settle_agency_streamer_statistic','351',21,jsonb_build_object('manager_id',23,'streamer_id',$1::bigint,
+		 'ld',81,'ratio',0.65::numeric,'manager_ratio',0.05::numeric,'agency_ratio',0.60::numeric,'create_time','2026-01-01')),
+		('mcn_settle_agency_streamer_statistic','352',22,jsonb_build_object('manager_id',88,'streamer_id',$1::bigint,
+		 'ld',99,'ratio',0.62::numeric,'manager_ratio',0.02::numeric,'agency_ratio',0.60::numeric,'create_time','2026-01-01')),
+		('mcn_settle_platform_statistic','353',21,'{"ld":159,"ratio":0.12,"create_time":"2026-01"}'),
+		('mcn_sharing_template','354',0,'{"template_id":1,"status":0,"min":200,"max":1000,"ratio":0.18}'),
+		('mcn_sharing_template','357',0,'{"template_id":1,"status":0,"min":0,"max":199,"ratio":0.10}'),
+		('mcn_role','355',21,'{"name":"Streamer coordinator","manager_name":"Team Lead"}'),
+		('mcn_user_role','356',23,'{"role_id":355}')`, creator.User.ID)
+	check(err)
+	request(mcn, "POST", "/api/income/agency/lr_settle", manager, `{"month":"2026-01"}`, 403, "403")
+	for wanted, actual := range map[string]json.RawMessage{
+		`"num":1,"total":1`:       request(mcn, "POST", "/api/income/agency/info", one, "", 200, "200"),
+		`"ld":159,"ratio":"0.12"`: request(mcn, "POST", "/api/income/agency/lr_settle", one, `{"month":"2026-01"}`, 200, "200"),
+		`"0.18"`:                  request(mcn, "POST", "/api/income/agency/fetch_platform_ratio", one, `{"startDate":"2026-01-20","endDate":"2026-01-21"}`, 200, "200"),
+		`"ld":82`:                 request(mcn, "POST", "/api/income/streamer/agency_page", manager, `{"startTime":"2026-01","endTime":"2026-01","managerId":"88","pageSize":1}`, 200, "200"),
+		`"roleName":"Streamer coordinator","roleManagerName":"Team Lead"`: request(mcn, "POST", "/api/income/streamer/ratio_page", manager, `{"startTime":"2026-01","endTime":"2026-01","mcnId":22}`, 200, "200"),
+	} {
+		if !strings.Contains(string(actual), wanted) {
+			t.Fatalf("MCN income expected %s in %s", wanted, actual)
+		}
+	}
 	var audits int
 	check(db.QueryRow(ctx, `SELECT COUNT(*) FROM backoffice_logs WHERE target=$1 AND tenant='21' AND action IN
 		('mcn_add','mcn_edit','mcn_update_status','mcn_consent','mcn_account_new')`, id).Scan(&audits))
@@ -169,6 +237,36 @@ func TestPostgresMCNOnboarding(t *testing.T) {
 	buy := fmt.Sprintf(`{"date_room_id":"%d","live_id":"%d","gift_id":"87","sender_id":"%d","receiver_id":"%d","quantity":1}`,
 		room.ID, room.Session.LiveID, viewer.User.ID, creator.User.ID)
 	request(public, "POST", "/api/date/1vN/give/gifts", viewer.Token, buy, 200, "200")
+	check(a.Rooms.Close(ctx, room.ID, creator.User.ID))
+	rangeBody := fmt.Sprintf(`{"date":%q}`, time.Now().UTC().Format(time.DateOnly))
+	if recorded := request(mcn, "POST", "/api/statistic/live/yesterday", one, rangeBody, 200, "200"); !strings.Contains(string(recorded), `"ld":8,"viewerNum":1,"newFansNum":0,"count":1`) {
+		t.Fatalf("MCN closed broadcast did not use live receipt and actual peak audience: %s", recorded)
+	}
+	today := time.Now().UTC()
+	day := today.Format(time.DateOnly)
+	month := today.Format("2006-01")
+	refreshDaily := fmt.Sprintf(`{"mcnId":"22","startTime":%q,"endTime":%q}`, day, day)
+	refreshMonth := fmt.Sprintf(`{"startMonth":%q,"endMonth":%q}`, month, month)
+	const refresh = "/api/statistic/streamer/"
+	request(mcn, "POST", refresh+"refresh_settle_ld", manager, refreshDaily, 403, "403")
+	request(mcn, "POST", refresh+"refresh_settle_ld", one, refreshDaily, 200, "200")
+	request(mcn, "POST", refresh+"refresh_settle_ld", one, refreshDaily, 200, "200")
+	request(mcn, "POST", refresh+"refresh_settle_ld_streamer_by_month", one, refreshMonth, 200, "200")
+	request(mcn, "POST", refresh+"refresh_settle_ld_platform", one, refreshMonth, 200, "200")
+	for wanted, actual := range map[string]json.RawMessage{
+		`"ld":8,"starCoinTotal":null`: request(mcn, "POST", "/api/income/streamer/agency_page", one, fmt.Sprintf(`{"startTime":%q,"endTime":%q}`, day, day), 200, "200"),
+		`"ld":8,"ratio":"0.6"`:        request(mcn, "POST", "/api/income/streamer/ratio_page", one, fmt.Sprintf(`{"startTime":%q,"endTime":%q}`, month, month), 200, "200"),
+		`"ld":8,"ratio":"0.10"`:       request(mcn, "POST", "/api/income/agency/lr_settle", one, fmt.Sprintf(`{"month":%q}`, month), 200, "200"),
+	} {
+		if !strings.Contains(string(actual), wanted) {
+			t.Fatalf("MCN refresh expected %s in %s", wanted, actual)
+		}
+	}
+	var snapshots int64
+	check(db.QueryRow(ctx, `SELECT count(*) FROM mcn_finance_stat_snapshots WHERE agency_id=21`).Scan(&snapshots))
+	if snapshots != 3 {
+		t.Fatalf("replayed native refresh produced %d snapshots", snapshots)
+	}
 	_, err = db.Exec(ctx, `INSERT INTO mcn_legacy_settlement_proofs(settlement_id,agency_id,streamer_id,gross_ld,bad_debt_ld,
 		provider_verified,source_pending,paid_at) VALUES(192,21,$1,$2,3,FALSE,TRUE,clock_timestamp())`,
 		creator.User.ID, int64(9007199254740999))

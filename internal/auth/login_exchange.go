@@ -40,18 +40,11 @@ func NewLoginCode(ctx context.Context, accounts AccountStore, token string) (str
 	if !ok {
 		return "", ErrExchangeUnavailable
 	}
-	claims, err := jwtAccounts.tokens.VerifyAccess(token)
+	claims, err := verifyAccessIdentity(ctx, accounts, token)
 	if err != nil {
-		return "", ErrInvalidCredentials
+		return "", err
 	}
 	familyID, _ := strconv.ParseInt(claims.Aud, 10, 64)
-	if user, found, err := jwtAccounts.JWTUser(ctx, claims.Sub, familyID, claims.Iss); err != nil {
-		return "", err
-	} else if !found {
-		return "", ErrInvalidCredentials
-	} else if user.Moderation.Banned() {
-		return "", BannedError{Moderation: user.Moderation}
-	}
 	var random [16]byte
 	rand.Read(random[:])
 	code := hex.EncodeToString(random[:])

@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -28,7 +30,8 @@ func TestEtcdLubanReloadAndGRPCDiscovery(t *testing.T) {
 		t.Skip("set OPEN_LIVE_TEST_ETCD_URL to run real etcd integration")
 	}
 	cfg, db := postgresTestDatabase(t)
-	ctx := t.Context()
+	ctx, stopTest := context.WithTimeout(t.Context(), 35*time.Second)
+	defer stopTest()
 	check := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -56,20 +59,27 @@ func TestEtcdLubanReloadAndGRPCDiscovery(t *testing.T) {
 	}
 	prefix := fmt.Sprintf("/integration/live/%d", time.Now().UnixNano())
 	t.Cleanup(func() {
-		_, _ = conn.Delete(context.Background(), prefix, clientv3.WithPrefix())
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = conn.Delete(cleanup, prefix, clientv3.WithPrefix())
 	})
 	cfg.Etcd = etcdlive.Config{Endpoints: []string{url}, ConfigPrefix: prefix + "/config/", DiscoveryPrefix: prefix + "/discovery"}
 	cfg.LubanRoomBots = true
+	cfg.LubanCollectibles = true
 	cfg.RoomBots = livebot.Config{RoomPopulation: 20, StaySeconds: 100, MinimumGiftPoints: 100}
 	version := prefix + "/config/version"
 	name := func(table string) string { return prefix + "/config/json/" + table + ".json" }
 	welcome := name("robot_welcome_message_text")
+	rights := name("nft_equity_data")
 	_, err = conn.Txn(ctx).Then(
 		clientv3.OpPut(name("robot_create_property"), fmt.Sprintf(`[{"id":1,"uid":%d,"location":"ja"}]`, bot.User.ID)),
 		clientv3.OpPut(welcome, `[{"id":1,"weight":"ja","population":1,"text":"first"}]`),
 		clientv3.OpPut(name("robot_interactive_gift_text"), `[]`),
 		clientv3.OpPut(name("robot_room_entry_time"), `[{"id":1,"weight":1,"time":0}]`),
 		clientv3.OpPut(name("robot_welcome_message_time"), `[{"id":1,"weight":1,"time":0}]`),
+		clientv3.OpPut(rights, `[{"id":11,"rights_name":"Privilege A"}]`),
+		clientv3.OpPut(name("live_decoration_config"), `[{"id":1,"outfit_name":"Rose","unlock_condition":1,"exclusive_medal":"rose"}]`),
+		clientv3.OpPut(name("nft_card"), `[]`),
 		clientv3.OpPut(version, "1"),
 	).Commit()
 	check(err)
@@ -183,6 +193,8 @@ func TestEtcdLubanReloadAndGRPCDiscovery(t *testing.T) {
 	expectBot(holders[0], "first")
 	_, err = conn.Put(ctx, welcome, `[{"id":1,"weight":"ja","population":1,"text":"second"}]`)
 	check(err)
+	_, err = conn.Put(ctx, rights, `[{"id":11,"rights_name":"Privilege B"}]`)
+	check(err)
 	expectBot(holders[1], "first")
 	_, err = conn.Put(ctx, version, "2")
 	check(err)
@@ -199,16 +211,37 @@ func TestEtcdLubanReloadAndGRPCDiscovery(t *testing.T) {
 		}
 		return string(raw)
 	}
+	privileges := func() string {
+		r, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+a.platform.Config.Addr+"/api/nft/creation_card/get_privilege_list", nil)
+		check(err)
+		r.Header.Set("Authorization", "Bearer "+anchor.Token)
+		res, err := httpClient.Do(r)
+		check(err)
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		check(err)
+		if res.StatusCode != 200 {
+			t.Fatalf("NFT privileges HTTP %d: %s", res.StatusCode, body)
+		}
+		return string(body)
+	}
 	waitUntil("accepted livebot revision", func() bool {
 		return strings.Contains(get(a.platform.Config.MetricsAddr, "/metrics"), `platform_etcd_config_reload_total{result="accepted"} 1`)
 	})
 	expectBot(holders[2], "second")
-	_, err = conn.Txn(ctx).Then(clientv3.OpPut(welcome, `{"bad":true}`), clientv3.OpPut(version, "3")).Commit()
+	if body := privileges(); !strings.Contains(body, "Privilege B") {
+		t.Fatalf("NFT privileges not reloaded: %s", body)
+	}
+	_, err = conn.Txn(ctx).Then(clientv3.OpPut(welcome, `{"bad":true}`), clientv3.OpPut(rights, `[{"id":11,"rights_name":"Privilege C"}]`),
+		clientv3.OpPut(version, "3")).Commit()
 	check(err)
 	waitUntil("rejected invalid revision", func() bool {
 		return strings.Contains(get(a.platform.Config.MetricsAddr, "/metrics"), `platform_etcd_config_reload_total{result="rejected"} 1`)
 	})
 	expectBot(holders[3], "second")
+	if body := privileges(); !strings.Contains(body, "Privilege B") {
+		t.Fatalf("invalid release displaced NFT privileges: %s", body)
+	}
 	if body := get(a.platform.Config.Addr, "/health"); body == "" {
 		t.Fatal("health HTTP request failed")
 	}
@@ -217,6 +250,33 @@ func TestEtcdLubanReloadAndGRPCDiscovery(t *testing.T) {
 		!strings.Contains(metrics, "platform_etcd_discovery_registered 1") {
 		t.Fatal("prometheus HTTP and lease metrics absent")
 	}
+	qr, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+a.platform.Config.Addr+"/api/device/qrcode", nil)
+	check(err)
+	qr.Header.Set("Authorization", "Bearer "+anchor.Token)
+	qrResponse, err := httpClient.Do(qr)
+	check(err)
+	var ticket struct{ URL string }
+	check(json.NewDecoder(qrResponse.Body).Decode(&ticket))
+	qrResponse.Body.Close()
+	dialer := websocket.Dialer{Subprotocols: []string{"h5relayer"}, HandshakeTimeout: 4 * time.Second}
+	socket, _, err := dialer.DialContext(ctx, ticket.URL+fmt.Sprintf("?room_id=%d", room.ID), nil)
+	check(err)
+	t.Cleanup(func() { socket.Close() })
+	check(socket.SetReadDeadline(time.Now().Add(4 * time.Second)))
+	var greeting struct{ Content string }
+	check(socket.ReadJSON(&greeting))
+	waitUntil("WebSocket gauge", func() bool {
+		body := get(a.platform.Config.MetricsAddr, "/metrics")
+		return strings.Contains(body, "\nonlines 1") && strings.Contains(body, `status="101"`)
+	})
+	check(socket.WriteJSON(map[string]any{"content": "live_chat", "payload": []any{map[string]any{
+		"message": map[string]any{"message": "metrics chat"},
+	}}}))
+	waitUntil("relay frame counter", func() bool {
+		return strings.Contains(get(a.platform.Config.MetricsAddr, "/metrics"), `agent_msg_total{protocol="h5relayer"} 1`)
+	})
+	check(socket.Close())
+	waitUntil("WebSocket disconnected gauge", func() bool { return strings.Contains(get(a.platform.Config.MetricsAddr, "/metrics"), "\nonlines 0") })
 	a.stop()
 	waitUntil("removal of stopped node", func() bool { return setCount(1) })
 	query2, cancel2 := context.WithTimeout(ctx, 5*time.Second)

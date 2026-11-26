@@ -9,11 +9,12 @@ import (
 
 func (s *Store) BackofficeChargeHistory(ctx context.Context, q admin.UserHistoryQuery) ([]admin.ChargeHistoryRow, int64, error) {
 	const relation = `FROM legacy_business_history h CROSS JOIN LATERAL jsonb_to_record(h.record) r
-		(amount numeric,point bigint,payment_method_name text,status smallint,create_time timestamptz)
+		(amount numeric,point bigint,payment_method_name text,status smallint,create_time timestamp)
+		CROSS JOIN LATERAL (SELECT r.create_time AT TIME ZONE 'UTC' AS created) ts
 		WHERE h.source_table='pay_orders' AND h.owner_id=$1 AND ($2::smallint IS NULL OR r.status=$2)
-		AND ($3::timestamptz IS NULL OR r.create_time >= $3) AND ($4::timestamptz IS NULL OR r.create_time <= $4)`
-	const columns = `h.source_id::bigint,r.amount::text,r.point,r.payment_method_name,r.status,r.create_time`
-	return readBackofficePage(ctx, s, q.PageRequest, columns, relation, "r.create_time DESC,h.source_id::bigint DESC",
+		AND ($3::timestamptz IS NULL OR ts.created >= $3) AND ($4::timestamptz IS NULL OR ts.created <= $4)`
+	const columns = `h.source_id::bigint,r.amount::text,r.point,r.payment_method_name,r.status,ts.created`
+	return readBackofficePage(ctx, s, q.PageRequest, columns, relation, "ts.created DESC,h.source_id::bigint DESC",
 		[]any{q.UID, q.Status, q.Start, q.End}, func(row pgx.CollectableRow) (admin.ChargeHistoryRow, error) {
 			var item admin.ChargeHistoryRow
 			err := row.Scan(&item.ID, &item.Price, &item.Points, &item.Method, &item.Status, &item.Created)
@@ -33,9 +34,9 @@ const consumeRelation = `FROM (
 	FROM anchor_post_orders o WHERE o.actor_id=$1 AND o.state=1
 	UNION ALL SELECT o.provider_order_id,o.provider_order_no,CASE WHEN o.renewal_from IS NULL THEN 3 ELSE 10 END,o.points,NULL,o.confirmed_at,TRUE
 	FROM subscription_orders o WHERE o.fan_id=$1 AND o.status=1
-	UNION ALL SELECT h.source_id::bigint,r.no,r.transaction_type,r.total_point,g.record->>'name',r.create_time,FALSE
+	UNION ALL SELECT h.source_id::bigint,r.no,r.transaction_type,r.total_point,g.record->>'name',r.create_time AT TIME ZONE 'UTC',FALSE
 	FROM legacy_business_history h CROSS JOIN LATERAL jsonb_to_record(h.record) r
-		(no text,transaction_type smallint,total_point bigint,transaction_order_id bigint,create_time timestamptz,income_or_expenses smallint)
+		(no text,transaction_type smallint,total_point bigint,transaction_order_id bigint,create_time timestamp,income_or_expenses smallint)
 	LEFT JOIN legacy_business_history m ON m.source_table='gift_production_marketing' AND m.source_id=r.transaction_order_id::text
 	LEFT JOIN legacy_business_history g ON g.source_table='gifts' AND g.source_id=m.record->>'gift_id'
 	WHERE h.source_table='point_transactions' AND h.owner_id=$1 AND r.income_or_expenses=-1

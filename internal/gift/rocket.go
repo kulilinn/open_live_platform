@@ -23,6 +23,7 @@ type RocketRules struct {
 	PlatformRatio    *float32         `json:"platform_income_ratio"`
 	Rewards          []RocketReward   `json:"rewards"`
 	TimeRules        []RocketTimeRule `json:"time_rules"`
+	Notices          []RocketNotice   `json:"notices"`
 	MinSeconds       int              `json:"-"`
 	SpeedAttenuation int32            `json:"speed_attenuation"`
 }
@@ -44,10 +45,28 @@ type RocketTimeRule struct {
 	Coefficient int64 `json:"time_coefficient"`
 }
 
+type RocketNotice struct {
+	Type        int8   `json:"notice_type"`
+	Condition   int64  `json:"config_condition"`
+	RoomFlag    int8   `json:"live_room_flag"`
+	MarqueeFlag int8   `json:"horse_race_lamp_flag"`
+	Content     string `json:"content"`
+	GiftID      int64  `json:"gift_id,string"`
+	BroadcastID int64  `json:"broadcast_config_id,string"`
+	Deleted     int8   `json:"del_flag"`
+	Gift        *Gift  `json:"gift,omitempty"`
+}
+
+const (
+	CriticalRocketNotice int8 = 1
+	ComboRocketNotice    int8 = 2
+)
+
 type RefuelPlan struct {
 	Contribution, PlatformIncome, Drawn, Reserved int64
 	FuelMillis, Score, Multiplier, PlatformExp    int64
 	Rewards                                       []RocketReward
+	Notices                                       []RocketNotice
 }
 
 func LoadRocketRules(path string, catalog []Gift) (*RocketRules, error) {
@@ -96,8 +115,21 @@ func LoadRocketRules(path string, catalog []Gift) (*RocketRules, error) {
 			return nil, fmt.Errorf("invalid rocket time rule")
 		}
 	}
+	for i := range rules.Notices {
+		notice := &rules.Notices[i]
+		if notice.Deleted != 0 {
+			continue
+		}
+		if (notice.Type != CriticalRocketNotice && notice.Type != ComboRocketNotice) || notice.Condition < 1 || notice.Condition > math.MaxInt32 {
+			return nil, fmt.Errorf("invalid rocket notice condition %d", notice.Condition)
+		}
+		if item, found := items[notice.GiftID]; found {
+			notice.Gift = &item
+		}
+	}
 	sort.SliceStable(rules.Rewards, func(i, j int) bool { return rules.Rewards[i].PoolCondition < rules.Rewards[j].PoolCondition })
 	sort.SliceStable(rules.TimeRules, func(i, j int) bool { return rules.TimeRules[i].Condition < rules.TimeRules[j].Condition })
+	sort.SliceStable(rules.Notices, func(i, j int) bool { return rules.Notices[i].Condition < rules.Notices[j].Condition })
 	return rules, nil
 }
 
@@ -113,6 +145,7 @@ func (r *RocketRules) Draw(order Order, available, flightSeconds int64) (RefuelP
 	plan := RefuelPlan{
 		Contribution:   int64((1-*r.PlatformRatio)*float32(order.Cost/count)) * count,
 		PlatformIncome: int64(*r.PlatformRatio * float32(order.Cost)),
+		Notices:        r.Notices,
 	}
 	if available > math.MaxInt64-plan.Contribution {
 		return RefuelPlan{}, ErrRocketUnavailable

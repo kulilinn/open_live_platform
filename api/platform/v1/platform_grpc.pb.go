@@ -119,3 +119,105 @@ var PlatformService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "api/platform/v1/platform.proto",
 }
+
+const (
+	UserDirectoryService_GetUser_FullMethodName = "/platform.v1.UserDirectoryService/GetUser"
+)
+
+// UserDirectoryServiceClient is the client API for UserDirectoryService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type UserDirectoryServiceClient interface {
+	GetUser(ctx context.Context, in *GetUserRequest, opts ...grpc.CallOption) (*DirectoryUser, error)
+}
+
+type userDirectoryServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewUserDirectoryServiceClient(cc grpc.ClientConnInterface) UserDirectoryServiceClient {
+	return &userDirectoryServiceClient{cc}
+}
+
+func (c *userDirectoryServiceClient) GetUser(ctx context.Context, in *GetUserRequest, opts ...grpc.CallOption) (*DirectoryUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DirectoryUser)
+	err := c.cc.Invoke(ctx, UserDirectoryService_GetUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// UserDirectoryServiceServer is the server API for UserDirectoryService service.
+// All implementations must embed UnimplementedUserDirectoryServiceServer
+// for forward compatibility.
+type UserDirectoryServiceServer interface {
+	GetUser(context.Context, *GetUserRequest) (*DirectoryUser, error)
+	mustEmbedUnimplementedUserDirectoryServiceServer()
+}
+
+// UnimplementedUserDirectoryServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedUserDirectoryServiceServer struct{}
+
+func (UnimplementedUserDirectoryServiceServer) GetUser(context.Context, *GetUserRequest) (*DirectoryUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUser not implemented")
+}
+func (UnimplementedUserDirectoryServiceServer) mustEmbedUnimplementedUserDirectoryServiceServer() {}
+func (UnimplementedUserDirectoryServiceServer) testEmbeddedByValue()                              {}
+
+// UnsafeUserDirectoryServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to UserDirectoryServiceServer will
+// result in compilation errors.
+type UnsafeUserDirectoryServiceServer interface {
+	mustEmbedUnimplementedUserDirectoryServiceServer()
+}
+
+func RegisterUserDirectoryServiceServer(s grpc.ServiceRegistrar, srv UserDirectoryServiceServer) {
+	// If the following call panics, it indicates UnimplementedUserDirectoryServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&UserDirectoryService_ServiceDesc, srv)
+}
+
+func _UserDirectoryService_GetUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserDirectoryServiceServer).GetUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: UserDirectoryService_GetUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UserDirectoryServiceServer).GetUser(ctx, req.(*GetUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// UserDirectoryService_ServiceDesc is the grpc.ServiceDesc for UserDirectoryService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var UserDirectoryService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "platform.v1.UserDirectoryService",
+	HandlerType: (*UserDirectoryServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetUser",
+			Handler:    _UserDirectoryService_GetUser_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api/platform/v1/platform.proto",
+}

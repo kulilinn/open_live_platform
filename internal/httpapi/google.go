@@ -30,7 +30,7 @@ func RegisterGoogle(mux *http.ServeMux, service auth.GoogleLogin) {
 		case err != nil:
 			httpx.Error(w, 500, "could not sign in")
 		default:
-			u := rustAuthUser(session.User)
+			u := rustAuthUser(r, session.User)
 			u["isNew"], u["language"] = created, language
 			w.Header().Set("Cache-Control", "no-store")
 			httpx.JSON(w, 200, map[string]any{"status": "200", "user": u, "token": session.Token})

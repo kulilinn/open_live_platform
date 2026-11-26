@@ -172,14 +172,21 @@ func (s *Store) ReportSubscription(ctx context.Context, report subscription.Repo
 }
 
 func (s *Store) SubscriptionExperience(ctx context.Context, fanID, anchorID int64) (platform, fan int64, err error) {
-	err = s.pool.QueryRow(ctx, `WITH spending AS (
+	return subscriptionExperience(ctx, s.pool, fanID, anchorID)
+}
+
+func subscriptionExperience(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, fanID, anchorID int64) (platform, fan int64, err error) {
+	err = db.QueryRow(ctx, `WITH spending AS (
 		SELECT p.anchor_id,o.points FROM subscription_orders o JOIN subscription_plans p ON p.id=o.plan_id
 		WHERE o.status=1 AND o.provider_order_id IS NOT NULL AND o.fan_id=$1
 		UNION ALL SELECT receiver_id,cost FROM gift_orders WHERE state=1 AND provider_order_id IS NOT NULL AND sender_id=$1
 		UNION ALL SELECT p.owner_id,o.points FROM anchor_post_orders o JOIN anchor_posts p ON p.id=o.post_id
 		WHERE o.state=1 AND o.actor_id=$1
 	)
-	SELECT COALESCE(sum(points),0)::bigint,
+	SELECT (COALESCE(sum(points),0) + COALESCE((SELECT sum(platform_exp) FROM room_rocket_contributions
+		WHERE user_id=$1 AND platform_exp>0),0))::bigint,
 		CASE WHEN EXISTS(SELECT 1 FROM subscription_members m JOIN subscription_plans p ON p.id=m.plan_id
 			WHERE m.fan_id=$1 AND m.anchor_id=$2 AND COALESCE(m.legacy_level,p.plan_type-2)>0)
 		THEN COALESCE(sum(points) FILTER (WHERE anchor_id=$2),0)::bigint ELSE 0 END FROM spending`, fanID, anchorID).Scan(&platform, &fan)

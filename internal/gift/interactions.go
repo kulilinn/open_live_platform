@@ -44,11 +44,12 @@ func (q Question) Allows(answer string) bool {
 }
 
 type Promotion struct {
-	ID     int64     `json:"id,string"`
-	GiftID int64     `json:"productId,string"`
-	Name   string    `json:"name"`
-	Starts time.Time `json:"startDate"`
-	Ends   time.Time `json:"endDate"`
+	ID          int64     `json:"id,string"`
+	GiftID      int64     `json:"productId,string"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Starts      time.Time `json:"startDate"`
+	Ends        time.Time `json:"endDate"`
 }
 
 func (p Promotion) Active(now time.Time) bool { return !now.Before(p.Starts) && now.Before(p.Ends) }
@@ -60,6 +61,8 @@ type Limit struct {
 	Starts        time.Time       `json:"limitStartDate"`
 	Ends          time.Time       `json:"limitEndDate"`
 	Price         int64           `json:"discountPrice"`
+	Income        *int64          `json:"discountIncome"`
+	DiscountType  int8            `json:"discountType"`
 	Discount      int32           `json:"discountValue"`
 	PerUser       int64           `json:"maxPurchasePerUser"`
 	Platform      int64           `json:"maxPurchasePlatform"`
@@ -72,6 +75,7 @@ func (l Limit) Active(now time.Time) bool { return !now.Before(l.Starts) && now.
 
 type Box struct {
 	ID       int64  `json:"id,string"`
+	Name     string `json:"name"`
 	LimitIDs string `json:"giftIds"`
 }
 
@@ -84,8 +88,10 @@ type Interactions struct {
 }
 
 type QuickGift struct {
-	ID      int64 `json:"id,string"`
-	LimitID int64 `json:"limit_id,string"`
+	ID          int64 `json:"id,string"`
+	LimitID     int64 `json:"limit_id,string"`
+	PromotionID int64 `json:"promotion_id,string"`
+	Sort        int32 `json:"gift_sort"`
 }
 
 type PromotionView struct {
@@ -128,6 +134,7 @@ func LoadInteractions(path string) (Interactions, error) {
 	}
 	for _, limit := range result.Limits {
 		if limit.ID <= 0 || limit.GiftID <= 0 || limit.Price < 0 || limit.PerUser < 0 || limit.Platform < 0 ||
+			(limit.Income != nil && *limit.Income < 0) ||
 			limit.PlatformUsage != nil && *limit.PlatformUsage < 0 {
 			return result, fmt.Errorf("invalid gift limit %d", limit.ID)
 		}

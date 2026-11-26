@@ -16,6 +16,7 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/twmb/franz-go v1.19.5
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20250603004440-37eecbb8927f
+	github.com/xuri/excelize/v2 v2.9.1
 	go.etcd.io/etcd/client/v3 v3.5.24
 	go.mozilla.org/pkcs7 v0.9.0
 	golang.org/x/crypto v0.47.0
@@ -43,7 +44,12 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/richardlehane/mscfb v1.0.4 // indirect
+	github.com/richardlehane/msoleps v1.0.4 // indirect
+	github.com/tiendc/go-deepcopy v1.6.0 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.11.2 // indirect
+	github.com/xuri/efp v0.0.1 // indirect
+	github.com/xuri/nfp v0.0.1 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.24 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.24 // indirect
 	go.uber.org/atomic v1.7.0 // indirect

@@ -23,6 +23,14 @@ func (s *Service) cards(ctx context.Context) (map[uint32]Card, error) {
 	for _, card := range updates {
 		cards[card.ID] = card
 	}
+	if cfg := s.luban.Load(); cfg != nil {
+		for id, card := range cards {
+			if meta, ok := cfg.cards[id]; ok {
+				card.Picture, card.English, card.Chinese = meta.Picture, meta.English, meta.Chinese
+				cards[id] = card
+			}
+		}
+	}
 	return cards, nil
 }
 

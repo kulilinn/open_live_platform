@@ -96,7 +96,11 @@ go run .\cmd\platform
 
 运营后台和 MCN 后台沿用各自的 Rust 路径。它们需要通过 `PLATFORM_ADMIN_ADDR` 和 `PLATFORM_MCN_ADMIN_ADDR` 显式设置各自的监听地址，并配置 `DATABASE_URL` 及 `ADMIN_ACCOUNTS_FILE`。例如各自监听回环地址并由部署网关接入。主业务监听不会注册兼容后台路径。原 Go `/api/admin` 查询接口只接受显式设置的 `ADMIN_TOKEN`。
 
-`ADMIN_ACCOUNTS_FILE` 是由部署者从现有后台权限数据导出的 JSON 数组。条目包含 `id`、`area`、`passwordHash`、`admin`、`roles`、`permissions` 和 `routes`。`id` 是十进制字符串，`passwordHash` 是原 Rust Argon2id PHC 字符串。`area` 为 `admin` 时用 `username`、`nickName` 和 `tenant` 登录。运营接口要求 `operation-admin` 租户。`area` 为 `mcn` 时用 `email` 登录，`mcnId` 是十进制字符串，`manager` 代表只可查看本人的主播归属。菜单和权限来自导出文件，改动后重启服务。账号文件含凭据哈希，按凭据权限保管。旧后台 JWT 需重新登录，Go 后台会话的 access 和 refresh 分别有效两小时和七天。
+`ADMIN_ACCOUNTS_FILE` 是部署者管理的恢复账号 JSON 数组。条目包含 `id`、`area`、`passwordHash`、`admin`、`roles`、`permissions` 和 `routes`。`id` 是十进制字符串，`passwordHash` 是原 Rust Argon2id PHC 字符串。`area` 为 `admin` 时用 `username` 与请求头 `X-Loverose-Admin` 指定的 `tenant` 登录。`area` 为 `mcn` 时用 `email` 登录，`mcnId` 是十进制字符串，`manager` 代表只可查看本人的主播归属。恢复账号的权限通过文件修改并重启所有副本。各副本使用相同文件，按凭据权限保管。旧后台 JWT 需重新登录，Go 后台会话的 access 和 refresh 分别有效两小时和七天。
+
+运营及财务租户在 `/api/operation/system` 管理本租户后台账号、角色和菜单。MCN 在独立的 `/api/system` 管理本机构员工、角色组、组长和员工直接菜单权限。PostgreSQL 在每次授权时读取当前角色与菜单，撤销权限立即对其他副本生效。禁用、删除账号和修改密码会撤销旧会话。菜单改动由本租户管理员操作，拥有授权接口权限的运营人员和 MCN 经纪人只能委派自己拥有的权限。运营管理员可通过 `tenant/add` 新建租户，也可在同一请求提供 `username` 和 `password` 建立该租户的初始管理员。
+
+设置只读 `LIVEMEDIA_MYSQL_DSN`、目标 `DATABASE_URL` 与 `ADMIN_ACCOUNTS_FILE`，首次切换时执行 `go run ./cmd/import-live-backoffice`。原运营和 MCN 表分属不同数据库时，分别使用 `-area admin` 和 `-area mcn`。导入按租户或机构保留账号 ID、可识别的 Argon2id 凭据、停用与删除状态、角色、菜单与授权关系，输出跳过条目和无法使用的旧散列数量。同一区域的成功导入有持久记录，重复执行返回已有条目数，线上权限撤销持续有效。
 
 运营后台支持用户和直播间查询、违规及操作记录分页、账号停用与启用、禁言、断播、禁播与解除。账号停用会撤回应用会话。运营可编辑主播房间的标签，业务侧房间和主播资料立即读取新标签。礼物列表、详情、新增、编辑及下架共用 PostgreSQL 目录覆盖，公开目录和后续礼物购买读取已保存的版本，已保留订单继续按原报价处理。`finance-admin` 租户可分页查询已确认的普通直播礼物流水。登录历史筛选、主播警告投递、其他结算类别和财务写操作仍依赖原后台服务。
 
@@ -104,11 +108,30 @@ MCN 的主播申请、编辑、审核与开通按机构隔离，经纪人只能�
 
 机构管理员可调用 `/api/streamer/no_renewal` 结束有效合约。服务按开通后的已确认凭证核对礼物、转盘、订阅和帖子等结算账目，保存结算流水及订单凭证后解除归属。缺凭证或结果未定的扣款会阻止结束合约。解约完成后的重试读取既有结果。该操作对应旧服务的最终记账和确认流程，提现仍走独立财务系统。在导入用户账号后，`go run ./cmd/import-live-mcn-settlements` 使用 `LIVEMEDIA_MYSQL_DSN`、`LIVEMEDIA_MCN_MYSQL_DSN` 和 `DATABASE_URL` 核对并导入旧的有效合约及其结算凭证。
 
-可用 `python scripts/audit_rust_backoffice_routes.py <LiveMedia目录> --verbose` 核对 Rust 后台路由。原源码的两个独立服务在 `/api` 下分别注册 143 个运营路径及 60 个 MCN 路径。当前 Go 对应 25 个运营路径及 13 个 MCN 路径。系统管理、平台配置、帮助、活动、独立财务管理、机构模板和 MCN 财务统计仍有未迁移模块。
+运营查询的充值记录来自旧 `pay_orders`，消费记录合并 `point_transactions` 和 Go 服务确认的扣款凭证。机构收益历史来自旧 MCN 库。`go run ./cmd/import-live-history` 使用 `DATABASE_URL` 和 `LIVEMEDIA_MYSQL_DSN` 或 `LIVEMEDIA_MCN_MYSQL_DSN` 导入相应数据。运营可按作者、时间和审核状态查询帖子，并下架帖子或评论分支。下架和审计记录在同一事务保存。
+
+MCN 后台的机构概览、入驻状态、消息和直播统计按机构隔离。经纪人只能查询本人负责的主播统计和申请。直播观众统计沿用原房间峰值，跨场汇总累加各场峰值。财务后台可管理 MCN 机构和分成模板，并查询机构与主播收入。机构开通时同时建立超级管理员。停用机构会撤回其现有后台会话，有待开通或有效主播合约时需先处理这些合约。使用同一 Go 服务的财务与 MCN 后台直接访问 PostgreSQL。单独部署的财务服务可配置 `MCN_INTERNAL_TOKEN`，用 Bearer 凭证和 `X-Inner-Service: admin` 调用 MCN 的内部入口。
+
+机构管理员可刷新日、月统计。日统计以已结束直播的账目和观众记录计算，月统计汇总保留的日报与历史分成比例。财务刷新会保存报表快照。实际扣款、坏账、解约清算和提现各按原有账目与凭证处理。登录、邀请同意和开通事件在 Go 中写入 MCN 消息，旧消息没有可靠机构归属时留在原库。
+
+可用 `python scripts/audit_rust_backoffice_routes.py <LiveMedia目录> --verbose` 核对 Rust 后台路由。原源码的两个独立服务在 `/api` 下分别注册 143 个运营路径及 60 个 MCN 路径。支付和财务后台仍存在依赖独立供应商的业务，需逐条按实际挂载和服务依赖核对。
 
 ## 内部 gRPC
 
-`platform.v1.PlatformService/GetStats` 替代原有的 `/internal/rpc/platform.stats`，接收空请求，返回账号总数 `users` 和完整房间列表 `rooms`。gRPC 独立监听，默认地址为 `127.0.0.1:9090`，可通过 `PLATFORM_GRPC_ADDR` 配置。前端继续使用 `PLATFORM_ADDR` 上的 HTTP 和 WebSocket 接口。
+`platform.v1.PlatformService/GetStats` 替代原有的 `/internal/rpc/platform.stats`，接收空请求，返回账号总数 `users` 和完整房间列表 `rooms`。gRPC 独立监听，默认地址为 `127.0.0.1:9090`，可通过 `PLATFORM_GRPC_ADDR` 配置。标准 `grpc.health.v1.Health` 提供进程服务状态。前端继续使用 `PLATFORM_ADDR` 上的 HTTP 和 WebSocket 接口。
+
+### etcd 节点发现与监控
+
+指定 `ETCD_URL` 和 `PLATFORM_DISCOVERY_PREFIX` 后，每个 Go 实例在 `{prefix}/platform.v1.PlatformService/{node}` 发布自己的 gRPC 地址。地址默认取实际监听地址，可通过 `PLATFORM_DISCOVERY_ADDR` 指定可达的主机与端口。只设置通告地址时，前缀使用 `/@grpc-{ZENOH_CLUSTER_NAME}`，默认集群名为 `LRPRD`。节点通过 etcd 租约续期，停机时释放注册。在 Go 客户端用 `etcdlive.Discovery.Resolver()` 注册 `etcd-grpc` 解析器，然后连接 `etcd-grpc:///platform.v1.PlatformService`，可在多个节点间轮询。etcd 端点用逗号分隔，账号可用 `ETCD_USERNAME` 和 `ETCD_PASSWORD` 配置。[etcd v3 Watch 与 Lease](https://etcd.io/docs/v3.5/learning/api/)
+
+配置 `METRICS_ADDR` 或原 `METRICS_PORT` 后，可在独立监听器访问 `GET /metrics`。指标包含按路由模板统计的 HTTP 请求和时延、WebSocket 在线客户端及命令数量、etcd 发布状态和配置热更新结果。
+
+### Luban JSON 配置发布
+
+Go 读取 `{ETCD_CONFIG_PREFIX}/json/{table}.json` 的 Rust Luban JSON 数组。先写所需表，再写同前缀下的 `version`。Go 在该版本的同一 etcd revision 读取并验证配置，失败时继续使用之前的有效配置。
+
+- 设置 `USE_LIVEROOM_BOT` 并省略 `LIVEROOM_BOT_FILE` 时，PostgreSQL 模式从 etcd 读取账号、欢迎语和礼物回复。支持 `robot_create_property`、`robot_welcome_message_text`、`robot_interactive_gift_text`，以及房间人数、进出时间和两类回复延时的权重表。
+- 设置 `PLATFORM_ETCD_NFT=true` 时，从 `nft_equity_data`、`live_decoration_config` 和 `nft_card` 热更新 NFT 权益、装扮及已有卡片的展示数据。持有人、交易状态和库存继续来自原有持久记录及链上验证。
 
 服务未启用反射。在仓库根目录使用 `grpcurl` 时，直接指定接口定义文件。
 
@@ -117,6 +140,8 @@ grpcurl -plaintext -import-path . -proto api/platform/v1/platform.proto -d '{}' 
 ```
 
 Go 客户端和服务端绑定已随仓库提交。修改协议后，在仓库根目录用 `protoc`、`protoc-gen-go` 和 `protoc-gen-go-grpc` 重新生成。
+
+内网 `platform.v1.UserDirectoryService/GetUser` 使用同一个账号目录。请求附加 `x-inner-service: innow` 和 `authorization: Bearer <INTERNAL_USER_TOKEN>`，返回有明确字段定义的账号资料。
 
 ```powershell
 protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative api/platform/v1/platform.proto
@@ -159,6 +184,14 @@ Get-Content redis-sessions.jsonl | go run ./cmd/import-live-sessions -app $env:A
 - 邮件配置启用后，所有 `POST /api/auth/signup` 都需要注册用途的 `code`。`POST /api/auth/verifycode` 用 `email` 和 `code` 登录，注册用途的验证码也可以创建无公开密码的账号。`POST /api/auth/reset` 用已有账号用途的验证码和新 `password` 重置密码。验证码绑定邮箱，使用一次后失效，最多验证五次。
 - 省略 SMTP 配置时，既有注册继续可用，邮件验证码、邮件登录和重置接口返回 HTTP 503。
 - `POST /api/auth/exchange_code` 用有效的 access JWT 领取 5 分钟有效的一次性登录码。`POST /api/auth/exchange_token` 以 `{"code":"…"}` 换取一枚新的 refresh JWT。兑换会替换原 JWT 会话。原会话登出、过期或已被替换时，登录码也会失效。
+
+## 可信用户服务与授权码
+
+`/api/microservices/user` 需要 `X-Inner-Service: innow` 和 `Authorization: Bearer <INTERNAL_USER_TOKEN>`。服务提供用户资料查询、口令验证及变更、Google 身份验证、临时码签发及验证。Google 必须提供面向正确客户端的有效令牌。签发临时码时传入 `userId` 及属于该用户的 `accessToken`。资料响应只提供接口列出的账号字段。
+
+`AUTH_INTERNAL_CLIENTS_FILE` 指向客户端 JSON 数组，每项含 `client_id`、客户端凭据的 SHA-256 十六进制 `token_hash` 和精确 HTTPS `redirect_uris` 数组。请求 `GET /api/auth_internal/get_auth_code` 时携带登录用户的 ACCESS Bearer、该用户的 ID、客户端和已登记的回调地址。客户端可持自己的 Bearer 凭据向 `POST /api/auth_internal/check_auth_code` 提交码并领取资料。客户端只登记了一个回调时，验证请求可省略回调字段。
+
+两类码分开保存，只持久化摘要，最多有效 5 分钟且受签发会话生命周期约束。已兑换的码不能再次领取。部署多个副本时使用同一个 PostgreSQL schema 保证单次领取。
 
 ## 订阅与私信
 
@@ -317,7 +350,7 @@ PostgreSQL 模式可通过 `USE_LIVEROOM_BOT` 与 `LIVEROOM_BOT_FILE` 开启陪�
 
 机器人在公开房间开播后加入，每房间最多一个，账号一次只在一个房间中。持有已绑定创世神卡的观众进房时触发欢迎语。本场礼物成功结算且总点数达到 `BOT_GIFT_PRICE`（默认 100）时按礼物类型触发回复。机器人用自己的账号发送普通房间聊天，消息进入直播推送和历史。
 
-文件可设置 `room_population`（加机器人前的观众上限，默认 20），以及 `entry_seconds`、`stay_seconds`、`welcome_delay_seconds`、`gift_delay_seconds`（分别默认 30、600、180、1 秒）。关播、踢出机器人或机器人离房会清理该账号的待发消息。Go 读取本地账号和脚本配置，自动点赞、日常闲聊和原 etcd/Redis 加权配置仍需迁移。
+本地文件可设置 `room_population`（加机器人前的观众上限，默认 20），以及 `entry_seconds`、`stay_seconds`、`welcome_delay_seconds`、`gift_delay_seconds`（分别默认 30、600、180、1 秒）。关播、踢出机器人或机器人离房会清理该账号的待发消息。Go 可读取本地文件或 etcd 的 Luban 权重表。自动点赞、日常闲聊和原 Redis 账号池仍待迁移。
 
 ## 直播点赞、结算和举报
 

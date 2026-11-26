@@ -52,37 +52,37 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read gift_game_questions: %w", err)
 	}
-	catalog.Promotions, err = readRows(ctx, snapshot, `SELECT id,product_id,name,start_date,end_date
+	catalog.Promotions, err = readRows(ctx, snapshot, `SELECT id,product_id,name,COALESCE(description,''),start_date,end_date
 		FROM product_promotions WHERE del_flag=0 ORDER BY id`, func(r *sql.Rows) (gift.Promotion, error) {
 		var p gift.Promotion
-		err := r.Scan(&p.ID, &p.GiftID, &p.Name, &p.Starts, &p.Ends)
+		err := r.Scan(&p.ID, &p.GiftID, &p.Name, &p.Description, &p.Starts, &p.Ends)
 		return p, err
 	})
 	if err != nil {
 		return fmt.Errorf("read product_promotions: %w", err)
 	}
 	catalog.Limits, err = readRows(ctx, snapshot, `SELECT id,product_id,promotion_id,limit_start_date,limit_end_date,
-		discount_price,discount_value,max_purchase_per_user,max_purchase_platform,listing_status
+		discount_price,discount_income,discount_type,discount_value,max_purchase_per_user,max_purchase_platform,listing_status
 		FROM product_limits WHERE del_flag=0 ORDER BY id`, func(r *sql.Rows) (gift.Limit, error) {
 		var l gift.Limit
-		err := r.Scan(&l.ID, &l.GiftID, &l.PromotionID, &l.Starts, &l.Ends, &l.Price, &l.Discount, &l.PerUser, &l.Platform, &l.Listing)
+		err := r.Scan(&l.ID, &l.GiftID, &l.PromotionID, &l.Starts, &l.Ends, &l.Price, &l.Income, &l.DiscountType, &l.Discount, &l.PerUser, &l.Platform, &l.Listing)
 		return l, err
 	})
 	if err != nil {
 		return fmt.Errorf("read product_limits: %w", err)
 	}
-	catalog.Boxes, err = readRows(ctx, snapshot, `SELECT id,gift_ids FROM gift_box WHERE del_flag=0 ORDER BY id`, func(r *sql.Rows) (gift.Box, error) {
+	catalog.Boxes, err = readRows(ctx, snapshot, `SELECT id,name,gift_ids FROM gift_box WHERE del_flag=0 ORDER BY id`, func(r *sql.Rows) (gift.Box, error) {
 		var b gift.Box
-		err := r.Scan(&b.ID, &b.LimitIDs)
+		err := r.Scan(&b.ID, &b.Name, &b.LimitIDs)
 		return b, err
 	})
 	if err != nil {
 		return fmt.Errorf("read gift_box: %w", err)
 	}
-	catalog.QuickGifts, err = readRows(ctx, snapshot, `SELECT gift_id,limit_id FROM quick_gift_config
-		WHERE del_flag=0 AND limit_id IS NOT NULL ORDER BY gift_id`, func(r *sql.Rows) (gift.QuickGift, error) {
+	catalog.QuickGifts, err = readRows(ctx, snapshot, `SELECT gift_id,COALESCE(limit_id,0),COALESCE(promotion_id,0),gift_sort FROM quick_gift_config
+		WHERE del_flag=0 ORDER BY gift_id`, func(r *sql.Rows) (gift.QuickGift, error) {
 		var entry gift.QuickGift
-		err := r.Scan(&entry.ID, &entry.LimitID)
+		err := r.Scan(&entry.ID, &entry.LimitID, &entry.PromotionID, &entry.Sort)
 		return entry, err
 	})
 	if err != nil {

@@ -49,7 +49,7 @@ func (s server) signUpCompat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"status": "200", "data": map[string]any{"user": rustAuthUser(session.User)},
+		"status": "200", "data": map[string]any{"user": rustAuthUser(r, session.User)},
 	})
 }
 
@@ -76,7 +76,7 @@ func (s server) signInCompat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"status": "200", "token": session.Token, "user": rustAuthUser(session.User),
+		"status": "200", "token": session.Token, "user": rustAuthUser(r, session.User),
 	})
 }
 
@@ -141,9 +141,15 @@ func (s server) appToken(w http.ResponseWriter, r *http.Request, _ int64) {
 	httpx.JSON(w, 200, map[string]string{"status": "200", "token": session.Token})
 }
 
-func rustAuthUser(user auth.User) map[string]any {
+func rustAuthUser(r *http.Request, user auth.User) map[string]any {
+	id := strconv.FormatInt(user.ID, 10)
+	staff, _ := r.Context().Value(staffSettingContext{}).(string)
+	tag := ""
+	if hasSettingEntry(staff, id) || hasSettingEntry(staff, user.Email) {
+		tag = "stuff"
+	}
 	return map[string]any{
-		"id": strconv.FormatInt(user.ID, 10), "email": user.Email,
-		"language": user.Language, "x_user_tag": "",
+		"id": id, "email": user.Email,
+		"language": user.Language, "x_user_tag": tag,
 	}
 }

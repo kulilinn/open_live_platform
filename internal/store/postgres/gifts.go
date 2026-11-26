@@ -73,12 +73,17 @@ func (s *Store) ReserveGift(ctx context.Context, id int64, order gift.Order) (gi
 		if err := verifyGiftCatalogQuote(ctx, change.tx, order.Item); err != nil {
 			return err
 		}
+		if order.Input.LimitID > 0 {
+			if err := change.reserveGiftLimit(order); err != nil {
+				return err
+			}
+		}
 		result, err = scanGiftOrder(change.tx.QueryRow(ctx, `INSERT INTO gift_orders
-			(room_id,live_id,sender_id,receiver_id,request_key,payment_order,request,item,sender_info,receiver_info,sender_role,cost,income)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			(room_id,live_id,sender_id,receiver_id,request_key,payment_order,request,item,sender_info,receiver_info,sender_role,cost,income,purchase_limit_id)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULLIF($14::bigint,0))
 			ON CONFLICT(sender_id,request_key) DO NOTHING RETURNING `+giftOrderColumns,
 			id, liveID, order.Input.SenderID, ownerID, order.Key, order.PaymentOrder, order.Input, order.Item,
-			order.Sender, order.Receiver, order.SenderRole, order.Cost, order.Income))
+			order.Sender, order.Receiver, order.SenderRole, order.Cost, order.Income, order.Input.LimitID))
 		if err == nil {
 			created = true
 			return change.reserveGiftEffect(result)
@@ -125,6 +130,12 @@ func (s *Store) FinishGift(ctx context.Context, roomID int64, order gift.Order, 
 		result.Result, err = result.BuildResult()
 		if err != nil {
 			return err
+		}
+		if result.Input.LimitID > 0 {
+			result.Result.Quota, err = change.giftLimitReached(result)
+			if err != nil {
+				return err
+			}
 		}
 		var launch int64
 		switch result.Item.EffectControlType {

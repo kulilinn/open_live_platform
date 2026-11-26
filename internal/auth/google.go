@@ -67,54 +67,9 @@ func (c GoogleConfig) get(ctx context.Context, address, bearer string, output an
 }
 
 func (s GoogleLogin) Login(ctx context.Context, raw, code, language string) (Session, bool, error) {
-	if s.Config.ClientID == "" {
-		return Session{}, false, ErrGoogleUnavailable
-	}
-	if raw == "" {
-		return Session{}, false, ErrGoogleToken
-	}
-	var token googleToken
-	if err := s.Config.get(ctx, "https://www.googleapis.com/oauth2/v2/tokeninfo?access_token="+url.QueryEscape(raw), "", &token); err != nil {
-		return Session{}, false, err
-	}
-	email, err := verificationEmail(token.Email)
-	if err != nil || token.Subject == "" || token.Audience != s.Config.ClientID || !token.Verified || token.Expires <= 0 {
-		return Session{}, false, ErrGoogleToken
-	}
-	authoritative := strings.HasSuffix(email, "@gmail.com")
-	language = cmp.Or(language, "ja")
-	id, created, err := s.Backend.ResolveGoogleUser(ctx, token.Subject, email, language, authoritative)
-	if errors.Is(err, ErrGoogleMailboxProof) {
-		// Google is authoritative for Workspace accounts with a hosted-domain claim.
-		var profile struct{ ID, Email, HD string }
-		if err = s.Config.get(ctx, "https://www.googleapis.com/oauth2/v2/userinfo", raw, &profile); err != nil {
-			return Session{}, false, err
-		}
-		if profile.ID != token.Subject || NormalizeEmail(profile.Email) != email {
-			return Session{}, false, ErrGoogleToken
-		}
-		if profile.HD == "" {
-			if code == "" || s.Mail == nil {
-				return Session{}, false, ErrGoogleMailboxProof
-			}
-			if _, _, err = s.Mail.redeem(ctx, email, code, UseCodeForLogin); err != nil {
-				return Session{}, false, err
-			}
-		}
-		id, created, err = s.Backend.ResolveGoogleUser(ctx, token.Subject, email, language, true)
-	}
+	u, created, err := s.VerifyIdentity(ctx, raw, code, language, "")
 	if err != nil {
 		return Session{}, false, err
-	}
-	u, ok, err := s.Accounts.Find(ctx, id)
-	if err != nil {
-		return Session{}, false, err
-	}
-	if !ok {
-		return Session{}, false, ErrGoogleToken
-	}
-	if u.Moderation.Banned() {
-		return Session{}, false, BannedError{Moderation: u.Moderation}
 	}
 	var session Session
 	if accounts, ok := s.Accounts.(*JWTAccounts); ok {
@@ -123,6 +78,62 @@ func (s GoogleLogin) Login(ctx context.Context, raw, code, language string) (Ses
 		session, err = s.Backend.IssueVerifiedSession(ctx, u)
 	}
 	return session, created, err
+}
+
+func (s GoogleLogin) VerifyIdentity(ctx context.Context, raw, code, language, expectedEmail string) (User, bool, error) {
+	if s.Config.ClientID == "" {
+		return User{}, false, ErrGoogleUnavailable
+	}
+	if raw == "" {
+		return User{}, false, ErrGoogleToken
+	}
+	var token googleToken
+	if err := s.Config.get(ctx, "https://www.googleapis.com/oauth2/v2/tokeninfo?access_token="+url.QueryEscape(raw), "", &token); err != nil {
+		return User{}, false, err
+	}
+	email, err := verificationEmail(token.Email)
+	if err != nil || token.Subject == "" || token.Audience != s.Config.ClientID || !token.Verified || token.Expires <= 0 {
+		return User{}, false, ErrGoogleToken
+	}
+	if expectedEmail != "" && NormalizeEmail(expectedEmail) != email {
+		return User{}, false, ErrGoogleToken
+	}
+	authoritative := strings.HasSuffix(email, "@gmail.com")
+	language = cmp.Or(language, "ja")
+	id, created, err := s.Backend.ResolveGoogleUser(ctx, token.Subject, email, language, authoritative)
+	if errors.Is(err, ErrGoogleMailboxProof) {
+		// Google is authoritative for Workspace accounts with a hosted-domain claim.
+		var profile struct{ ID, Email, HD string }
+		if err = s.Config.get(ctx, "https://www.googleapis.com/oauth2/v2/userinfo", raw, &profile); err != nil {
+			return User{}, false, err
+		}
+		if profile.ID != token.Subject || NormalizeEmail(profile.Email) != email {
+			return User{}, false, ErrGoogleToken
+		}
+		if profile.HD == "" {
+			if code == "" || s.Mail == nil {
+				return User{}, false, ErrGoogleMailboxProof
+			}
+			if _, _, err = s.Mail.redeem(ctx, email, code, UseCodeForLogin); err != nil {
+				return User{}, false, err
+			}
+		}
+		id, created, err = s.Backend.ResolveGoogleUser(ctx, token.Subject, email, language, true)
+	}
+	if err != nil {
+		return User{}, false, err
+	}
+	u, ok, err := s.Accounts.Find(ctx, id)
+	if err != nil {
+		return User{}, false, err
+	}
+	if !ok {
+		return User{}, false, ErrGoogleToken
+	}
+	if u.Moderation.Banned() {
+		return User{}, false, BannedError{Moderation: u.Moderation}
+	}
+	return u, created, nil
 }
 
 func (s *Store) ResolveGoogleUser(ctx context.Context, subject, email, language string, mayLink bool) (int64, bool, error) {

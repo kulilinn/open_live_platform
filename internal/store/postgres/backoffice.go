@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"open_live_platform/internal/admin"
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
@@ -18,10 +19,50 @@ import (
 var _ admin.BackofficeStore = (*Store)(nil)
 
 func (s *Store) LoginBackoffice(ctx context.Context, session admin.BackofficeSession) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO backoffice_sessions(area,principal_id,fingerprint,access_hash,refresh_hash,access_expires,refresh_expires)
+	if session.DatabaseVersion == "" && session.Area != admin.MCNArea {
+		return loginBackoffice(ctx, s.pool, session)
+	}
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := lockSystemArea(ctx, tx, session.Area); err != nil {
+			return err
+		}
+		if session.Area == admin.MCNArea {
+			var disabled bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcn_agency_directory WHERE id=$1 AND disabled)`, session.AgencyID).Scan(&disabled); err != nil {
+				return err
+			}
+			if disabled {
+				return admin.ErrBackofficeNotFound
+			}
+		}
+		if session.DatabaseVersion == "" {
+			return loginBackoffice(ctx, tx, session)
+		}
+		var current bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM backoffice_system_accounts
+			WHERE area=$1 AND id=$2 AND credential_version::text=$3 AND NOT disabled AND NOT deleted)`,
+			session.Area, session.ID, session.DatabaseVersion).Scan(&current)
+		if err != nil {
+			return err
+		}
+		if !current {
+			return admin.ErrBackofficeNotFound
+		}
+		return loginBackoffice(ctx, tx, session)
+	})
+}
+
+func loginBackoffice(ctx context.Context, db interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, session admin.BackofficeSession) error {
+	_, err := db.Exec(ctx, `WITH logged_in AS (INSERT INTO backoffice_sessions(area,principal_id,fingerprint,access_hash,refresh_hash,access_expires,refresh_expires)
 		VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(area,principal_id) DO UPDATE SET fingerprint=EXCLUDED.fingerprint,
-		access_hash=EXCLUDED.access_hash,refresh_hash=EXCLUDED.refresh_hash,access_expires=EXCLUDED.access_expires,refresh_expires=EXCLUDED.refresh_expires`,
-		session.Area, session.ID, session.Fingerprint[:], session.AccessHash[:], session.RefreshHash[:], session.AccessExpires, session.RefreshExpires)
+		access_hash=EXCLUDED.access_hash,refresh_hash=EXCLUDED.refresh_hash,access_expires=EXCLUDED.access_expires,refresh_expires=EXCLUDED.refresh_expires RETURNING principal_id)
+		INSERT INTO mcn_messages(agency_id,manager_id,user_id,ty,params)
+		SELECT $8,CASE WHEN $9::bool THEN $2::bigint END,principal_id,3,jsonb_build_object('name',$10::text,'ty',$11::smallint)
+		FROM logged_in WHERE $1='mcn'`,
+		session.Area, session.ID, session.Fingerprint[:], session.AccessHash[:], session.RefreshHash[:], session.AccessExpires, session.RefreshExpires,
+		session.AgencyID, session.Manager, session.DisplayName, session.AccountType)
 	return err
 }
 
@@ -188,7 +229,7 @@ func (s *Store) ApplyBackofficeAction(ctx context.Context, actor admin.Principal
 		if err != nil {
 			return err
 		}
-		if ty := map[string]int{"account_disable": 1, "no_talking": 2, "streamer_end_stream": 5, "streamer_disable": 6}[op.Kind]; ty != 0 {
+		if ty := map[string]int{"account_disable": 1, "no_talking": 2, "account_reset": 3, "streamer_end_stream": 5, "streamer_disable": 6}[op.Kind]; ty != 0 {
 			if _, err := r.tx.Exec(ctx, `INSERT INTO user_violation_records (id,user_id,reason,limit_duration,create_time,create_by_name,ty)
 				VALUES($1,$2,$3,$4,statement_timestamp(),$5,$6)`, recordID, op.UserID, reason, op.Duration, actor.Name(), ty); err != nil {
 				return err
@@ -199,6 +240,13 @@ func (s *Store) ApplyBackofficeAction(ctx context.Context, actor admin.Principal
 			until += time.Now().Unix()
 		}
 		switch op.Kind {
+		case "account_reset":
+			if _, err := r.tx.Exec(ctx, `UPDATE users SET account='',profile=coalesce(profile,'{}'::jsonb)||'{"Name":"","Photo":""}' WHERE id=$1`, op.UserID); err != nil {
+				return err
+			}
+			_, err := r.tx.Exec(ctx, `INSERT INTO notices(id,notice_target,notice_type,receive_id,content,create_time)
+				VALUES(nextval('local_notice_ids'),3,16,$1,jsonb_build_object('reason',coalesce($2::text[],'{}')),now())`, op.UserID, op.Reason)
+			return err
 		case "account_disable", "account_enable", "no_talking":
 			status := auth.AccountNormal
 			switch op.Kind {

@@ -21,6 +21,166 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type GetUserRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetUserRequest) Reset() {
+	*x = GetUserRequest{}
+	mi := &file_api_platform_v1_platform_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetUserRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetUserRequest) ProtoMessage() {}
+
+func (x *GetUserRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_platform_v1_platform_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetUserRequest.ProtoReflect.Descriptor instead.
+func (*GetUserRequest) Descriptor() ([]byte, []int) {
+	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *GetUserRequest) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+type DirectoryUser struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Email         string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	SearchName    string                 `protobuf:"bytes,5,opt,name=search_name,json=searchName,proto3" json:"search_name,omitempty"`
+	Language      string                 `protobuf:"bytes,6,opt,name=language,proto3" json:"language,omitempty"`
+	Photo         string                 `protobuf:"bytes,7,opt,name=photo,proto3" json:"photo,omitempty"`
+	Banner        string                 `protobuf:"bytes,8,opt,name=banner,proto3" json:"banner,omitempty"`
+	IsAnchor      bool                   `protobuf:"varint,9,opt,name=is_anchor,json=isAnchor,proto3" json:"is_anchor,omitempty"`
+	Status        int32                  `protobuf:"varint,10,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DirectoryUser) Reset() {
+	*x = DirectoryUser{}
+	mi := &file_api_platform_v1_platform_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DirectoryUser) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DirectoryUser) ProtoMessage() {}
+
+func (x *DirectoryUser) ProtoReflect() protoreflect.Message {
+	mi := &file_api_platform_v1_platform_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DirectoryUser.ProtoReflect.Descriptor instead.
+func (*DirectoryUser) Descriptor() ([]byte, []int) {
+	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *DirectoryUser) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *DirectoryUser) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetSearchName() string {
+	if x != nil {
+		return x.SearchName
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetLanguage() string {
+	if x != nil {
+		return x.Language
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetPhoto() string {
+	if x != nil {
+		return x.Photo
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetBanner() string {
+	if x != nil {
+		return x.Banner
+	}
+	return ""
+}
+
+func (x *DirectoryUser) GetIsAnchor() bool {
+	if x != nil {
+		return x.IsAnchor
+	}
+	return false
+}
+
+func (x *DirectoryUser) GetStatus() int32 {
+	if x != nil {
+		return x.Status
+	}
+	return 0
+}
+
 type GetStatsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -29,7 +189,7 @@ type GetStatsRequest struct {
 
 func (x *GetStatsRequest) Reset() {
 	*x = GetStatsRequest{}
-	mi := &file_api_platform_v1_platform_proto_msgTypes[0]
+	mi := &file_api_platform_v1_platform_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -41,7 +201,7 @@ func (x *GetStatsRequest) String() string {
 func (*GetStatsRequest) ProtoMessage() {}
 
 func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_platform_v1_platform_proto_msgTypes[0]
+	mi := &file_api_platform_v1_platform_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -54,7 +214,7 @@ func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsRequest.ProtoReflect.Descriptor instead.
 func (*GetStatsRequest) Descriptor() ([]byte, []int) {
-	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{0}
+	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{2}
 }
 
 type GetStatsResponse struct {
@@ -67,7 +227,7 @@ type GetStatsResponse struct {
 
 func (x *GetStatsResponse) Reset() {
 	*x = GetStatsResponse{}
-	mi := &file_api_platform_v1_platform_proto_msgTypes[1]
+	mi := &file_api_platform_v1_platform_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -79,7 +239,7 @@ func (x *GetStatsResponse) String() string {
 func (*GetStatsResponse) ProtoMessage() {}
 
 func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_platform_v1_platform_proto_msgTypes[1]
+	mi := &file_api_platform_v1_platform_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -92,7 +252,7 @@ func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsResponse.ProtoReflect.Descriptor instead.
 func (*GetStatsResponse) Descriptor() ([]byte, []int) {
-	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{1}
+	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetStatsResponse) GetUsers() int64 {
@@ -123,7 +283,7 @@ type Room struct {
 
 func (x *Room) Reset() {
 	*x = Room{}
-	mi := &file_api_platform_v1_platform_proto_msgTypes[2]
+	mi := &file_api_platform_v1_platform_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -135,7 +295,7 @@ func (x *Room) String() string {
 func (*Room) ProtoMessage() {}
 
 func (x *Room) ProtoReflect() protoreflect.Message {
-	mi := &file_api_platform_v1_platform_proto_msgTypes[2]
+	mi := &file_api_platform_v1_platform_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -148,7 +308,7 @@ func (x *Room) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Room.ProtoReflect.Descriptor instead.
 func (*Room) Descriptor() ([]byte, []int) {
-	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{2}
+	return file_api_platform_v1_platform_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Room) GetId() int64 {
@@ -197,7 +357,22 @@ var File_api_platform_v1_platform_proto protoreflect.FileDescriptor
 
 const file_api_platform_v1_platform_proto_rawDesc = "" +
 	"\n" +
-	"\x1eapi/platform/v1/platform.proto\x12\vplatform.v1\"\x11\n" +
+	"\x1eapi/platform/v1/platform.proto\x12\vplatform.v1\" \n" +
+	"\x0eGetUserRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"\x8c\x02\n" +
+	"\rDirectoryUser\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x14\n" +
+	"\x05email\x18\x02 \x01(\tR\x05email\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12!\n" +
+	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\x12\x1f\n" +
+	"\vsearch_name\x18\x05 \x01(\tR\n" +
+	"searchName\x12\x1a\n" +
+	"\blanguage\x18\x06 \x01(\tR\blanguage\x12\x14\n" +
+	"\x05photo\x18\a \x01(\tR\x05photo\x12\x16\n" +
+	"\x06banner\x18\b \x01(\tR\x06banner\x12\x1b\n" +
+	"\tis_anchor\x18\t \x01(\bR\bisAnchor\x12\x16\n" +
+	"\x06status\x18\n" +
+	" \x01(\x05R\x06status\"\x11\n" +
 	"\x0fGetStatsRequest\"Q\n" +
 	"\x10GetStatsResponse\x12\x14\n" +
 	"\x05users\x18\x01 \x01(\x03R\x05users\x12'\n" +
@@ -210,7 +385,9 @@ const file_api_platform_v1_platform_proto_rawDesc = "" +
 	"\fmember_count\x18\x05 \x01(\x03R\vmemberCount\x12\x17\n" +
 	"\ais_lock\x18\x06 \x01(\bR\x06isLock2Z\n" +
 	"\x0fPlatformService\x12G\n" +
-	"\bGetStats\x12\x1c.platform.v1.GetStatsRequest\x1a\x1d.platform.v1.GetStatsResponseB/Z-open_live_platform/api/platform/v1;platformv1b\x06proto3"
+	"\bGetStats\x12\x1c.platform.v1.GetStatsRequest\x1a\x1d.platform.v1.GetStatsResponse2Z\n" +
+	"\x14UserDirectoryService\x12B\n" +
+	"\aGetUser\x12\x1b.platform.v1.GetUserRequest\x1a\x1a.platform.v1.DirectoryUserB/Z-open_live_platform/api/platform/v1;platformv1b\x06proto3"
 
 var (
 	file_api_platform_v1_platform_proto_rawDescOnce sync.Once
@@ -224,18 +401,22 @@ func file_api_platform_v1_platform_proto_rawDescGZIP() []byte {
 	return file_api_platform_v1_platform_proto_rawDescData
 }
 
-var file_api_platform_v1_platform_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_api_platform_v1_platform_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_api_platform_v1_platform_proto_goTypes = []any{
-	(*GetStatsRequest)(nil),  // 0: platform.v1.GetStatsRequest
-	(*GetStatsResponse)(nil), // 1: platform.v1.GetStatsResponse
-	(*Room)(nil),             // 2: platform.v1.Room
+	(*GetUserRequest)(nil),   // 0: platform.v1.GetUserRequest
+	(*DirectoryUser)(nil),    // 1: platform.v1.DirectoryUser
+	(*GetStatsRequest)(nil),  // 2: platform.v1.GetStatsRequest
+	(*GetStatsResponse)(nil), // 3: platform.v1.GetStatsResponse
+	(*Room)(nil),             // 4: platform.v1.Room
 }
 var file_api_platform_v1_platform_proto_depIdxs = []int32{
-	2, // 0: platform.v1.GetStatsResponse.rooms:type_name -> platform.v1.Room
-	0, // 1: platform.v1.PlatformService.GetStats:input_type -> platform.v1.GetStatsRequest
-	1, // 2: platform.v1.PlatformService.GetStats:output_type -> platform.v1.GetStatsResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
+	4, // 0: platform.v1.GetStatsResponse.rooms:type_name -> platform.v1.Room
+	2, // 1: platform.v1.PlatformService.GetStats:input_type -> platform.v1.GetStatsRequest
+	0, // 2: platform.v1.UserDirectoryService.GetUser:input_type -> platform.v1.GetUserRequest
+	3, // 3: platform.v1.PlatformService.GetStats:output_type -> platform.v1.GetStatsResponse
+	1, // 4: platform.v1.UserDirectoryService.GetUser:output_type -> platform.v1.DirectoryUser
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -252,9 +433,9 @@ func file_api_platform_v1_platform_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_platform_v1_platform_proto_rawDesc), len(file_api_platform_v1_platform_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   5,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_api_platform_v1_platform_proto_goTypes,
 		DependencyIndexes: file_api_platform_v1_platform_proto_depIdxs,

@@ -199,7 +199,7 @@ func (b backoffice) registerOperations(mux *http.ServeMux) {
 		backofficeReply(w, map[string]any{"id": strconv.FormatInt(u.ID, 10), "email": u.Email, "name": u.DisplayName,
 			"photo": u.Photo, "gender": u.Gender, "isStreamer": u.IsStreamer, "createAt": u.CreatedAt}, nil)
 	})
-	for _, kind := range []string{"account_disable", "account_enable", "no_talking"} {
+	for _, kind := range []string{"account_disable", "account_enable", "account_reset", "no_talking"} {
 		add("/api/operation/usermanage/user/"+kind, func(w http.ResponseWriter, r *http.Request, p Principal, _ [sha256.Size]byte) {
 			var body struct {
 				ID       int64    `json:"userId,string"`

@@ -50,7 +50,9 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	var tickets sync.Map
 	var rust *rustTickets
 	var devices deviceHub
+	var metrics RelayMetrics
 	if len(options) != 0 {
+		metrics = options[0].Metrics
 		devices.configure(options[0])
 	}
 	if len(options) != 0 && options[0].AppKey != "" && options[0].AppSecret != "" {
@@ -224,6 +226,9 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 				}
 				compatibility = &rustSocket{devices: &devices, tickets: rust, ticket: compatible}
 			}
+			if metrics != nil {
+				defer metrics.RelayOpened(protocol)()
+			}
 			stop := context.AfterFunc(sessionCtx, func() {
 				cause := context.Cause(sessionCtx)
 				switch {
@@ -245,7 +250,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 				private, stopPrivate = devices.private.subscribe(user.ID)
 				defer stopPrivate()
 			}
-			serve(sessionCtx, conn, sub, accounts, rooms, roomID, user, protocol, compatibility, private)
+			serve(sessionCtx, conn, sub, accounts, rooms, roomID, user, protocol, compatibility, private, metrics)
 		}
 	})
 	return devices.pushPrivate
@@ -257,7 +262,7 @@ type rustSocket struct {
 	ticket  *rustTicket
 }
 
-func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string, compatibility *rustSocket, private <-chan json.RawMessage) {
+func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, accounts auth.AccountStore, rooms live.RoomStore, roomID int64, user auth.User, protocol string, compatibility *rustSocket, private <-chan json.RawMessage, metrics RelayMetrics) {
 	defer conn.Close()
 	commandCtx := live.WithRoomCommandScope(ctx, roomID, sub.LiveID)
 	var anchorPing <-chan time.Time
@@ -406,6 +411,9 @@ func serve(ctx context.Context, conn *websocket.Conn, sub live.Subscription, acc
 				// The cancellation callback sends the close frame and ends the
 				// read loop. Drop commands received during that interval.
 				continue
+			}
+			if metrics != nil {
+				metrics.RelayMessage(protocol)
 			}
 			if device != nil && cmd.Type == "device" {
 				device.publish(ctx, cmd.DeviceTarget, cmd.Payload)

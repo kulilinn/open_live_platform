@@ -82,6 +82,8 @@ type Store struct {
 	nextEmailCodeSweep   time.Time
 	loginGrants          map[[32]byte]LoginGrant
 	nextLoginGrantSweep  time.Time
+	trustedGrants        map[[32]byte]TrustedGrant
+	nextTrustedSweep     time.Time
 }
 
 var _ AccountStore = (*Store)(nil)

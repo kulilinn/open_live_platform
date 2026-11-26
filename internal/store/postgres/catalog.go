@@ -15,8 +15,18 @@ func (s *Store) CatalogRows(ctx context.Context, section string) ([]catalog.Row,
 	}
 	return rows, err
 }
+
+func (s *Store) AccessSetting(ctx context.Context, key string) (string, error) {
+	var content string
+	err := s.pool.QueryRow(ctx, `SELECT coalesce((SELECT item->>'content' FROM public_catalog,jsonb_array_elements(records) item
+		WHERE section='common_settings' AND item->>'id'=$1),'')`, key).Scan(&content)
+	return content, err
+}
 func (s *Store) ReplacePublicCatalog(ctx context.Context, snapshot catalog.Snapshot) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(167884962,77)"); err != nil {
+			return err
+		}
 		for section, records := range snapshot {
 			if _, err := tx.Exec(ctx, `INSERT INTO public_catalog(section,records) VALUES($1,$2) ON CONFLICT(section) DO UPDATE SET records=excluded.records`, section, records); err != nil {
 				return err

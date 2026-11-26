@@ -69,8 +69,8 @@ func (s *Store) RemoveBackofficePost(ctx context.Context, operator admin.Princip
 
 func (s *Store) RemoveBackofficePostComment(ctx context.Context, operator admin.Principal, path string, id, postID int64) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var active bool
-		err := tx.QueryRow(ctx, `SELECT NOT deleted FROM anchor_posts WHERE id=$1 FOR UPDATE`, postID).Scan(&active)
+		var post int64
+		err := tx.QueryRow(ctx, `SELECT id FROM anchor_posts WHERE id=$1 FOR UPDATE`, postID).Scan(&post)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return admin.ErrBackofficeNotFound
 		}

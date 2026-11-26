@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"open_live_platform/internal/collectible"
 	"open_live_platform/internal/etcdlive"
 	"open_live_platform/internal/livebot"
 )
@@ -19,6 +20,9 @@ type appCluster struct {
 	tables    *etcdlive.Tables
 	revision  int64
 	botBase   livebot.Config
+	nft       *collectible.LubanCatalog
+	usesBots  bool
+	usesNFT   bool
 	discovery *etcdlive.Discovery
 }
 
@@ -32,34 +36,57 @@ func initCluster(ctx context.Context, config *Config) (*appCluster, error) {
 		}
 		prefix = "/@grpc-" + name
 	}
-	if !config.LubanRoomBots && prefix == "" {
+	if !config.LubanRoomBots && !config.LubanCollectibles && prefix == "" {
 		return nil, nil
 	}
 	conn, err := ec.Open()
 	if err != nil {
 		return nil, err
 	}
-	result := &appCluster{client: conn, botBase: config.RoomBots}
+	result := &appCluster{client: conn, botBase: config.RoomBots, usesBots: config.LubanRoomBots, usesNFT: config.LubanCollectibles}
 	if prefix != "" {
 		result.discovery = &etcdlive.Discovery{Client: conn, Prefix: prefix}
 	}
-	if config.LubanRoomBots {
+	if result.usesBots || result.usesNFT {
 		if strings.TrimRight(ec.ConfigPrefix, "/") == "" {
 			conn.Close()
 			return nil, fmt.Errorf("ETCD_CONFIG_PREFIX is required for Luban")
 		}
-		tables := etcdlive.Tables{Client: conn, Prefix: ec.ConfigPrefix, Names: livebot.LubanTables}
+		var names []string
+		if result.usesBots {
+			names = append(names, livebot.LubanTables...)
+		}
+		if result.usesNFT {
+			names = append(names, collectible.LubanTables...)
+		}
+		tables := etcdlive.Tables{Client: conn, Prefix: ec.ConfigPrefix, Names: names}
 		data, rev, err := tables.Read(ctx, 0)
 		if err == nil {
-			config.RoomBots, err = livebot.FromLuban(result.botBase, data)
+			config.RoomBots, result.nft, err = result.decode(data)
 		}
 		if err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("load Luban room bot tables: %w", err)
+			return nil, fmt.Errorf("load Luban tables: %w", err)
 		}
 		result.tables, result.revision = &tables, rev
 	}
 	return result, nil
+}
+
+func (c *appCluster) decode(data map[string][]byte) (livebot.Config, *collectible.LubanCatalog, error) {
+	bots := c.botBase
+	var nft *collectible.LubanCatalog
+	var err error
+	if c.usesBots {
+		bots, err = livebot.FromLuban(c.botBase, data)
+		if err != nil {
+			return bots, nil, err
+		}
+	}
+	if c.usesNFT {
+		nft, err = collectible.ReadLubanCatalog(data)
+	}
+	return bots, nft, err
 }
 
 func (c *appCluster) close() {
@@ -88,9 +115,12 @@ func (a *App) monitorCluster(ctx context.Context, listener net.Listener) *sync.W
 		go func() {
 			defer done.Done()
 			a.cluster.tables.Watch(ctx, a.cluster.revision, func(data map[string][]byte) error {
-				bots, err := livebot.FromLuban(a.cluster.botBase, data)
-				if err == nil {
+				bots, nft, err := a.cluster.decode(data)
+				if err == nil && a.cluster.usesBots {
 					err = a.db.ConfigureRoomBots(bots)
+				}
+				if err == nil && a.cluster.usesNFT {
+					a.collectibleConfig.ConfigureLuban(nft)
 				}
 				if err == nil && a.metrics != nil {
 					a.metrics.Reloads.WithLabelValues("accepted").Inc()
@@ -101,7 +131,7 @@ func (a *App) monitorCluster(ctx context.Context, listener net.Listener) *sync.W
 					if a.metrics != nil {
 						a.metrics.Reloads.WithLabelValues("rejected").Inc()
 					}
-					log.Printf("reload Luban room bots: %v", err)
+					log.Printf("reload Luban tables: %v", err)
 				}
 			})
 		}()
