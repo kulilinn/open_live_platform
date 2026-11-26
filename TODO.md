@@ -4,7 +4,7 @@
 
 - 仓库目录为 `D:\my\open_live_platform`。
 - 当前主线已接入 Go 直播核心、PostgreSQL 持久化、H5 文字聊天、场次数据和跨实例房间广播。
-- 已验证 `go test ./...`、真实 PostgreSQL 回归、`go vet ./...` 和 Go 编译。
+- 已通过本地 Go 测试、`go vet ./...` 和编译。早期版本做过真实 PostgreSQL 回归，本轮新增的迁移版本登记和 RTC NID 用例待实库验证。
 - 保留 64 位用户、房间、消息 ID。未修改任何 `CMakeLists.txt` 或 `prcmake` 文件。
 
 ## 本轮优先完成
@@ -13,7 +13,7 @@
 - [x] 兼容登录的 refresh/access JWT、过期、登出和重新登录撤销
 - [ ] 迁移现有 Rust/Redis 会话，登出时主动断开已建立的 WebSocket
 - [x] 房间进出协议兼容
-  - [x] join 的 `status/data/room/languages/user/rtcToken/startTime`，RTC token 仍为空占位
+  - [x] join 的 `status/data/room/languages/user/rtcToken/startTime`，配置 Agora 后返回已签名凭据
   - [x] leave 的 `status` 响应
   - [x] Rust 错误状态码与旧 Go HTTP 状态并存
 - [ ] relay 设备协议兼容
@@ -25,7 +25,8 @@
 
 - [ ] 完整 Rust RoomInfo 字段来源
   - [x] 每场独立 `liveId`、主播 `anchorNid` 和场次起止时间
-  - [ ] RTC token 签发、观众 RTC UID、languages
+  - [x] Agora RTC token 签发与续签、按场分配观众 RTC UID
+  - [ ] languages 的真实数据来源
   - [ ] banner、tag、description、plan、gifts、trans 等设置
 - [ ] Rust 房间错误码和 DataNotFound 响应
 - [ ] Rust 特有的房间在线状态及状态转换
@@ -48,7 +49,7 @@
 - [ ] 发送礼物、积分、收益、订阅和排行榜
 - [ ] Feed、通知、私信和会话
 - [ ] 文件上传、媒体审核和消息审核
-- [ ] Agora、STT、翻译和设备控制
+- [ ] Agora 真实音视频通话验收、STT、翻译和设备控制
 - [ ] 支付、钱包、订单和退款
 - [ ] Anchor、MCN、NFT、装扮
 - [ ] 完整后台管理、审计和客服机器人

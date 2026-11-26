@@ -15,19 +15,23 @@ import (
 	"open_live_platform/internal/httpapi"
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/relay"
+	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/store/postgres"
 )
 
 type Config struct {
-	DatabaseURL     string
-	Addr            string
-	GRPCAddr        string
-	AdminToken      string
-	EdgeToken       string
-	RelaySecret     string
-	RelayPublicURL  string
-	GiftCatalogFile string
-	JWTSecret       string
+	DatabaseURL      string
+	Addr             string
+	GRPCAddr         string
+	AdminToken       string
+	EdgeToken        string
+	RelaySecret      string
+	RelayPublicURL   string
+	GiftCatalogFile  string
+	JWTSecret        string
+	AgoraAppID       string
+	AgoraCertificate string
+	AgoraTokenExpire string
 
 	ReadTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
@@ -47,6 +51,9 @@ func ConfigFromEnv() Config {
 		RelayPublicURL:    os.Getenv("RELAY_PUBLIC_URL"),
 		GiftCatalogFile:   os.Getenv("GIFT_CATALOG_FILE"),
 		JWTSecret:         os.Getenv("JWT_SECRET"),
+		AgoraAppID:        os.Getenv("AGORA_APP_ID"),
+		AgoraCertificate:  os.Getenv("AGORA_APP_CERTIFICATE"),
+		AgoraTokenExpire:  os.Getenv("AGORA_TOKEN_EXPIRE"),
 		ReadTimeout:       duration("PLATFORM_READ_TIMEOUT", 15*time.Second),
 		ReadHeaderTimeout: duration("PLATFORM_READ_HEADER_TIMEOUT", 5*time.Second),
 		WriteTimeout:      duration("PLATFORM_WRITE_TIMEOUT", 15*time.Second),
@@ -64,6 +71,10 @@ type App struct {
 
 func New(ctx context.Context, config Config) (*App, error) {
 	config.GRPCAddr = cmp.Or(config.GRPCAddr, "127.0.0.1:9090")
+	signer, err := rtc.NewSigner(config.AgoraAppID, config.AgoraCertificate, config.AgoraTokenExpire)
+	if err != nil {
+		return nil, err
+	}
 	gifts, err := gift.Load(config.GiftCatalogFile)
 	if err != nil {
 		return nil, fmt.Errorf("gift catalog: %w", err)
@@ -84,7 +95,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 	accounts := auth.WithJWT(backend, config.JWTSecret)
 	mux := http.NewServeMux()
 
-	httpapi.Register(mux, accounts, rooms)
+	httpapi.RegisterWithRTC(mux, accounts, rooms, signer)
 	httpapi.RegisterGiftCatalog(mux, accounts, gifts)
 	admin.Register(mux, accounts, rooms, config.AdminToken)
 	edge.Register(mux, rooms, config.EdgeToken)

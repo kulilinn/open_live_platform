@@ -34,6 +34,7 @@ go run .\cmd\platform
 - `POST /api/live/room/start` 开播，`POST /api/live/room/setting` 修改本场标题或密码
 - `POST /api/live/room/list` 查询观众端房间列表
 - `POST /api/live/room/join/{room}` 与 `POST /api/live/room/leave/{room}`
+- `GET /api/live/token/{channel}/{role}` 在已加入的直播间续签 RTC 凭据
 - `GET /api/live/room/info/{room}`、`/audiences/{room}`、`/admins/{room}`、`/bans/{room}`
 - `GET /api/live/room/kicked/{room}/{uid}`、`/banned/{room}/{uid}`、`/limited/{room}`、`/audience/{room}/{uid}`
 - `GET /api/live/room/online`、`/check_password/{room_id}`，以及 `POST /api/live/room/audiences/{room}` 分页查询
@@ -75,6 +76,14 @@ protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=p
 设置 `JWT_SECRET` 后，使用 `Accept: application/vnd.livemedia+json` 或 `?compat=rust` 登录会收到有效期 24 小时的 refresh JWT。用它请求 `GET /api/auth/session`，获取有效期 30 分钟的 access JWT。后续业务请求和领取 WebSocket 票据使用 access JWT。
 
 同一用户再次兼容登录会使先前的 JWT 会话失效。`POST /api/auth/signout` 会撤销当前 JWT 会话签发的 refresh 和 access，已建立的 WebSocket 仍按房间连接规则管理。普通 Go 登录继续签发原有令牌。JWT 会话状态随 PostgreSQL 保留，现存 Rust/Redis 会话需单独迁移。
+
+## Agora 音视频凭据
+
+在服务端同时设置 `AGORA_APP_ID` 和 `AGORA_APP_CERTIFICATE`，兼容进房请求 `POST /api/live/room/join/{room}?compat=rust` 会在 `data.rtcToken` 中返回签好的 Agora AccessToken2。两项均省略时仍可进房和文字聊天，`rtcToken.token` 为空。有效期由 `AGORA_TOKEN_EXPIRE` 指定，单位为秒，默认为 43200（12 小时）。
+
+客户端用返回的 `channel`、`nid` 和 `token` 加入 Agora，`uid` 是平台的 64 位账号 ID。两种 ID 在响应中都是十进制字符串。主播的 RTC NID 为 `200000001`，观众同场重进沿用之前的 NID。同一房间重新开播后，观众按房间计数继续分配新号。
+
+凭据即将到期时，用当前登录令牌请求 `GET /api/live/token/{channel}/{role}`。主播发布用 `1`，观众收看用 `2`。返回的 `data` 与进房的 `rtcToken` 同形，续签沿用同一 NID。离房后不能为该房间续签，已签发凭据按原有效期到期。Agora 项目如需在云端强制区分发布和订阅权限，请启用其主播鉴权功能。
 
 ## 客户端进入聊天室
 
@@ -128,7 +137,7 @@ $env:DATABASE_URL='postgres://app:password@127.0.0.1:5432/open_live_platform?ssl
 go run ./cmd/platform
 ```
 
-服务启动时按顺序执行内置的[数据库迁移脚本](internal/store/postgres/migrations)。设置了 `DATABASE_URL` 时，连接或迁移失败会终止启动。省略该变量时使用内存模式，重启即清空。已有 Rust/MySQL 数据的导入需要单独迁移。
+服务启动时从内置的[数据库迁移目录](internal/store/postgres/migrations)按编号加载 SQL，并在目标 schema 的 `schema_migrations` 中登记已应用版本。旧 Go 库首次升级会执行已有幂等脚本和回填，后续启动只执行新增版本。迁移和版本登记使用同一个事务，失败会一并回滚。新增迁移只需添加新的编号 SQL 文件。设置了 `DATABASE_URL` 时，连接或迁移失败会终止启动。省略该变量时使用内存模式，重启即清空。已有 Rust/MySQL 数据的导入需要单独迁移。
 
 PG 模式下，账号、登录会话、房间、成员、管理员、禁言、踢出和聊天记录可跨重启保留。房间密码以加盐哈希保存，本场密码及观众输错次数随服务重启保留，关播时清除。旧版本的房间升级后按公开房处理。重新开播时按房间业务规则重置本场成员和管理状态。
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ var (
 	ErrInvalidRoomPassword = errors.New("invalid room password")
 	ErrRoomPasswordLocked  = errors.New("room password attempts exhausted")
 	ErrRoomAlreadyOnline   = errors.New("room is already online")
+	ErrViewerNIDExhausted  = errors.New("room RTC IDs exhausted")
 )
 
 type Room struct {
@@ -32,6 +34,7 @@ type Room struct {
 	MemberCount int         `json:"member_count"`
 	IsLock      bool        `json:"isLock"`
 	Session     LiveSession `json:"-"`
+	ViewerNID   uint32      `json:"-"` // RTC ID of the user in a JoinRoom result.
 }
 
 func (r *Room) UnmarshalJSON(data []byte) error {
@@ -111,6 +114,8 @@ type RoomStore interface {
 	ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64, error)
 	Join(ctx context.Context, roomID, userID int64, password string) error
 	JoinRoom(ctx context.Context, roomID, userID int64, password string) (Room, error)
+	// RTCNID returns the RTC ID for the owner or a joined member of the active broadcast.
+	RTCNID(ctx context.Context, roomID, userID int64) (uint32, error)
 	Leave(ctx context.Context, roomID, userID int64) error
 	Members(ctx context.Context, roomID int64) ([]int64, error)
 	Admins(ctx context.Context, roomID int64) ([]int64, error)
@@ -129,6 +134,8 @@ type RoomStore interface {
 type roomState struct {
 	Room
 	members          map[int64]struct{}
+	viewerNIDs       map[int64]uint32
+	lastViewerNID    uint32 // Retained across broadcasts on the same channel.
 	admins           map[int64]struct{}
 	muted            map[int64]time.Time
 	kicked           map[int64]struct{}
@@ -166,8 +173,9 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 		s.mu.Unlock()
 		return Room{}, err
 	}
-	if room := s.rooms[ownerID]; room != nil && room.Online {
-		info, hash := room.snapshot(), room.passwordHash
+	previous := s.rooms[ownerID]
+	if previous != nil && previous.Online {
+		info, hash := previous.snapshot(), previous.passwordHash
 		s.mu.Unlock()
 		if password != "" && (!info.IsLock || !RoomPasswordMatches(hash, password)) {
 			return Room{}, ErrRoomAlreadyOnline
@@ -175,6 +183,10 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 		return info, nil
 	}
 	defer s.mu.Unlock()
+	lastViewerNID := DefaultAnchorNID
+	if previous != nil {
+		lastViewerNID = previous.lastViewerNID
+	}
 	room := &roomState{
 		Room: Room{
 			ID:      ownerID,
@@ -187,6 +199,8 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 			},
 		},
 		members:          make(map[int64]struct{}),
+		viewerNIDs:       make(map[int64]uint32),
+		lastViewerNID:    lastViewerNID,
 		admins:           make(map[int64]struct{}),
 		muted:            make(map[int64]time.Time),
 		kicked:           make(map[int64]struct{}),
@@ -346,7 +360,8 @@ func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password str
 		if _, kicked := room.kicked[userID]; kicked {
 			return Room{}, ErrKicked
 		}
-		if room.IsLock && userID != room.OwnerID {
+		checkPassword := room.IsLock && userID != room.OwnerID
+		if checkPassword {
 			if room.passwordAttempts[userID] >= MaxRoomPasswordAttempts {
 				return Room{}, ErrRoomPasswordLocked
 			}
@@ -362,14 +377,40 @@ func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password str
 				room.passwordAttempts[userID]++
 				return Room{}, ErrInvalidRoomPassword
 			}
+		}
+		nid, err := room.viewerNID(userID)
+		if err != nil {
+			return Room{}, err
+		}
+		if checkPassword {
 			delete(room.passwordAttempts, userID)
 		}
 		if !room.hasMember(userID) {
 			room.members[userID] = struct{}{}
 			room.publish(Event{Type: "join", UserID: userID})
 		}
-		return room.snapshot(), nil
+		info := room.snapshot()
+		info.ViewerNID = nid
+		return info, nil
 	}
+}
+
+// RTCNID returns the RTC ID for the owner or a joined member of the active broadcast.
+func (s *Store) RTCNID(ctx context.Context, roomID, userID int64) (uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	room, err := s.onlineRoom(roomID)
+	if err != nil {
+		return 0, err
+	}
+	if !room.hasMember(userID) {
+		return 0, ErrNotMember
+	}
+	return room.viewerNID(userID)
 }
 
 func (s *Store) Leave(ctx context.Context, roomID, userID int64) error {
@@ -634,6 +675,21 @@ func (r *roomState) snapshot() Room {
 	return info
 }
 
+func (r *roomState) viewerNID(userID int64) (uint32, error) {
+	if userID == r.OwnerID {
+		return r.Session.AnchorNID, nil
+	}
+	if nid, assigned := r.viewerNIDs[userID]; assigned {
+		return nid, nil
+	}
+	if r.lastViewerNID == math.MaxUint32 {
+		return 0, ErrViewerNIDExhausted
+	}
+	r.lastViewerNID++
+	r.viewerNIDs[userID] = r.lastViewerNID
+	return r.lastViewerNID, nil
+}
+
 func (r *roomState) hasMember(userID int64) bool {
 	_, joined := r.members[userID]
 	return joined || userID == r.OwnerID
@@ -655,6 +711,7 @@ func (r *roomState) end() {
 	r.passwordAttempts = nil
 	r.history = nil
 	clear(r.members)
+	r.viewerNIDs = nil
 	r.publish(Event{Type: "close", UserID: r.OwnerID})
 	for events := range r.subscribers {
 		r.unsubscribe(events)

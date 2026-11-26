@@ -27,17 +27,18 @@ LiveMedia is a Rust workspace with these runtime surfaces:
 The Go implementation keeps the primary runtime path small and explicit:
 
 - `cmd/platform`: one process that serves the public API, live-room endpoints, admin endpoints, edge event endpoint, WebSocket relay, and a separate internal gRPC listener.
-- `internal/auth`: in-memory users and bearer sessions with a simple token format.
+- `internal/auth`: account and session operations, opaque bearer tokens, and Rust-compatible HS256 refresh/access tokens using golang-jwt.
 - `internal/live`: in-memory room state with start, close, join, leave, info, members, admin, mute, kick, and chat operations.
 - `internal/store/postgres`: durable accounts, sessions, room state, moderation, and chat messages. The app selects this backend when `DATABASE_URL` is set. WebSocket subscriptions remain process-local.
 - `api/platform/v1/platform.proto`: `platform.v1.PlatformService/GetStats` accepts an empty request and returns the account count (`users`) and full room list (`rooms`).
 - `internal/relay`: WebSocket authentication and room message forwarding.
+- `internal/rtc`: Agora AccessToken2 issuance for room joins and renewals. Viewer RTC IDs are allocated by the selected room store.
 - `internal/admin`: compact management handlers backed by the same live/auth state.
 - `internal/edge`: event ingestion and dispatch hooks.
 
 The Go migration replaces `/internal/rpc/platform.stats` and the custom JSON RPC client and registry with gRPC. `PLATFORM_GRPC_ADDR` configures the listener, which defaults to `127.0.0.1:9090`. Frontend clients continue to use HTTP and WebSocket. The Go service has no interoperability with the Rust Zenoh service layer.
 
-The Go service uses a PostgreSQL schema for its core tables. The Rust application's MySQL data and migration history require a separate import. The Redis, etcd, S3, Kafka, Agora and payment integrations are outside this port.
+The Go service tracks applied SQL migrations in its PostgreSQL schema. The Rust application's MySQL data and migration history require a separate import. Redis, etcd, S3, Kafka and payment integrations are outside this port. Agora media calls still need end-to-end verification.
 
 ## 4. Deliberate implementation style
 

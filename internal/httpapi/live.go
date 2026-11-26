@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -76,25 +75,50 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		rustRoomError(w, err, "4005")
 		return
 	}
-	nid := strconv.FormatInt(userID, 10)
-	isAnchor := userID == room.OwnerID
-	if isAnchor {
-		nid = strconv.FormatUint(uint64(room.Session.AnchorNID), 10)
+	token, err := s.rtc.ForRoom(roomID, userID, room.ViewerNID, userID == room.OwnerID)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not issue RTC token")
+		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200",
 		"data": map[string]any{
 			"room":      info,
 			"languages": []string{},
 			"user":      map[string]any{"id": userID},
-			"rtcToken": map[string]any{
-				"appid": "", "channel": strconv.FormatInt(roomID, 10),
-				"uid": strconv.FormatInt(userID, 10), "nid": nid,
-				"token": "", "isAnchor": isAnchor,
-			},
+			"rtcToken":  token,
 			"startTime": room.Session.StartedAt.Unix(),
 		},
 	})
+}
+
+func (s server) roomToken(w http.ResponseWriter, r *http.Request, userID int64) {
+	roomID, ok := httpx.PathID(w, r, "channel")
+	if !ok {
+		return
+	}
+	role := r.PathValue("role")
+	if role != "2" && (role != "1" || roomID != userID) {
+		httpx.LiveError(w, live.ErrForbidden)
+		return
+	}
+	nid, err := s.rooms.RTCNID(r.Context(), roomID, userID)
+	if err != nil {
+		httpx.LiveError(w, err)
+		return
+	}
+	token, err := s.rtc.ForRoom(roomID, userID, nid, role == "1")
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not issue RTC token")
+		return
+	}
+	if token.Token == "" {
+		httpx.Error(w, http.StatusServiceUnavailable, "RTC signing is not configured")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.JSON(w, http.StatusOK, map[string]any{"status": "200", "data": token})
 }
 
 func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userID int64) {

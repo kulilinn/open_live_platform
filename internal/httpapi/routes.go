@@ -7,17 +7,23 @@ import (
 
 	"open_live_platform/internal/auth"
 	"open_live_platform/internal/live"
+	"open_live_platform/internal/rtc"
 	"open_live_platform/internal/transport/httpx"
 )
 
 type server struct {
 	accounts    auth.AccountStore
 	rooms       live.RoomStore
+	rtc         rtc.Signer
 	recentChats *sync.Map
 }
 
 func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore) {
-	s := server{accounts: accounts, rooms: rooms, recentChats: &sync.Map{}}
+	RegisterWithRTC(mux, accounts, rooms, rtc.Signer{})
+}
+
+func RegisterWithRTC(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomStore, signer rtc.Signer) {
+	s := server{accounts: accounts, rooms: rooms, rtc: signer, recentChats: &sync.Map{}}
 
 	mux.HandleFunc("GET /healthchecker", health)
 	mux.HandleFunc("GET /health", health)
@@ -47,6 +53,7 @@ func Register(mux *http.ServeMux, accounts auth.AccountStore, rooms live.RoomSto
 	mux.HandleFunc("GET /api/live/room/online", s.authenticated(s.online))
 	mux.HandleFunc("GET /api/live/room/check_password/{room_id}", s.authenticated(s.checkPassword))
 	mux.HandleFunc("POST /api/live/room/join/{room}", s.authenticated(s.joinRoom))
+	mux.HandleFunc("GET /api/live/token/{channel}/{role}", s.authenticated(s.roomToken))
 	mux.HandleFunc("POST /api/live/room/leave/{room}", s.authenticated(roomAction(rooms.Leave)))
 	mux.HandleFunc("POST /api/live/room/kicked/{room}/{uid}", s.authenticated(targetAction(rooms.Kick)))
 	mux.HandleFunc("POST /api/live/room/ban/{room}/{uid}", s.authenticated(s.setMute))

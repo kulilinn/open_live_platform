@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -111,7 +112,7 @@ func (s *Store) Start(ctx context.Context, owner int64, title, password string) 
 			result, err = scanRoom(r.tx.QueryRow(ctx, `INSERT INTO rooms(id,owner_id,title,password_hash,live_id,live_started_at)
 				VALUES($1,$1,$2,$3,nextval('room_live_id_seq'),statement_timestamp()) RETURNING `+roomFields, owner, title, hash))
 		} else {
-			for _, table := range []string{"room_members", "room_admins", "room_mutes", "room_kicks", "room_password_attempts"} {
+			for _, table := range []string{"room_members", "room_admins", "room_mutes", "room_kicks", "room_password_attempts", "room_viewer_nids"} {
 				if _, err := r.tx.Exec(ctx, "DELETE FROM "+table+" WHERE room_id=$1", owner); err != nil {
 					return err
 				}
@@ -192,6 +193,9 @@ func (r *roomChange) close(actor int64) error {
 	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_members WHERE room_id=$1", r.id); err != nil {
 		return err
 	}
+	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_viewer_nids WHERE room_id=$1", r.id); err != nil {
+		return err
+	}
 	_, err = r.tx.Exec(r.ctx, "DELETE FROM room_password_attempts WHERE room_id=$1", r.id)
 	r.event = live.Event{Type: "close", UserID: actor}
 	return err
@@ -262,6 +266,7 @@ func (s *Store) JoinRoom(ctx context.Context, id, uid int64, password string) (l
 			return live.ErrRoomClosed
 		case uid == owner:
 			result, err = scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1", id))
+			result.ViewerNID = live.DefaultAnchorNID
 			return err
 		case kicked:
 			return live.ErrKicked
@@ -290,6 +295,10 @@ func (s *Store) JoinRoom(ctx context.Context, id, uid int64, password string) (l
 			return err
 		}
 		result, err = scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1", id))
+		if err != nil {
+			return err
+		}
+		result.ViewerNID, err = r.viewerNID(result.Session.LiveID, uid)
 		return err
 	})
 	// Return the credential error after committing the failure count.
@@ -300,6 +309,57 @@ func (s *Store) JoinRoom(ctx context.Context, id, uid int64, password string) (l
 		return live.Room{}, err
 	}
 	return result, nil
+}
+
+func (s *Store) RTCNID(ctx context.Context, id, uid int64) (uint32, error) {
+	var nid uint32
+	err := s.change(ctx, id, func(r *roomChange) error {
+		var liveID, owner int64
+		var online, member bool
+		err := r.tx.QueryRow(ctx, `SELECT live_id, owner_id, online,
+			EXISTS(SELECT 1 FROM room_members WHERE room_id=$1 AND user_id=$2)
+			FROM rooms WHERE id=$1`, id, uid).Scan(&liveID, &owner, &online, &member)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return live.ErrRoomNotFound
+		case err != nil:
+			return err
+		case !online:
+			return live.ErrRoomClosed
+		case uid == owner:
+			nid = live.DefaultAnchorNID
+			return nil
+		case !member:
+			return live.ErrNotMember
+		}
+		nid, err = r.viewerNID(liveID, uid)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return nid, nil
+}
+
+// viewerNID runs under the room's transaction lock, including across instances.
+func (r *roomChange) viewerNID(liveID, uid int64) (uint32, error) {
+	var nid uint32
+	err := r.tx.QueryRow(r.ctx, `SELECT nid FROM room_viewer_nids
+		WHERE room_id=$1 AND live_id=$2 AND user_id=$3`, r.id, liveID, uid).Scan(&nid)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nid, err
+	}
+	err = r.tx.QueryRow(r.ctx, `WITH next_nid AS (
+		UPDATE rooms SET last_viewer_nid=last_viewer_nid+1
+		WHERE id=$1 AND live_id=$2 AND last_viewer_nid<$4
+		RETURNING id, live_id, last_viewer_nid
+	) INSERT INTO room_viewer_nids(room_id,live_id,user_id,nid)
+	SELECT id, live_id, $3::bigint, last_viewer_nid FROM next_nid RETURNING nid`,
+		r.id, liveID, uid, int64(math.MaxUint32)).Scan(&nid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, live.ErrViewerNIDExhausted
+	}
+	return nid, err
 }
 
 func (s *Store) Leave(ctx context.Context, id, uid int64) error {
