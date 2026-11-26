@@ -111,7 +111,7 @@ socket.onopen = () => socket.send(JSON.stringify({ type: "chat", text: "你好" 
 
 连接票据在当前服务进程内有效，限 60 秒内发起一次连接，重连时重新领取。已建立的连接可继续收发。通过反向代理提供服务时，把 `RELAY_PUBLIC_URL` 设为客户端可达的基址，例如 `wss://live.example.com`。直接连接服务时默认使用请求的主机及 TLS 状态生成地址。
 
-兼容原浏览器 relay 时，在 WebSocket 请求中声明 `Sec-WebSocket-Protocol: h5relayer`。服务会先发送 `control` 用户帧，聊天使用原版的 `live_chat`、`queue`、`payload` 结构。旧客户端省略子协议时继续使用 Go 的 `type`、`text` 消息格式。当前兼容层先覆盖用户首帧和文本聊天。
+兼容原浏览器 relay 时，在 WebSocket 请求中声明 `Sec-WebSocket-Protocol: h5relayer`。服务会先发送 `control` 用户帧，聊天使用原版的 `live_chat`、`queue`、`payload` 结构。主播主动关播时，H5 连接先收到 `channel: "room_status"`、`msgType: "O"`、状态值 `"0"` 的通知，再收到 WebSocket 正常关闭帧。省略子协议的旧客户端继续使用 Go 的事件格式，关播事件为 `type: "close"`。
 
 房间状态接口沿用 Rust 的 `status/data` 包装。`kicked` 和 `banned` 的 `data` 是布尔值，`limited` 返回 `limit_ty`、`limit_reason`、`limit_allow`、`limit_duration`、`limit_total`。观众接口返回字符串形式的用户 ID，并提供昵称、管理员和禁言状态。
 

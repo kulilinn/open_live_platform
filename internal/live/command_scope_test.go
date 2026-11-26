@@ -20,7 +20,9 @@ func TestRoomCommandsStayInSubscribedBroadcast(t *testing.T) {
 	oldCommands := WithRoomCommandScope(ctx, first.ID, oldSub.LiveID)
 
 	requireError(t, store.Close(ctx, first.ID, ownerID), nil)
-	requireEvent(t, oldSub.Events, Event{Type: "close", RoomID: first.ID, UserID: ownerID})
+	closed, err := store.Info(ctx, first.ID)
+	requireError(t, err, nil)
+	requireEvent(t, oldSub.Events, Event{Type: "close", RoomID: first.ID, UserID: ownerID, CreatedAt: closed.Session.EndedAt})
 	requireClosed(t, oldSub.Events)
 	requireError(t, store.Close(oldCommands, first.ID, ownerID), ErrRoomClosed)
 	requireError(t, store.Close(ctx, first.ID, ownerID), nil)

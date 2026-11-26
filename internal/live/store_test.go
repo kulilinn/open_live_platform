@@ -38,17 +38,42 @@ func TestRoomLifecycle(t *testing.T) {
 
 	requireError(t, store.Close(t.Context(), room.ID, viewer), ErrForbidden)
 	requireError(t, store.Leave(t.Context(), room.ID, owner), nil)
-	requireEvent(t, ownerEvents, Event{Type: "close", RoomID: room.ID, UserID: owner})
-	requireClosed(t, ownerEvents)
 	info, err := store.Info(t.Context(), room.ID)
 	if err != nil || info.Online || info.MemberCount != 0 {
 		t.Fatalf("Info after close = %+v, %v", info, err)
 	}
+	requireEvent(t, ownerEvents, Event{Type: "close", RoomID: room.ID, UserID: owner, CreatedAt: info.Session.EndedAt})
+	requireClosed(t, ownerEvents)
 	requireError(t, store.Join(t.Context(), room.ID, viewer, ""), ErrRoomClosed)
 	newRoom, err := store.Start(t.Context(), owner, "Live again", "")
 	if err != nil || newRoom.ID != room.ID || !newRoom.Online || newRoom.Title != "Live again" {
 		t.Fatalf("Restart = %+v, %v", newRoom, err)
 	}
+}
+
+func TestRoomCloseKeepsTerminalEventWhenChatQueueIsFull(t *testing.T) {
+	store := NewStore()
+	ctx := t.Context()
+	const owner = 1
+	room, err := store.Start(ctx, owner, "Live", "")
+	requireError(t, err, nil)
+	events, cancel, err := store.Subscribe(ctx, room.ID, owner)
+	requireError(t, err, nil)
+	defer cancel()
+	for range EventStreamCapacity - 1 {
+		requireError(t, store.Send(ctx, room.ID, owner, "chat"), nil)
+	}
+	requireError(t, store.Close(ctx, room.ID, owner), nil)
+	for range EventStreamCapacity - 1 {
+		if event := <-events; event.Type != "chat" {
+			t.Fatalf("queued event = %q, want chat", event.Type)
+		}
+	}
+	event, ok := <-events
+	if !ok || event.Type != "close" || event.CreatedAt.IsZero() {
+		t.Fatalf("final event = %+v, open = %v", event, ok)
+	}
+	requireClosed(t, events)
 }
 
 func TestModerationAndChat(t *testing.T) {

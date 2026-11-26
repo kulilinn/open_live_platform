@@ -118,6 +118,21 @@ type Event struct {
 	CreatedAt time.Time `json:"-"`
 }
 
+const EventStreamCapacity = 33 // 32 pending events and one slot for the final close event.
+
+// Enqueue keeps the last slot available for close on a subscription's buffered channel.
+func (event Event) Enqueue(queue chan<- Event) bool {
+	if event.Type != "close" && len(queue) >= cap(queue)-1 {
+		return false
+	}
+	select {
+	case queue <- event:
+		return true
+	default:
+		return false
+	}
+}
+
 // Subscription binds a room's event stream to the broadcast active at authorization.
 type Subscription struct {
 	Events      <-chan Event
@@ -706,7 +721,7 @@ func (s *Store) SubscribeLive(ctx context.Context, roomID, userID int64) (Subscr
 	if !room.hasMember(userID) {
 		return Subscription{}, ErrNotMember
 	}
-	events := make(chan Event, 32)
+	events := make(chan Event, EventStreamCapacity)
 	room.subscribers[events] = userID
 	unsubscribe := func() {
 		s.mu.Lock()
@@ -790,7 +805,7 @@ func (r *roomState) end() {
 	clear(r.members)
 	r.anchorJoined = false
 	r.viewerNIDs = nil
-	r.publish(Event{Type: "close", UserID: r.OwnerID})
+	r.publish(Event{Type: "close", UserID: r.OwnerID, CreatedAt: r.Session.EndedAt})
 	for events := range r.subscribers {
 		r.unsubscribe(events)
 	}
@@ -814,9 +829,7 @@ func (r *roomState) unsubscribe(events chan Event) {
 func (r *roomState) publish(event Event) {
 	event.RoomID = r.ID
 	for events := range r.subscribers {
-		select {
-		case events <- event:
-		default:
+		if !event.Enqueue(events) {
 			r.unsubscribe(events)
 		}
 	}

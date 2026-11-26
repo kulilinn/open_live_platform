@@ -331,22 +331,38 @@ func parseDeviceCommand(raw json.RawMessage) (command, bool) {
 }
 
 func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, event live.Event) any {
+	room := strconv.FormatInt(roomID, 10)
+	if event.Type == "close" {
+		return h5RoomFrame(room, map[string]any{
+			"id":        strconv.FormatInt(event.CreatedAt.UnixNano(), 10),
+			"channel":   "room_status",
+			"room":      room,
+			"priority":  0,
+			"sender":    strconv.FormatInt(event.UserID, 10),
+			"timestamp": strconv.FormatInt(event.CreatedAt.Unix(), 10),
+			"message": map[string]any{
+				"msgGroup": "chat",
+				"msgType":  "O",
+				"message":  "0",
+				"userInfo": map[string]any{
+					"uid": event.UserID, "role": 5, "avatar": nil, "searchName": nil,
+					"name": nil, "country": nil, "userLevel": nil, "fanLevel": nil,
+				},
+			},
+		})
+	}
 	if event.Type != "chat" {
 		return event
 	}
 	if event.Payload != "" {
-		return map[string]any{
-			"content": "live_chat",
-			"queue":   strconv.FormatInt(roomID, 10),
-			"payload": []json.RawMessage{json.RawMessage(event.Payload)},
-		}
+		return h5RoomFrame(room, json.RawMessage(event.Payload))
 	}
 	names, _ := accounts.Names(ctx, []int64{event.UserID})
 	sender := strconv.FormatInt(event.UserID, 10)
 	payload := map[string]any{
 		"id":        strconv.FormatInt(event.MessageID, 10),
 		"channel":   "chat",
-		"room":      strconv.FormatInt(roomID, 10),
+		"room":      room,
 		"priority":  0,
 		"sender":    sender,
 		"timestamp": strconv.FormatInt(event.CreatedAt.Unix(), 10),
@@ -359,9 +375,13 @@ func h5Event(ctx context.Context, accounts auth.AccountStore, roomID int64, even
 			"message": event.Text,
 		},
 	}
+	return h5RoomFrame(room, payload)
+}
+
+func h5RoomFrame(room string, payload any) map[string]any {
 	return map[string]any{
 		"content": "live_chat",
-		"queue":   strconv.FormatInt(roomID, 10),
+		"queue":   room,
 		"payload": []any{payload},
 	}
 }

@@ -196,8 +196,10 @@ func (r *roomChange) close(actor int64) error {
 	if !room.Online {
 		return nil
 	}
-	if _, err = r.tx.Exec(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,
-		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+" WHERE id=$1", r.id); err != nil {
+	var endedAt time.Time
+	if err := r.tx.QueryRow(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,anchor_joined=false,
+		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+
+		" WHERE id=$1 RETURNING live_ended_at", r.id).Scan(&endedAt); err != nil {
 		return err
 	}
 	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_members WHERE room_id=$1", r.id); err != nil {
@@ -207,7 +209,7 @@ func (r *roomChange) close(actor int64) error {
 		return err
 	}
 	_, err = r.tx.Exec(r.ctx, "DELETE FROM room_password_attempts WHERE room_id=$1", r.id)
-	r.event = live.Event{Type: "close", UserID: actor}
+	r.event = live.Event{Type: "close", UserID: actor, CreatedAt: endedAt}
 	return err
 }
 
@@ -602,7 +604,7 @@ func (s *Store) Subscribe(ctx context.Context, id, uid int64) (<-chan live.Event
 }
 
 func (s *Store) SubscribeLive(ctx context.Context, id, uid int64) (live.Subscription, error) {
-	ch := make(chan live.Event, 32)
+	ch := make(chan live.Event, live.EventStreamCapacity)
 	var liveID int64
 	err := s.change(ctx, id, func(r *roomChange) error {
 		if !s.eventReady.Load() {

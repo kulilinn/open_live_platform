@@ -84,12 +84,7 @@ func (s *streams) publish(event live.Event) {
 			continue
 		}
 		disconnect := event.Type == "close" || (event.Type == "kick" && sub.userID == event.TargetID) || (event.Type == "leave" && sub.userID == event.UserID)
-		select {
-		case ch <- event:
-		default:
-			disconnect = true
-		}
-		if disconnect {
+		if !event.Enqueue(ch) || disconnect {
 			delete(listeners, ch)
 			close(ch)
 		}

@@ -110,10 +110,12 @@ func TestPostgresCrossInstanceRoomEvents(t *testing.T) {
 	read(otherEvents, live.Event{}, false)
 
 	check(first.Rooms.Close(ctx, roomID, roomID))
+	closed, err := first.Rooms.Info(ctx, roomID)
+	check(err)
 	_, err = first.Rooms.Start(ctx, roomID, "Reopened", "")
 	check(err)
 	reopened := subscribe(second, roomID)
-	read(hostEvents, live.Event{Type: "close", RoomID: roomID, UserID: roomID}, true)
+	read(hostEvents, live.Event{Type: "close", RoomID: roomID, UserID: roomID, CreatedAt: closed.Session.EndedAt}, true)
 	read(hostEvents, live.Event{}, false)
 	check(first.Rooms.Send(ctx, roomID, roomID, "new broadcast"))
 	read(reopened, chatEvent(roomID, "new broadcast", ""), true)
