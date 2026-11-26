@@ -25,12 +25,13 @@ var (
 )
 
 type Room struct {
-	ID          int64  `json:"id"`
-	OwnerID     int64  `json:"owner_id"`
-	Title       string `json:"title"`
-	Online      bool   `json:"online"`
-	MemberCount int    `json:"member_count"`
-	IsLock      bool   `json:"isLock"`
+	ID          int64       `json:"id"`
+	OwnerID     int64       `json:"owner_id"`
+	Title       string      `json:"title"`
+	Online      bool        `json:"online"`
+	MemberCount int         `json:"member_count"`
+	IsLock      bool        `json:"isLock"`
+	Session     LiveSession `json:"-"`
 }
 
 func (r *Room) UnmarshalJSON(data []byte) error {
@@ -109,6 +110,7 @@ type RoomStore interface {
 	Rooms(ctx context.Context) ([]Room, error)
 	ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64, error)
 	Join(ctx context.Context, roomID, userID int64, password string) error
+	JoinRoom(ctx context.Context, roomID, userID int64, password string) (Room, error)
 	Leave(ctx context.Context, roomID, userID int64) error
 	Members(ctx context.Context, roomID int64) ([]int64, error)
 	Admins(ctx context.Context, roomID int64) ([]int64, error)
@@ -140,12 +142,13 @@ type Store struct {
 	mu            sync.Mutex
 	rooms         map[int64]*roomState
 	lastMessageID int64
+	nextLiveID    int64
 }
 
 var _ RoomStore = (*Store)(nil)
 
 func NewStore() *Store {
-	return &Store{rooms: make(map[int64]*roomState)}
+	return &Store{rooms: make(map[int64]*roomState), nextLiveID: 1 << 32}
 }
 
 // Start opens the creator's room. A new broadcast uses the same room ID.
@@ -179,6 +182,9 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 			Title:   title,
 			Online:  true,
 			IsLock:  len(passwordHash) != 0,
+			Session: LiveSession{
+				LiveID: s.nextLiveID, AnchorNID: DefaultAnchorNID, StartedAt: time.Now().UTC(),
+			},
 		},
 		members:          make(map[int64]struct{}),
 		admins:           make(map[int64]struct{}),
@@ -188,6 +194,7 @@ func (s *Store) Start(ctx context.Context, ownerID int64, title, password string
 		passwordHash:     passwordHash,
 		passwordAttempts: make(map[int64]int),
 	}
+	s.nextLiveID++
 	s.rooms[room.ID] = room
 	return room.snapshot(), nil
 }
@@ -316,6 +323,12 @@ func (s *Store) ListRooms(ctx context.Context, filter RoomFilter) ([]Room, int64
 }
 
 func (s *Store) Join(ctx context.Context, roomID, userID int64, password string) error {
+	_, err := s.JoinRoom(ctx, roomID, userID, password)
+	return err
+}
+
+// JoinRoom joins the user and returns the room snapshot of that broadcast.
+func (s *Store) JoinRoom(ctx context.Context, roomID, userID int64, password string) (Room, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -324,18 +337,18 @@ func (s *Store) Join(ctx context.Context, roomID, userID int64, password string)
 	var passwordMatches bool
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return Room{}, err
 		}
 		room, err := s.onlineRoom(roomID)
 		if err != nil {
-			return err
+			return Room{}, err
 		}
 		if _, kicked := room.kicked[userID]; kicked {
-			return ErrKicked
+			return Room{}, ErrKicked
 		}
 		if room.IsLock && userID != room.OwnerID {
 			if room.passwordAttempts[userID] >= MaxRoomPasswordAttempts {
-				return ErrRoomPasswordLocked
+				return Room{}, ErrRoomPasswordLocked
 			}
 			if checkedRoom != room || !bytes.Equal(checkedHash, room.passwordHash) {
 				checkedRoom, checkedHash = room, room.passwordHash
@@ -347,7 +360,7 @@ func (s *Store) Join(ctx context.Context, roomID, userID int64, password string)
 			}
 			if !passwordMatches {
 				room.passwordAttempts[userID]++
-				return ErrInvalidRoomPassword
+				return Room{}, ErrInvalidRoomPassword
 			}
 			delete(room.passwordAttempts, userID)
 		}
@@ -355,7 +368,7 @@ func (s *Store) Join(ctx context.Context, roomID, userID int64, password string)
 			room.members[userID] = struct{}{}
 			room.publish(Event{Type: "join", UserID: userID})
 		}
-		return nil
+		return room.snapshot(), nil
 	}
 }
 
@@ -636,6 +649,7 @@ func (r *roomState) end() {
 		return
 	}
 	r.Online = false
+	r.Session.EndedAt = time.Now().UTC()
 	r.IsLock = false
 	r.passwordHash = nil
 	r.passwordAttempts = nil

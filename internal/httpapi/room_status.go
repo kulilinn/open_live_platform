@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"open_live_platform/internal/live"
 	"open_live_platform/internal/transport/httpx"
@@ -76,8 +77,9 @@ func (s server) online(w http.ResponseWriter, r *http.Request, userID int64) {
 	if room.Online {
 		online = 1
 	}
+	durationSeconds := int64(room.Session.Duration(time.Now()) / time.Second)
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"status": "200", "data": map[string]any{"online": online, "duration": int64(0)},
+		"status": "200", "data": map[string]any{"online": online, "duration": durationSeconds},
 	})
 }
 

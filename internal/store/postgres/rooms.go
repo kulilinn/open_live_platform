@@ -9,17 +9,28 @@ import (
 	"open_live_platform/internal/live"
 )
 
-const roomQuery = `SELECT id, owner_id, title, online, password_hash IS NOT NULL,
-    (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id)
-    FROM rooms`
+const roomFields = `id, owner_id, title, online, password_hash IS NOT NULL,
+    (SELECT count(*) FROM room_members m WHERE m.room_id = rooms.id),
+    live_id, live_started_at, live_ended_at`
+
+const roomQuery = "SELECT " + roomFields + " FROM rooms"
 
 const advanceHistoryBoundary = `history_after_id=COALESCE((SELECT max(id) FROM room_messages WHERE room_id=$1),0)`
 
 func scanRoom(row pgx.Row) (live.Room, error) {
 	var room live.Room
-	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount)
+	var startedAt, endedAt *time.Time
+	err := row.Scan(&room.ID, &room.OwnerID, &room.Title, &room.Online, &room.IsLock, &room.MemberCount,
+		&room.Session.LiveID, &startedAt, &endedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = live.ErrRoomNotFound
+	}
+	if startedAt != nil {
+		room.Session.StartedAt = startedAt.UTC()
+		room.Session.AnchorNID = live.DefaultAnchorNID
+	}
+	if endedAt != nil {
+		room.Session.EndedAt = endedAt.UTC()
 	}
 	return room, err
 }
@@ -97,16 +108,18 @@ func (s *Store) Start(ctx context.Context, owner int64, title, password string) 
 			return err
 		}
 		if newRoom {
-			_, err = r.tx.Exec(ctx, "INSERT INTO rooms(id,owner_id,title,password_hash) VALUES($1,$1,$2,$3)", owner, title, hash)
+			result, err = scanRoom(r.tx.QueryRow(ctx, `INSERT INTO rooms(id,owner_id,title,password_hash,live_id,live_started_at)
+				VALUES($1,$1,$2,$3,nextval('room_live_id_seq'),statement_timestamp()) RETURNING `+roomFields, owner, title, hash))
 		} else {
 			for _, table := range []string{"room_members", "room_admins", "room_mutes", "room_kicks", "room_password_attempts"} {
 				if _, err := r.tx.Exec(ctx, "DELETE FROM "+table+" WHERE room_id=$1", owner); err != nil {
 					return err
 				}
 			}
-			_, err = r.tx.Exec(ctx, "UPDATE rooms SET online=true,title=$2,password_hash=$3,updated_at=now(),"+advanceHistoryBoundary+" WHERE id=$1", owner, title, hash)
+			result, err = scanRoom(r.tx.QueryRow(ctx, `UPDATE rooms SET online=true,title=$2,password_hash=$3,
+				live_id=nextval('room_live_id_seq'),live_started_at=statement_timestamp(),live_ended_at=NULL,
+				updated_at=statement_timestamp(),`+advanceHistoryBoundary+" WHERE id=$1 RETURNING "+roomFields, owner, title, hash))
 		}
-		result = live.Room{ID: owner, OwnerID: owner, Title: title, Online: true, IsLock: len(hash) > 0}
 		return err
 	})
 	if err != nil {
@@ -172,7 +185,8 @@ func (r *roomChange) close(actor int64) error {
 	if !room.Online {
 		return nil
 	}
-	if _, err = r.tx.Exec(r.ctx, "UPDATE rooms SET online=false,password_hash=NULL,updated_at=now(),"+advanceHistoryBoundary+" WHERE id=$1", r.id); err != nil {
+	if _, err = r.tx.Exec(r.ctx, `UPDATE rooms SET online=false,password_hash=NULL,
+		live_ended_at=statement_timestamp(),updated_at=statement_timestamp(),`+advanceHistoryBoundary+" WHERE id=$1", r.id); err != nil {
 		return err
 	}
 	if _, err = r.tx.Exec(r.ctx, "DELETE FROM room_members WHERE room_id=$1", r.id); err != nil {
@@ -223,6 +237,12 @@ func (r *roomChange) requireMember(uid int64) error {
 }
 
 func (s *Store) Join(ctx context.Context, id, uid int64, password string) error {
+	_, err := s.JoinRoom(ctx, id, uid, password)
+	return err
+}
+
+func (s *Store) JoinRoom(ctx context.Context, id, uid int64, password string) (live.Room, error) {
+	var result live.Room
 	var rejectedPassword bool
 	err := s.change(ctx, id, func(r *roomChange) error {
 		var owner int64
@@ -241,7 +261,8 @@ func (s *Store) Join(ctx context.Context, id, uid int64, password string) error 
 		case !online:
 			return live.ErrRoomClosed
 		case uid == owner:
-			return nil
+			result, err = scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1", id))
+			return err
 		case kicked:
 			return live.ErrKicked
 		}
@@ -265,13 +286,20 @@ func (s *Store) Join(ctx context.Context, id, uid int64, password string) error 
 		if joined {
 			r.event = live.Event{Type: "join", UserID: uid}
 		}
+		if err != nil {
+			return err
+		}
+		result, err = scanRoom(r.tx.QueryRow(ctx, roomQuery+" WHERE id=$1", id))
 		return err
 	})
 	// Return the credential error after committing the failure count.
 	if err == nil && rejectedPassword {
-		return live.ErrInvalidRoomPassword
+		return live.Room{}, live.ErrInvalidRoomPassword
 	}
-	return err
+	if err != nil {
+		return live.Room{}, err
+	}
+	return result, nil
 }
 
 func (s *Store) Leave(ctx context.Context, id, uid int64) error {

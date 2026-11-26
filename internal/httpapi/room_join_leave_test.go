@@ -27,17 +27,33 @@ func TestRustJoinLeaveResponse(t *testing.T) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	start := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/start", owner.Token, map[string]string{"title": "Join"})
+	start := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/start", owner.Token, map[string]string{"subject": "Join"})
 	roomID := itoa(int64(start.Body["id"].(float64)))
+	room, err := rooms.Info(t.Context(), owner.User.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := start.Body["data"].(map[string]any)
+	if start.Code != http.StatusOK || info["anchorNid"] != float64(live.DefaultAnchorNID) ||
+		info["liveId"] != itoa(room.Session.LiveID) || info["liveId"] == roomID {
+		t.Fatalf("Rust start = %d %+v", start.Code, start.Body)
+	}
 	rustJoin := rustRequest(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/join/"+roomID, viewer.Token, map[string]string{}, http.StatusOK)
 	data := rustJoin["data"].(map[string]any)
 	if rustJoin["status"] != "200" || data["room"] == nil || data["languages"] == nil ||
-		data["user"].(map[string]any)["id"] != float64(viewer.User.ID) {
+		data["user"].(map[string]any)["id"] != float64(viewer.User.ID) ||
+		data["startTime"] != float64(room.Session.StartedAt.Unix()) ||
+		data["room"].(map[string]any)["liveId"] != info["liveId"] {
 		t.Fatalf("Rust join = %+v", rustJoin)
 	}
 	rtc := data["rtcToken"].(map[string]any)
 	if rtc["channel"] != roomID || rtc["token"] != "" {
 		t.Fatalf("Rust RTC token = %+v", rtc)
+	}
+	ownerJoin := rustRequest(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/join/"+roomID, owner.Token, nil, http.StatusOK)
+	ownerRTC := ownerJoin["data"].(map[string]any)["rtcToken"].(map[string]any)
+	if ownerRTC["nid"] != itoa(int64(live.DefaultAnchorNID)) || ownerRTC["isAnchor"] != true {
+		t.Fatalf("host RTC fields = %+v", ownerRTC)
 	}
 	rustLeave := rustRequest(t, server.Client(), http.MethodPost, server.URL+"/api/live/room/leave/"+roomID, viewer.Token, nil, http.StatusOK)
 	if rustLeave["status"] != "200" {

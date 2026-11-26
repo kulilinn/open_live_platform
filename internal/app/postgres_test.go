@@ -57,6 +57,80 @@ func postgresTestDatabase(t *testing.T) (app.Config, *pgx.Conn) {
 	return app.Config{DatabaseURL: databaseURL.String(), RelaySecret: rand.Text()}, db
 }
 
+func TestPostgresBroadcastUpgradeAndRestart(t *testing.T) {
+	config, db := postgresTestDatabase(t)
+	ctx := t.Context()
+	check := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	schema, err := os.ReadFile("../store/postgres/migrations/001_core.sql")
+	check(err)
+	_, err = db.Exec(ctx, string(schema))
+	check(err)
+	_, err = db.Exec(ctx, "INSERT INTO users(id,email,account,password_salt,password_hash) VALUES "+
+		"(1,'host@example.org','Host','',''),(2,'offline@example.org','Offline','','')")
+	check(err)
+	legacyStart := time.Unix(1_700_000_000, 0).UTC()
+	_, err = db.Exec(ctx, "INSERT INTO rooms(id,owner_id,title,online,updated_at) VALUES "+
+		"(1,1,'Existing broadcast',true,$1),(2,2,'Old room',false,$1)", legacyStart)
+	check(err)
+
+	start := func() *app.App {
+		t.Helper()
+		platform, err := app.New(ctx, config)
+		check(err)
+		t.Cleanup(platform.Close)
+		return platform
+	}
+	first := start()
+	initial, err := first.Rooms.Info(ctx, 1)
+	check(err)
+	if initial.Session.LiveID <= 1<<32-1 || initial.Session.StartedAt != legacyStart ||
+		initial.Session.AnchorNID != live.DefaultAnchorNID || !initial.Session.EndedAt.IsZero() {
+		t.Fatalf("upgraded broadcast = %+v", initial)
+	}
+	inactive, err := first.Rooms.Info(ctx, 2)
+	check(err)
+	if inactive.Session != (live.LiveSession{}) {
+		t.Fatalf("legacy offline room = %+v", inactive)
+	}
+	first.Close()
+
+	second := start()
+	retried, err := second.Rooms.Start(ctx, 1, "Retry", "")
+	check(err)
+	if retried != initial {
+		t.Fatalf("retried after restart = %+v; want %+v", retried, initial)
+	}
+	joined, err := second.Rooms.JoinRoom(ctx, 1, 2, "")
+	check(err)
+	if joined.Session != initial.Session || joined.MemberCount != 1 {
+		t.Fatalf("joined = %+v", joined)
+	}
+	check(second.Rooms.Close(ctx, 1, 1))
+	closed, err := second.Rooms.Info(ctx, 1)
+	check(err)
+	if closed.Online || closed.Session.LiveID != initial.Session.LiveID ||
+		!closed.Session.EndedAt.After(initial.Session.StartedAt) {
+		t.Fatalf("closed broadcast = %+v", closed)
+	}
+	check(second.Rooms.Close(ctx, 1, 1))
+	stillClosed, err := second.Rooms.Info(ctx, 1)
+	check(err)
+	if stillClosed != closed {
+		t.Fatalf("repeated close changed broadcast = %+v", stillClosed)
+	}
+	reopened, err := second.Rooms.Start(ctx, 1, "New broadcast", "")
+	check(err)
+	if !reopened.Online || reopened.Session.LiveID <= initial.Session.LiveID ||
+		reopened.Session.StartedAt.Before(closed.Session.EndedAt) || !reopened.Session.EndedAt.IsZero() {
+		t.Fatalf("reopened broadcast = %+v", reopened)
+	}
+}
+
 func TestPostgresRoomListing(t *testing.T) {
 	config, _ := postgresTestDatabase(t)
 	ctx := t.Context()
@@ -91,7 +165,8 @@ func TestPostgresRoomListing(t *testing.T) {
 
 	first := start("first", "")
 	check(store.Close(ctx, first.ID, first.OwnerID))
-	first.Online = false
+	first, err = store.Info(ctx, first.ID)
+	check(err)
 	second := start("second", "room password")
 	third := start("third", "")
 	check(store.Join(ctx, second.ID, first.OwnerID, "room password"))
@@ -113,7 +188,8 @@ func TestPostgresRoomListing(t *testing.T) {
 	}
 
 	check(store.Close(ctx, second.ID, second.OwnerID))
-	second.Online, second.IsLock, second.MemberCount = false, false, 0
+	second, err = store.Info(ctx, second.ID)
+	check(err)
 	reopened, err := store.Start(ctx, first.OwnerID, "reopened", "")
 	check(err)
 	assertList(live.RoomFilter{Online: &online, Page: 1, PageSize: 2}, 1, reopened, third)
@@ -386,7 +462,7 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 		rooms := platform.Rooms
 		_, err := rooms.UpdateSettings(ctx, ownerID, &newTitle, &newPassword)
 		check(err, live.ErrRoomNotFound)
-		_, err = rooms.Start(ctx, ownerID, "Initial title", oldPassword)
+		initial, err := rooms.Start(ctx, ownerID, "Initial title", oldPassword)
 		check(err, nil)
 		check(rooms.Join(ctx, ownerID, memberID, oldPassword), nil)
 		check(rooms.SetAdmin(ctx, ownerID, ownerID, memberID, true), nil)
@@ -413,7 +489,8 @@ func TestPostgresUpdateRoomSettingsAndRestart(t *testing.T) {
 		}
 		updated, err = rooms.UpdateSettings(ctx, ownerID, &newTitle, &newPassword)
 		check(err, nil)
-		want := live.Room{ID: ownerID, OwnerID: ownerID, Title: newTitle, Online: true, IsLock: true, MemberCount: 1}
+		want := initial
+		want.Title, want.MemberCount = newTitle, 1
 		if updated != want {
 			t.Fatalf("updated room = %+v, want %+v", updated, want)
 		}

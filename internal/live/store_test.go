@@ -246,7 +246,8 @@ func TestUpdateSettingsKeepsBroadcastAndSubscriptions(t *testing.T) {
 	newTitle, newPassword := "  Live again  ", " new password "
 	updated, err = store.UpdateSettings(ctx, owner, &newTitle, &newPassword)
 	requireError(t, err, nil)
-	want := Room{ID: room.ID, OwnerID: owner, Title: newTitle, Online: true, MemberCount: 1, IsLock: true}
+	want := room
+	want.Title, want.MemberCount = newTitle, 1
 	if updated != want {
 		t.Fatalf("password update = %+v, want %+v", updated, want)
 	}

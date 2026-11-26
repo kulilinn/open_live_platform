@@ -46,7 +46,8 @@ func TestListRooms(t *testing.T) {
 		requireError(t, err, nil)
 		if id == 1 || id == 3 {
 			requireError(t, store.Close(ctx, id, id), nil)
-			room.Online = false
+			room, err = store.Info(ctx, id)
+			requireError(t, err, nil)
 		}
 		if id == 2 {
 			requireError(t, store.Join(ctx, id, 6, ""), nil)

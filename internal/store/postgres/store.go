@@ -24,6 +24,9 @@ var roomChatHistorySchema string
 //go:embed migrations/004_user_language.sql
 var userLanguageSchema string
 
+//go:embed migrations/005_live_session.sql
+var liveSessionSchema string
+
 type Store struct {
 	pool         *pgxpool.Pool
 	eventChannel string
@@ -58,7 +61,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(733516, 1)"); err != nil {
 			return err
 		}
-		for _, migration := range []string{schema, roomPasswordsSchema, roomChatHistorySchema, userLanguageSchema} {
+		for _, migration := range []string{schema, roomPasswordsSchema, roomChatHistorySchema, userLanguageSchema, liveSessionSchema} {
 			if _, err := tx.Exec(ctx, migration); err != nil {
 				return err
 			}

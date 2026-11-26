@@ -9,12 +9,8 @@ import (
 	"open_live_platform/internal/transport/httpx"
 )
 
-func (s server) roomInfo(ctx context.Context, userID, roomID int64) (map[string]any, error) {
-	room, err := s.rooms.Info(ctx, roomID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.rooms.Members(ctx, roomID)
+func (s server) roomInfo(ctx context.Context, userID int64, room live.Room) (map[string]any, error) {
+	members, err := s.rooms.Members(ctx, room.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -39,12 +35,12 @@ func (s server) roomInfo(ctx context.Context, userID, roomID int64) (map[string]
 	return map[string]any{
 		"id": room.ID, "owner_id": room.OwnerID,
 		"room": roomIDText, "name": ownerName, "avatar": "",
-		"fansCount": 0, "anchor": roomIDText, "anchorNid": 0,
+		"fansCount": 0, "anchor": strconv.FormatInt(room.OwnerID, 10), "anchorNid": room.Session.AnchorNID,
 		"banner": "", "subject": room.Title, "title": room.Title,
 		"tag": "", "description": "", "online": online, "activity": 0,
-		"members": memberIDs, "memberCount": len(members), "member_count": len(members),
+		"members": memberIDs, "memberCount": room.MemberCount, "member_count": room.MemberCount,
 		"isAnchor": userID == room.OwnerID, "showing": false,
-		"chatId": roomIDText, "liveId": roomIDText, "gifts": []any{}, "plan": []any{},
+		"chatId": roomIDText, "liveId": strconv.FormatInt(room.Session.LiveID, 10), "gifts": []any{}, "plan": []any{},
 		"offlineInfo": "", "limited": false, "limitedTime": nil, "fans": []any{},
 		"area": "", "toyLabel": false, "hotLabel": "", "systemMessages": []any{},
 		"teacherLabel": "", "ticketLabel": "", "role": role, "silence": false,
@@ -64,7 +60,7 @@ func (s server) infoRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		httpx.LiveError(w, err)
 		return
 	}
-	info, err := s.roomInfo(r.Context(), userID, roomID)
+	info, err := s.roomInfo(r.Context(), userID, room)
 	if err != nil {
 		httpx.LiveError(w, err)
 		return

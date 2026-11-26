@@ -36,7 +36,7 @@ func (s server) startRoom(w http.ResponseWriter, r *http.Request, userID int64) 
 		return
 	}
 	if input.Subject != nil && input.Title == nil {
-		info, infoErr := s.roomInfo(r.Context(), userID, room.ID)
+		info, infoErr := s.roomInfo(r.Context(), userID, room)
 		if infoErr != nil {
 			httpx.Error(w, http.StatusInternalServerError, "could not build room response")
 			return
@@ -62,19 +62,24 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	err := s.rooms.Join(r.Context(), roomID, userID, input.Password)
 	if !rustRoomCompat(r) {
-		liveResult(w, err)
+		liveResult(w, s.rooms.Join(r.Context(), roomID, userID, input.Password))
 		return
 	}
+	room, err := s.rooms.JoinRoom(r.Context(), roomID, userID, input.Password)
 	if err != nil {
 		rustRoomError(w, err, "4005")
 		return
 	}
-	info, err := s.roomInfo(r.Context(), userID, roomID)
+	info, err := s.roomInfo(r.Context(), userID, room)
 	if err != nil {
 		rustRoomError(w, err, "4005")
 		return
+	}
+	nid := strconv.FormatInt(userID, 10)
+	isAnchor := userID == room.OwnerID
+	if isAnchor {
+		nid = strconv.FormatUint(uint64(room.Session.AnchorNID), 10)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"status": "200",
@@ -84,10 +89,10 @@ func (s server) joinRoom(w http.ResponseWriter, r *http.Request, userID int64) {
 			"user":      map[string]any{"id": userID},
 			"rtcToken": map[string]any{
 				"appid": "", "channel": strconv.FormatInt(roomID, 10),
-				"uid": strconv.FormatInt(userID, 10), "nid": strconv.FormatInt(userID, 10),
-				"token": "", "isAnchor": userID == roomID,
+				"uid": strconv.FormatInt(userID, 10), "nid": nid,
+				"token": "", "isAnchor": isAnchor,
 			},
-			"startTime": time.Now().Unix(),
+			"startTime": room.Session.StartedAt.Unix(),
 		},
 	})
 }
@@ -110,7 +115,7 @@ func (s server) updateRoomSettings(w http.ResponseWriter, r *http.Request, userI
 		httpx.LiveError(w, err)
 		return
 	}
-	info, infoErr := s.roomInfo(r.Context(), userID, room.ID)
+	info, infoErr := s.roomInfo(r.Context(), userID, room)
 	if infoErr != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not build room response")
 		return

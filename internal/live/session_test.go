@@ -5,33 +5,43 @@ import (
 	"time"
 )
 
-func TestLiveSessionStoreCreatesIndependentBroadcasts(t *testing.T) {
-	store := NewLiveSessionStore()
-	start := time.Date(2026, time.November, 26, 9, 0, 0, 0, time.UTC)
-	first := store.Start(42, 0, start)
-	if first.RoomID != 42 || first.LiveID != 1 || first.AnchorNID != DefaultAnchorNID || !first.StartedAt.Equal(start) {
-		t.Fatalf("first session = %+v", first)
+func TestRoomBroadcastLifecycle(t *testing.T) {
+	store := NewStore()
+	ctx := t.Context()
+	const owner, viewer = 42, 43
+	first, err := store.Start(ctx, owner, "First broadcast", "")
+	requireError(t, err, nil)
+	if first.Session.LiveID <= 1<<32-1 || first.Session.AnchorNID != DefaultAnchorNID || first.Session.StartedAt.IsZero() ||
+		!first.Session.EndedAt.IsZero() {
+		t.Fatalf("first session = %+v", first.Session)
 	}
-	if got, ok := store.Get(42); !ok || got != first {
-		t.Fatalf("stored first session = %+v, %v", got, ok)
-	}
-	ended, ok := store.End(42)
-	if !ok || ended != first {
-		t.Fatalf("ended first session = %+v, %v", ended, ok)
-	}
-	second := store.Start(42, 200000099, start.Add(time.Hour))
-	if second.RoomID != 42 || second.LiveID != 2 || second.AnchorNID != 200000099 ||
-		!second.StartedAt.Equal(start.Add(time.Hour)) {
-		t.Fatalf("second session = %+v", second)
-	}
-	if _, ok := store.Get(42); !ok {
-		t.Fatal("second session missing")
-	}
-}
 
-func TestLiveSessionStoreEndMissingRoom(t *testing.T) {
-	store := NewLiveSessionStore()
-	if _, ok := store.End(99); ok {
-		t.Fatal("missing session reported as ended")
+	same, err := store.Start(ctx, owner, "Retry", "")
+	requireError(t, err, nil)
+	if same != first {
+		t.Fatalf("retry changed the open broadcast: %+v", same)
+	}
+	joined, err := store.JoinRoom(ctx, first.ID, viewer, "")
+	requireError(t, err, nil)
+	if joined.Session != first.Session || joined.MemberCount != 1 {
+		t.Fatalf("joined room = %+v", joined)
+	}
+
+	requireError(t, store.Leave(ctx, first.ID, owner), nil)
+	closed, err := store.Info(ctx, first.ID)
+	requireError(t, err, nil)
+	if closed.Online || closed.Session.LiveID != first.Session.LiveID ||
+		closed.Session.EndedAt.Before(closed.Session.StartedAt) {
+		t.Fatalf("closed broadcast = %+v", closed)
+	}
+	duration := closed.Session.EndedAt.Sub(first.Session.StartedAt)
+	if got := closed.Session.Duration(closed.Session.EndedAt.Add(time.Hour)); got != duration {
+		t.Fatalf("ended duration = %v; want %v", got, duration)
+	}
+	second, err := store.Start(ctx, owner, "Second broadcast", "")
+	requireError(t, err, nil)
+	if second.ID != first.ID || second.Session.LiveID == first.Session.LiveID || !second.Session.EndedAt.IsZero() ||
+		second.Session.StartedAt.Before(closed.Session.EndedAt) {
+		t.Fatalf("second broadcast = %+v", second)
 	}
 }
