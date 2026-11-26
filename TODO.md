@@ -35,7 +35,7 @@
 
 ## 账号和用户
 
-- [ ] `/api/user/{user_id}`、`/api/user/me`
+- [x] `/api/user/{user_id}`、`/api/user/me`
 - [ ] 用户语言、状态、资料和头像字段
 - [ ] 密码重置、修改密码、邮箱验证码
 - [ ] 第三方登录和 token exchange

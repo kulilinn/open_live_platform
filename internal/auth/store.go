@@ -35,6 +35,7 @@ type AccountStore interface {
 	Lookup(ctx context.Context, token string) (User, bool, error)
 	Bearer(ctx context.Context, authorization string) (User, bool, error)
 	Revoke(ctx context.Context, token string) error
+	Find(ctx context.Context, id int64) (User, bool, error)
 	Users(ctx context.Context) ([]User, error)
 	Names(ctx context.Context, ids []int64) (map[int64]string, error)
 }
@@ -144,6 +145,20 @@ func (s *Store) Revoke(ctx context.Context, token string) error {
 	delete(s.sessions, token)
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *Store) Find(ctx context.Context, id int64) (User, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return User{}, false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, login := range s.users {
+		if login.user.ID == id {
+			return login.user, true, nil
+		}
+	}
+	return User{}, false, nil
 }
 
 func (s *Store) Users(ctx context.Context) ([]User, error) {

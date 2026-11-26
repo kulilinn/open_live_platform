@@ -106,6 +106,17 @@ func (s *Store) Revoke(ctx context.Context, token string) error {
 	return err
 }
 
+func (s *Store) Find(ctx context.Context, id int64) (auth.User, bool, error) {
+	var user auth.User
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, email, account FROM users WHERE id = $1`, id,
+	).Scan(&user.ID, &user.Email, &user.Account)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return auth.User{}, false, nil
+	}
+	return user, err == nil, err
+}
+
 func (s *Store) Users(ctx context.Context) ([]auth.User, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, email, account FROM users ORDER BY id`)
 	if err != nil {
